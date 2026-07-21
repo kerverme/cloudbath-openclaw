@@ -5,7 +5,7 @@
     "dockerfilePath": "deploy/cloudbath/railway/Dockerfile"
   },
   "deploy": {
-    "startCommand": "node openclaw.mjs gateway --allow-unconfigured --bind lan --port 8080",
+    "startCommand": "/bin/sh -lc 'node /app/openclaw.mjs config set gateway.controlUi.allowedOrigins \"[\\\"https://cloudbath-openclaw-production.up.railway.app\\\"]\" --strict-json && exec node /app/openclaw.mjs gateway --allow-unconfigured --bind lan --port \"${PORT:-8080}\"'",
     "healthcheckPath": "/health",
     "healthcheckTimeout": 300,
     "restartPolicyType": "ON_FAILURE",
