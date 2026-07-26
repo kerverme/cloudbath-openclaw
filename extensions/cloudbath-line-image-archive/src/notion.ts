@@ -1,7 +1,13 @@
 import { isRetryableStatus, withBoundedRetry } from "./retry.js";
+import {
+  NOTION_API_VERSION,
+  NOTION_REQUIRED_PROPERTIES,
+  type NotionPropertyDefinition,
+  validateNotionArchiveProperties,
+} from "./notion-schema.js";
 import type { ArchiveConfig, ArchiveMetadata, NotionWriteResult, SafeLogger } from "./types.js";
 
-const NOTION_VERSION = "2026-03-11";
+const NOTION_VERSION = NOTION_API_VERSION;
 const NOTION_BASE_URL = "https://api.notion.com";
 const MAX_RICH_TEXT_LENGTH = 1_900;
 
@@ -12,7 +18,7 @@ type NotionDatabaseResponse = {
 };
 
 type NotionDataSourceResponse = {
-  properties?: Record<string, { type?: string }>;
+  properties?: Record<string, NotionPropertyDefinition>;
 };
 
 type NotionQueryResponse = {
@@ -33,28 +39,6 @@ class NotionHttpError extends Error {
     this.name = "NotionHttpError";
   }
 }
-
-const REQUIRED_PROPERTIES: ReadonlyArray<readonly [string, string]> = [
-  ["Name", "title"],
-  ["Received At", "date"],
-  ["LINE Message ID", "rich_text"],
-  ["LINE Webhook Event ID", "rich_text"],
-  ["LINE Group ID", "rich_text"],
-  ["LINE User ID", "rich_text"],
-  ["Sender Name", "rich_text"],
-  ["Original Filename", "rich_text"],
-  ["MIME Type", "rich_text"],
-  ["File Size", "number"],
-  ["SHA-256", "rich_text"],
-  ["R2 Object Key", "rich_text"],
-  ["AI Description", "rich_text"],
-  ["Category", "select"],
-  ["Tags", "multi_select"],
-  ["Vendor", "rich_text"],
-  ["Amount", "number"],
-  ["Status", "select"],
-  ["Error", "rich_text"],
-];
 
 function richText(content: string | undefined): { rich_text: unknown[] } {
   const trimmed = content?.trim().slice(0, MAX_RICH_TEXT_LENGTH) ?? "";
@@ -157,12 +141,9 @@ export class NotionArchiveClient {
     const dataSource = await this.request<NotionDataSourceResponse>(
       `/v1/data_sources/${encodeURIComponent(dataSourceId)}`,
     );
-    const properties = dataSource.properties ?? {};
-    const invalid = REQUIRED_PROPERTIES.filter(
-      ([name, type]) => properties[name]?.type !== type,
-    ).map(([name, type]) => `${name} (${type})`);
-    if (invalid.length > 0) {
-      throw new Error(`Notion data source is missing required properties: ${invalid.join(", ")}`);
+    const issues = validateNotionArchiveProperties(dataSource.properties ?? {});
+    if (issues.length > 0) {
+      throw new Error(`Notion data source schema is incompatible: ${issues.join("; ")}`);
     }
   }
 
@@ -244,4 +225,7 @@ export class NotionArchiveClient {
   }
 }
 
-export { NOTION_VERSION, REQUIRED_PROPERTIES };
+export {
+  NOTION_VERSION,
+  NOTION_REQUIRED_PROPERTIES as REQUIRED_PROPERTIES,
+};
