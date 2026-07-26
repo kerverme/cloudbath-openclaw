@@ -1,0 +1,27 @@
+{
+  "name": "@openclaw/cloudbath-line-image-archive",
+  "version": "2026.7.2",
+  "private": true,
+  "description": "Archive authorized LINE group images to Cloudflare R2 and Notion.",
+  "type": "module",
+  "dependencies": {
+    "@aws-sdk/client-s3": "3.1078.0"
+  },
+  "devDependencies": {
+    "@openclaw/plugin-sdk": "workspace:*",
+    "openclaw": "workspace:*"
+  },
+  "peerDependencies": {
+    "openclaw": ">=2026.7.2"
+  },
+  "peerDependenciesMeta": {
+    "openclaw": {
+      "optional": true
+    }
+  },
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}
