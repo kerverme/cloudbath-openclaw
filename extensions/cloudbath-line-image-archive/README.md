@@ -50,7 +50,7 @@ in the repository.
 | `R2_ENDPOINT`                      | No       | HTTPS S3 endpoint; derived from the account ID when omitted. |
 | `R2_KEY_PREFIX`                    | No       | Optional sanitized prefix before `line/`.                    |
 | `NOTION_API_KEY`                   | Yes      | Existing Notion integration token.                           |
-| `NOTION_DATABASE_ID`               | Yes      | Existing Notion database containing exactly one data source. |
+| `NOTION_DATABASE_ID`               | Yes      | Database ID returned or validated by the one-time setup.     |
 
 Enable the plugin in OpenClaw configuration:
 
@@ -66,10 +66,47 @@ Enable the plugin in OpenClaw configuration:
 }
 ```
 
+## One-time Notion setup
+
+The setup script is an operator command. OpenClaw does not import or run it during gateway startup,
+Railway deployment, or normal image processing.
+
+1. In Notion, open **Settings → Connections → Develop or manage integrations** and create an
+   internal integration for Cloudbath. Give it read-content and insert-content capabilities.
+2. Create or choose the Notion page that should contain the archive database. Open **Share** on
+   that page, select **Connections**, and add the new integration.
+3. Store the integration token in a local shell or secret manager as `NOTION_API_KEY`. Store the
+   shared parent page ID as `NOTION_PARENT_PAGE_ID`. Never add either value to the repository.
+4. From the OpenClaw repository root, run:
+
+   ```bash
+   NOTION_API_KEY="$NOTION_API_KEY" \
+   NOTION_PARENT_PAGE_ID="$NOTION_PARENT_PAGE_ID" \
+   pnpm exec tsx scripts/cloudbath/setup-notion-image-archive.ts
+   ```
+
+The command looks beneath the shared parent page for an existing child database named exactly
+`Cloudbath LINE Image Archive`. It validates and reuses one matching database. It creates one
+database with the required schema only when no match exists, then prints the database ID and data
+source ID without printing the integration token.
+
+To validate a known database without changing it, share the database with the integration and run:
+
+```bash
+NOTION_API_KEY="$NOTION_API_KEY" \
+NOTION_DATABASE_ID="$NOTION_DATABASE_ID" \
+pnpm exec tsx scripts/cloudbath/setup-notion-image-archive.ts
+```
+
+After successful setup, copy the reported database ID into the existing Railway service as
+`NOTION_DATABASE_ID`. Store the same integration token as `NOTION_API_KEY`. Do not add
+`NOTION_PARENT_PAGE_ID` to the OpenClaw runtime unless it is also needed for a separate manual
+setup operation.
+
 ## Notion data source requirements
 
 The plugin uses Notion API version `2026-03-11`. `NOTION_DATABASE_ID` must reference a database
-with exactly one data source. Share that database with the integration and create these properties
+with exactly one data source. The setup script creates, or validation requires, these properties
 with the exact names and types:
 
 | Property                | Type         |
