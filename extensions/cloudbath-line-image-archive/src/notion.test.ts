@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { NOTION_VERSION, NotionArchiveClient, REQUIRED_PROPERTIES } from "./notion.js";
+import { NOTION_STATUS_OPTIONS } from "./notion-schema.js";
 import type { ArchiveMetadata, SafeLogger } from "./types.js";
 
 const logger: SafeLogger = {
@@ -33,7 +34,19 @@ function metadata(): ArchiveMetadata {
 
 function schema() {
   return {
-    properties: Object.fromEntries(REQUIRED_PROPERTIES.map(([name, type]) => [name, { type }])),
+    properties: Object.fromEntries(
+      REQUIRED_PROPERTIES.map(([name, type]) => [
+        name,
+        name === "Status"
+          ? {
+              type,
+              select: {
+                options: NOTION_STATUS_OPTIONS.map((optionName) => ({ name: optionName })),
+              },
+            }
+          : { type },
+      ]),
+    ),
   };
 }
 
