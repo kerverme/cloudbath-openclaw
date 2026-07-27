@@ -1,4 +1,4 @@
-import crypto, { type BinaryLike } from "node:crypto";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
@@ -103,7 +103,7 @@ async function sha256File(filePath: string): Promise<string> {
   const hash = crypto.createHash("sha256");
   await new Promise<void>((resolve, reject) => {
     const stream = fs.createReadStream(filePath);
-    stream.on("data", (chunk) => hash.update(chunk as BinaryLike));
+    stream.on("data", (chunk: Buffer) => hash.update(chunk));
     stream.once("error", reject);
     stream.once("end", resolve);
   });
@@ -118,7 +118,7 @@ function canonicalIdentityValue(value: unknown): string {
     return JSON.stringify(value);
   }
   if (Array.isArray(value)) {
-    return JSON.stringify([...value].map(canonicalIdentityValue).sort());
+    return JSON.stringify([...value].map(canonicalIdentityValue).toSorted());
   }
   throw new Error("Record identity property must be a scalar or array");
 }
@@ -156,6 +156,7 @@ function acknowledgementFor(status: ProcessingStatus): string {
     case "NEW":
       return "Image archive processing started.";
   }
+  throw new Error("Unsupported processing status");
 }
 
 export class ArchivePipeline {
@@ -177,7 +178,7 @@ export class ArchivePipeline {
     const work = this.tail.then(async () => {
       await this.process(record, agentProfile, schemaProfile, acknowledge);
     });
-    this.tail = work.catch((error) => {
+    this.tail = work.catch((error: unknown) => {
       this.deps.logger.error("archive_worker_failed", {
         agentProfileId: agentProfile.id,
         messageId: record.job.messageId,
