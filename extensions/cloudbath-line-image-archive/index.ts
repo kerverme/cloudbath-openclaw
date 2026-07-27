@@ -1,13 +1,20 @@
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-types";
 import type { OpenClawPluginApi, PluginLogger } from "openclaw/plugin-sdk/plugin-entry";
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
-import { analyzeImageWithCurrentModel } from "./src/analysis.js";
+import { extractSchemaFieldsWithCurrentModel } from "./src/analysis.js";
 import { resolveArchiveConfig } from "./src/config.js";
-import { extractInboundLineImage, isAuthorizedLineGroup } from "./src/inbound.js";
+import { extractInboundLineImage } from "./src/inbound.js";
 import { NotionArchiveClient } from "./src/notion.js";
 import { ArchivePipeline } from "./src/pipeline.js";
+import { resolveSchemaForAgent } from "./src/profiles.js";
 import { R2ArchiveClient } from "./src/r2.js";
-import type { ArchiveConfig, InboundImageJob, SafeLogger } from "./src/types.js";
+import type {
+  AgentProfile,
+  ArchiveConfig,
+  InboundImageJob,
+  SafeLogger,
+  SchemaProfile,
+} from "./src/types.js";
 
 function structuredLogger(logger: PluginLogger): SafeLogger {
   const write =
@@ -52,7 +59,7 @@ async function sendLineAcknowledgement(
 export default definePluginEntry({
   id: "cloudbath-line-image-archive",
   name: "Cloudbath LINE Image Archive",
-  description: "Archives authorized LINE group images to private R2 storage and Notion",
+  description: "Archives universal LINE image assets and profile-scoped Notion records",
   register(api: OpenClawPluginApi) {
     const logger = structuredLogger(api.logger);
     let pipeline: ArchivePipeline | undefined;
@@ -61,28 +68,38 @@ export default definePluginEntry({
     api.registerService({
       id: "cloudbath-line-image-archive",
       start: async (ctx) => {
-        const config = resolveArchiveConfig(process.env);
+        const config = resolveArchiveConfig(process.env, api.pluginConfig ?? {});
         if (!config.enabled) {
           logger.info("archive_disabled");
           return;
         }
         activeConfig = config;
         const store = api.runtime.state.openKeyedStore({
-          namespace: "archive-jobs",
+          namespace: "archive-jobs-v2",
           maxEntries: 100_000,
           overflowPolicy: "evict-oldest",
         });
-        const r2 = new R2ArchiveClient(config.r2, config.retry, logger);
-        const notion = new NotionArchiveClient(config.notion, config.retry, logger);
         pipeline = new ArchivePipeline({
           config,
           stateDir: ctx.stateDir,
           store,
-          r2,
-          notion,
+          r2: new R2ArchiveClient(config.r2, config.retry, logger),
+          notion: new NotionArchiveClient(config.notion.apiKey, config.retry, logger),
           logger,
-          analyze: config.analysisEnabled
-            ? async (job, filePath) => await analyzeImageWithCurrentModel({ api, job, filePath })
+          extract: config.analysisEnabled
+            ? async (
+                job: InboundImageJob,
+                filePath: string,
+                agentProfile: AgentProfile,
+                schemaProfile: SchemaProfile,
+              ) =>
+                await extractSchemaFieldsWithCurrentModel({
+                  api,
+                  job,
+                  filePath,
+                  agentProfile,
+                  schemaProfile,
+                })
             : undefined,
           sendAcknowledgement: async (job, text) => {
             await sendLineAcknowledgement(api, job, text);
@@ -90,7 +107,11 @@ export default definePluginEntry({
         });
         const recovered = await pipeline.recoverIncomplete();
         logger.info("archive_started", {
-          allowedGroupCount: config.allowedGroupIds.size,
+          activeAgentProfileCount: config.profiles.agentProfiles.filter(
+            (profile) => profile.active,
+          ).length,
+          authorizedGroupCount: config.profiles.activeProfilesByGroupId.size,
+          schemaProfileCount: config.profiles.schemaProfiles.length,
           analysisEnabled: config.analysisEnabled,
           recovered,
         });
@@ -115,18 +136,24 @@ export default definePluginEntry({
         if (!job) {
           return;
         }
-        if (!isAuthorizedLineGroup(job.groupId, config.allowedGroupIds)) {
-          logger.info("unauthorized_group_ignored", {
+        const agentProfile = config.profiles.activeProfilesByGroupId.get(job.groupId);
+        if (!agentProfile) {
+          logger.info("unrouted_group_ignored", {
             messageId: job.messageId,
             groupId: job.groupId,
           });
           return;
         }
-        await activePipeline.enqueue(job);
+        const schemaProfile = resolveSchemaForAgent(config.profiles, agentProfile);
+        await activePipeline.enqueue(job, agentProfile, schemaProfile);
       },
       { timeoutMs: 10_000 },
     );
   },
 });
 
-export { extractInboundLineImage, resolveArchiveConfig };
+export {
+  extractInboundLineImage,
+  resolveArchiveConfig,
+  resolveSchemaForAgent,
+};
