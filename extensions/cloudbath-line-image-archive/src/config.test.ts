@@ -99,10 +99,7 @@ describe("resolveArchiveConfig", () => {
 
   it("rejects non-HTTPS R2 endpoints", () => {
     expect(() =>
-      resolveArchiveConfig(
-        enabledEnv({ R2_ENDPOINT: "http://example.invalid" }),
-        pluginConfig(),
-      ),
+      resolveArchiveConfig(enabledEnv({ R2_ENDPOINT: "http://example.invalid" }), pluginConfig()),
     ).toThrow("HTTPS");
   });
 });
