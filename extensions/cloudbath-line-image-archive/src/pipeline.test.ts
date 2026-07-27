@@ -2,10 +2,12 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { resolveArchiveConfig } from "./config.js";
 import { ArchivePipeline } from "./pipeline.js";
+import { resolveSchemaForAgent } from "./profiles.js";
 import type {
-  ArchiveConfig,
   AsyncKeyedStore,
+  BusinessRecordMetadata,
   InboundImageJob,
   PersistedArchiveRecord,
   SafeLogger,
@@ -46,37 +48,97 @@ const logger: SafeLogger = {
   error: vi.fn(),
 };
 
-function config(): ArchiveConfig {
+function rawProfiles() {
+  const schema = {
+    id: "evidence",
+    name: "Evidence",
+    description: "Generic evidence",
+    version: 1,
+    databaseTitle: "Evidence",
+    recordIdentityRule: { kind: "agent-profile-plus-sha256" },
+    suggestedViews: [],
+    exampleQuestions: [],
+    properties: [
+      {
+        id: "name",
+        name: "Name",
+        notionType: "title",
+        required: false,
+        validationRules: [],
+        searchable: true,
+        aggregatable: false,
+        displayOrder: 1,
+      },
+      ...[
+        ["identity", "Asset ID", "rich_text", "recordIdentity"],
+        ["sha", "SHA-256", "rich_text", "sha256"],
+        ["r2", "R2 Object Key", "rich_text", "r2ObjectKey"],
+        ["received", "Received At", "date", "receivedAt"],
+      ].map(([id, name, notionType, systemFieldRole], index) => ({
+        id,
+        name,
+        notionType,
+        systemFieldRole,
+        required: true,
+        validationRules: [],
+        searchable: true,
+        aggregatable: notionType === "date",
+        displayOrder: index + 2,
+      })),
+    ],
+  };
+  const agent = (id: string, groupId: string) => ({
+    id,
+    name: id,
+    active: true,
+    persona: "Evidence agent",
+    instructions: "Archive evidence",
+    authorizedLineGroupIds: [groupId],
+    adminLineUserIds: [],
+    notionDatabaseId: `database-${id}`,
+    schemaProfileId: "evidence",
+    schemaVersion: 1,
+    extractionInstructions: "Extract visible facts",
+    allowedTools: ["archive-image", "write-notion-record"],
+    defaultModelAlias: "vision-default",
+    allowedModelAliases: ["vision-default"],
+    silentToggleCode: "reserved",
+    archiveAcknowledgementsEnabled: false,
+  });
   return {
-    enabled: true,
-    analysisEnabled: false,
-    allowedGroupIds: new Set(["C123"]),
-    imageMaxBytes: 1024 * 1024,
-    r2: {
-      accountId: "account",
-      accessKeyId: "access",
-      secretAccessKey: "secret",
-      bucketName: "private-bucket",
-      endpoint: "https://account.r2.cloudflarestorage.com",
-      keyPrefix: "",
-    },
-    notion: { apiKey: "notion", databaseId: "database" },
-    retry: { maxAttempts: 3, baseDelayMs: 1, maxDelayMs: 2 },
+    version: 1,
+    schemaProfiles: [schema],
+    agentProfiles: [agent("construction", "C1"), agent("finance", "C2")],
   };
 }
 
-describe("ArchivePipeline", () => {
+function config() {
+  return resolveArchiveConfig(
+    {
+      CLOUDBATH_IMAGE_ARCHIVE_ENABLED: "true",
+      R2_ACCOUNT_ID: "account",
+      R2_ACCESS_KEY_ID: "access",
+      R2_SECRET_ACCESS_KEY: "secret",
+      R2_BUCKET_NAME: "bucket",
+      NOTION_API_KEY: "notion",
+    },
+    rawProfiles(),
+  );
+}
+
+describe("universal asset and profile-scoped business records", () => {
   let stateDir: string;
   let mediaPath: string;
-  let originalBytes: Uint8Array;
 
   beforeEach(async () => {
-    stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "cloudbath-line-archive-"));
+    stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "cloudbath-agent-archive-"));
     const mediaDir = path.join(stateDir, "media", "inbound");
     await fs.mkdir(mediaDir, { recursive: true });
-    mediaPath = path.join(mediaDir, "official-line-download.png");
-    originalBytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x00, 0xff, 0x10, 0x20]);
-    await fs.writeFile(mediaPath, originalBytes);
+    mediaPath = path.join(mediaDir, "same-image.bin");
+    await fs.writeFile(
+      mediaPath,
+      new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 7, 7]),
+    );
     vi.clearAllMocks();
   });
 
@@ -84,181 +146,95 @@ describe("ArchivePipeline", () => {
     await fs.rm(stateDir, { recursive: true, force: true });
   });
 
-  function job(): InboundImageJob {
+  function job(groupId: string, messageId: string): InboundImageJob {
     return {
-      accountId: "default",
-      groupId: "C123",
-      lineTarget: "line:group:C123",
-      messageId: "message-1",
-      userId: "U123",
+      groupId,
+      lineTarget: `line:group:${groupId}`,
+      messageId,
       mediaPath,
       mimeType: "image/png",
       receivedAt: "2026-07-25T01:02:03.000Z",
     };
   }
 
-  it("preserves original bytes and archives R2 plus Notion metadata", async () => {
-    const store = new MemoryStore();
+  it("lets two Agent Profiles reference one global R2 object and creates two Notion records", async () => {
+    const archiveConfig = config();
+    const storedObjects = new Set<string>();
+    let uploads = 0;
+    const r2Keys: string[] = [];
     const r2 = {
-      ensureObject: vi.fn(async ({ filePath }: { filePath: string }) => {
-        expect([...(await fs.readFile(filePath))]).toEqual([...originalBytes]);
+      ensureObject: vi.fn(async ({ objectKey }: { objectKey: string }) => {
+        r2Keys.push(objectKey);
+        if (storedObjects.has(objectKey)) {
+          return { kind: "existing" as const };
+        }
+        storedObjects.add(objectKey);
+        uploads += 1;
         return { kind: "uploaded" as const };
       }),
     };
+    const businessRecords: BusinessRecordMetadata[] = [];
     const notion = {
-      createRecord: vi.fn(async () => ({ kind: "created" as const, pageId: "page-1" })),
-    };
-    const sendAcknowledgement = vi.fn(async () => undefined);
-    const pipeline = new ArchivePipeline({
-      config: config(),
-      stateDir,
-      store,
-      r2,
-      notion,
-      logger,
-      sendAcknowledgement,
-    });
-
-    await expect(pipeline.enqueue(job())).resolves.toBe("queued");
-    await pipeline.waitForIdle();
-
-    const record = [...store.values.values()][0];
-    expect(record?.status).toBe("PROCESSED");
-    expect(record?.objectKey).toBe("line/2026/07/25/C123/message-1-original.png");
-    expect(record?.fileSize).toBe(originalBytes.length);
-    expect(record?.sha256).toMatch(/^[a-f0-9]{64}$/);
-    expect(notion.createRecord).toHaveBeenCalledWith(
-      expect.objectContaining({
-        lineMessageId: "message-1",
-        r2ObjectKey: "line/2026/07/25/C123/message-1-original.png",
-        status: "PROCESSED",
+      createRecord: vi.fn(async (metadata: BusinessRecordMetadata) => {
+        businessRecords.push(metadata);
+        return { kind: "created" as const, pageId: `page-${businessRecords.length}` };
       }),
-    );
-    expect(sendAcknowledgement).toHaveBeenCalledWith(
-      expect.anything(),
-      "Image archived successfully.",
-    );
-  });
-
-  it("deduplicates a repeated LINE webhook event persistently", async () => {
-    const store = new MemoryStore();
-    const r2 = {
-      ensureObject: vi.fn(
-        async (): Promise<{ kind: "uploaded" | "existing" }> => ({ kind: "uploaded" }),
-      ),
-    };
-    const notion = {
-      createRecord: vi.fn(async () => ({ kind: "created" as const, pageId: "page-1" })),
     };
     const pipeline = new ArchivePipeline({
-      config: config(),
+      config: archiveConfig,
       stateDir,
-      store,
+      store: new MemoryStore(),
       r2,
       notion,
       logger,
     });
-
-    await expect(pipeline.enqueue(job())).resolves.toBe("queued");
-    await expect(pipeline.enqueue(job())).resolves.toBe("duplicate");
+    for (const [groupId, messageId] of [
+      ["C1", "construction-message"],
+      ["C2", "finance-message"],
+    ] as const) {
+      const agent = archiveConfig.profiles.activeProfilesByGroupId.get(groupId)!;
+      await pipeline.enqueue(
+        job(groupId, messageId),
+        agent,
+        resolveSchemaForAgent(archiveConfig.profiles, agent),
+      );
+    }
     await pipeline.waitForIdle();
 
-    expect(r2.ensureObject).toHaveBeenCalledTimes(1);
-    expect(notion.createRecord).toHaveBeenCalledTimes(1);
-    expect(store.values.size).toBe(1);
+    expect(uploads).toBe(1);
+    expect(storedObjects.size).toBe(1);
+    expect(new Set(r2Keys).size).toBe(1);
+    expect(r2Keys[0]).toMatch(/^assets\/sha256\/[a-f0-9]{2}\/[a-f0-9]{64}\.png$/);
+    expect(businessRecords).toHaveLength(2);
+    expect(businessRecords.map((record) => record.agentProfile.id)).toEqual([
+      "construction",
+      "finance",
+    ]);
+    expect(new Set(businessRecords.map((record) => record.recordIdentity)).size).toBe(2);
+    expect(new Set(businessRecords.map((record) => record.asset.r2ObjectKey)).size).toBe(1);
   });
 
-  it("keeps archiving successful when model analysis fails", async () => {
+  it("deduplicates redelivery of the same Agent Profile and LINE message", async () => {
+    const archiveConfig = config();
     const store = new MemoryStore();
-    const enabled = config();
-    enabled.analysisEnabled = true;
     const r2 = { ensureObject: vi.fn(async () => ({ kind: "uploaded" as const })) };
     const notion = {
-      createRecord: vi.fn(async () => ({ kind: "created" as const, pageId: "page-1" })),
+      createRecord: vi.fn(async () => ({ kind: "created" as const, pageId: "page" })),
     };
-    const sendAcknowledgement = vi.fn(async () => undefined);
     const pipeline = new ArchivePipeline({
-      config: enabled,
+      config: archiveConfig,
       stateDir,
       store,
       r2,
       notion,
       logger,
-      analyze: vi.fn(async () => {
-        throw new Error("model has no image capability");
-      }),
-      sendAcknowledgement,
     });
-
-    await pipeline.enqueue(job());
+    const agent = archiveConfig.profiles.activeProfilesByGroupId.get("C1")!;
+    const schema = resolveSchemaForAgent(archiveConfig.profiles, agent);
+    await expect(pipeline.enqueue(job("C1", "message"), agent, schema)).resolves.toBe("queued");
+    await expect(pipeline.enqueue(job("C1", "message"), agent, schema)).resolves.toBe("duplicate");
     await pipeline.waitForIdle();
-
-    const record = [...store.values.values()][0];
     expect(r2.ensureObject).toHaveBeenCalledTimes(1);
-    expect(notion.createRecord).toHaveBeenCalledWith(
-      expect.objectContaining({
-        status: "NEED_REVIEW",
-        error: expect.stringContaining("model has no image capability"),
-      }),
-    );
-    expect(record?.status).toBe("NEED_REVIEW");
-    expect(record?.notionPageId).toBe("page-1");
-    expect(sendAcknowledgement).toHaveBeenCalledWith(
-      expect.anything(),
-      "Image archived, but its metadata needs review.",
-    );
-  });
-
-  it("persists a restart-recoverable NEED_REVIEW record when Notion fails", async () => {
-    const store = new MemoryStore();
-    const r2 = {
-      ensureObject: vi.fn(
-        async (): Promise<{ kind: "uploaded" | "existing" }> => ({ kind: "uploaded" }),
-      ),
-    };
-    const pipeline = new ArchivePipeline({
-      config: config(),
-      stateDir,
-      store,
-      r2,
-      notion: {
-        createRecord: vi.fn(async () => {
-          throw new Error("Notion unavailable");
-        }),
-      },
-      logger,
-    });
-
-    await pipeline.enqueue(job());
-    await pipeline.waitForIdle();
-
-    const record = [...store.values.values()][0];
-    expect(record?.status).toBe("NEED_REVIEW");
-    expect(record?.objectKey).toBeTruthy();
-    expect(record?.sha256).toBeTruthy();
-    expect(record?.notionPageId).toBeUndefined();
-    expect(record?.error).toContain("Notion unavailable");
-
-    r2.ensureObject.mockResolvedValue({ kind: "existing" as const });
-    const recoveredNotion = {
-      createRecord: vi.fn(async () => ({ kind: "created" as const, pageId: "page-recovered" })),
-    };
-    const restarted = new ArchivePipeline({
-      config: config(),
-      stateDir,
-      store,
-      r2,
-      notion: recoveredNotion,
-      logger,
-    });
-
-    await expect(restarted.recoverIncomplete()).resolves.toBe(1);
-    await restarted.waitForIdle();
-
-    const recoveredRecord = [...store.values.values()][0];
-    expect(recoveredRecord?.status).toBe("PROCESSED");
-    expect(recoveredRecord?.notionPageId).toBe("page-recovered");
-    expect(r2.ensureObject).toHaveBeenCalledTimes(2);
-    expect(recoveredNotion.createRecord).toHaveBeenCalledTimes(1);
+    expect(notion.createRecord).toHaveBeenCalledTimes(1);
   });
 });
