@@ -181,9 +181,7 @@ class NotionSetupClient {
   }
 
   private async retrieveDatabase(databaseId: string): Promise<NotionDatabase> {
-    return await this.request<NotionDatabase>(
-      `/v1/databases/${encodeURIComponent(databaseId)}`,
-    );
+    return await this.request<NotionDatabase>(`/v1/databases/${encodeURIComponent(databaseId)}`);
   }
 
   async retrieveSchema(databaseId: string): Promise<{
@@ -240,11 +238,7 @@ class NotionSetupClient {
         `/v1/blocks/${encodeURIComponent(parentPageId)}/children?${query.toString()}`,
       );
       for (const block of page.results ?? []) {
-        if (
-          block.type === "child_database" &&
-          block.child_database?.title === title &&
-          block.id
-        ) {
+        if (block.type === "child_database" && block.child_database?.title === title && block.id) {
           matches.push(block.id);
         }
       }
