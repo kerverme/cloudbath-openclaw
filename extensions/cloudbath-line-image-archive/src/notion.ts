@@ -1,33 +1,25 @@
 import { isRetryableStatus, withBoundedRetry } from "./retry.js";
 import {
   NOTION_API_VERSION,
-  NOTION_REQUIRED_PROPERTIES,
+  validateNotionProperties,
   type NotionPropertyDefinition,
-  validateNotionArchiveProperties,
 } from "./notion-schema.js";
-import type { ArchiveConfig, ArchiveMetadata, NotionWriteResult, SafeLogger } from "./types.js";
+import type {
+  ArchiveConfig,
+  BusinessRecordMetadata,
+  NotionWriteResult,
+  SafeLogger,
+  SchemaPropertyDefinition,
+  SystemFieldRole,
+} from "./types.js";
 
-const NOTION_VERSION = NOTION_API_VERSION;
 const NOTION_BASE_URL = "https://api.notion.com";
-const MAX_RICH_TEXT_LENGTH = 1_900;
-
+const MAX_TEXT_LENGTH = 1_900;
 type FetchLike = typeof fetch;
-
-type NotionDatabaseResponse = {
-  data_sources?: Array<{ id?: string; name?: string }>;
-};
-
-type NotionDataSourceResponse = {
-  properties?: Record<string, NotionPropertyDefinition>;
-};
-
-type NotionQueryResponse = {
-  results?: Array<{ id?: string }>;
-};
-
-type NotionPageResponse = {
-  id?: string;
-};
+type NotionDatabaseResponse = { data_sources?: Array<{ id?: string }> };
+type NotionDataSourceResponse = { properties?: Record<string, NotionPropertyDefinition> };
+type NotionQueryResponse = { results?: Array<{ id?: string }> };
+type NotionPageResponse = { id?: string };
 
 class NotionHttpError extends Error {
   constructor(
@@ -40,41 +32,90 @@ class NotionHttpError extends Error {
   }
 }
 
-function richText(content: string | undefined): { rich_text: unknown[] } {
-  const trimmed = content?.trim().slice(0, MAX_RICH_TEXT_LENGTH) ?? "";
-  return trimmed
-    ? { rich_text: [{ type: "text", text: { content: trimmed } }] }
-    : { rich_text: [] };
-}
-
-function title(content: string): { title: unknown[] } {
-  return {
-    title: [{ type: "text", text: { content: content.slice(0, MAX_RICH_TEXT_LENGTH) } }],
-  };
-}
-
 function retryAfterMs(headers: Headers): number | undefined {
-  const value = headers.get("retry-after");
-  if (!value) {
-    return undefined;
-  }
-  const seconds = Number(value);
+  const seconds = Number(headers.get("retry-after"));
   return Number.isFinite(seconds) && seconds >= 0 ? seconds * 1_000 : undefined;
 }
 
-function sanitizeSelect(value: string | undefined): string | undefined {
-  const normalized = value
-    ?.trim()
-    .replace(/[\n\r]/g, " ")
-    .slice(0, 100);
-  return normalized || undefined;
+function textValue(value: unknown): string {
+  if (value === undefined || value === null) {
+    return "";
+  }
+  return String(value).trim().slice(0, MAX_TEXT_LENGTH);
+}
+
+function systemValue(role: SystemFieldRole, metadata: BusinessRecordMetadata): unknown {
+  switch (role) {
+    case "recordIdentity":
+    case "assetId":
+      return metadata.recordIdentity;
+    case "sha256":
+      return metadata.asset.sha256;
+    case "r2ObjectKey":
+      return metadata.asset.r2ObjectKey;
+    case "receivedAt":
+      return metadata.job.receivedAt;
+    case "lineMessageId":
+      return metadata.job.messageId;
+    case "lineGroupId":
+      return metadata.job.groupId;
+    case "lineUserId":
+      return metadata.job.userId;
+    case "status":
+      return metadata.status;
+    case "error":
+      return metadata.error;
+  }
+}
+
+function notionPropertyValue(
+  property: SchemaPropertyDefinition,
+  metadata: BusinessRecordMetadata,
+): Record<string, unknown> {
+  const extracted = metadata.extractedFields?.values[property.id];
+  const raw = property.systemFieldRole ? systemValue(property.systemFieldRole, metadata) : extracted;
+  switch (property.notionType) {
+    case "title": {
+      const title =
+        textValue(raw) ||
+        `${metadata.agentProfile.name} image ${metadata.job.messageId}`.slice(0, MAX_TEXT_LENGTH);
+      return { title: [{ type: "text", text: { content: title } }] };
+    }
+    case "rich_text":
+      return raw === undefined || raw === null
+        ? { rich_text: [] }
+        : { rich_text: [{ type: "text", text: { content: textValue(raw) } }] };
+    case "number":
+      return { number: typeof raw === "number" && Number.isFinite(raw) ? raw : null };
+    case "checkbox":
+      return { checkbox: raw === true };
+    case "date":
+      return { date: typeof raw === "string" && raw ? { start: raw } : null };
+    case "select":
+      return { select: typeof raw === "string" && raw ? { name: raw.slice(0, 100) } : null };
+    case "multi_select": {
+      const values = Array.isArray(raw) ? raw : [];
+      return {
+        multi_select: values
+          .filter((value): value is string => typeof value === "string" && Boolean(value.trim()))
+          .slice(0, 20)
+          .map((name) => ({ name: name.trim().slice(0, 100) })),
+      };
+    }
+    case "url":
+      return { url: typeof raw === "string" && raw ? raw : null };
+    case "email":
+      return { email: typeof raw === "string" && raw ? raw : null };
+    case "phone_number":
+      return { phone_number: typeof raw === "string" && raw ? raw : null };
+  }
 }
 
 export class NotionArchiveClient {
-  private dataSourceIdPromise?: Promise<string>;
+  private readonly dataSources = new Map<string, Promise<string>>();
 
   constructor(
-    private readonly config: ArchiveConfig["notion"],
+    private readonly apiKey: string,
     private readonly retry: ArchiveConfig["retry"],
     private readonly logger: SafeLogger,
     private readonly fetchImpl: FetchLike = fetch,
@@ -86,9 +127,9 @@ export class NotionArchiveClient {
         const response = await this.fetchImpl(`${NOTION_BASE_URL}${path}`, {
           ...init,
           headers: {
-            Authorization: `Bearer ${this.config.apiKey}`,
+            Authorization: `Bearer ${this.apiKey}`,
             "Content-Type": "application/json",
-            "Notion-Version": NOTION_VERSION,
+            "Notion-Version": NOTION_API_VERSION,
             ...init?.headers,
           },
         });
@@ -116,101 +157,73 @@ export class NotionArchiveClient {
     );
   }
 
-  private async resolveDataSourceId(): Promise<string> {
-    const database = await this.request<NotionDatabaseResponse>(
-      `/v1/databases/${encodeURIComponent(this.config.databaseId)}`,
-    );
-    const ids = (database.data_sources ?? [])
-      .map((source) => source.id?.trim())
-      .filter((id): id is string => Boolean(id));
-    if (ids.length !== 1) {
-      throw new Error(
-        `NOTION_DATABASE_ID must reference a database with exactly one data source; found ${ids.length}`,
-      );
+  private async resolveDataSourceId(metadata: BusinessRecordMetadata): Promise<string> {
+    const databaseId = metadata.agentProfile.notionDatabaseId;
+    const cacheKey = `${databaseId}\0${metadata.schemaProfile.id}@${metadata.schemaProfile.version}`;
+    let pending = this.dataSources.get(cacheKey);
+    if (!pending) {
+      pending = (async () => {
+        const database = await this.request<NotionDatabaseResponse>(
+          `/v1/databases/${encodeURIComponent(databaseId)}`,
+        );
+        const ids = (database.data_sources ?? [])
+          .map((source) => source.id?.trim())
+          .filter((id): id is string => Boolean(id));
+        if (ids.length !== 1) {
+          throw new Error(`Notion database ${databaseId} must contain exactly one data source`);
+        }
+        const dataSource = await this.request<NotionDataSourceResponse>(
+          `/v1/data_sources/${encodeURIComponent(ids[0])}`,
+        );
+        const issues = validateNotionProperties(
+          metadata.schemaProfile,
+          dataSource.properties ?? {},
+        );
+        if (issues.length > 0) {
+          throw new Error(
+            `Notion schema ${metadata.schemaProfile.id}@${metadata.schemaProfile.version} is incompatible: ${issues
+              .map((issue) => `${issue.propertyName}: ${issue.reason}`)
+              .join("; ")}`,
+          );
+        }
+        return ids[0];
+      })();
+      this.dataSources.set(cacheKey, pending);
     }
-    await this.validateSchema(ids[0]);
-    return ids[0];
+    return await pending;
   }
 
-  private async dataSourceId(): Promise<string> {
-    this.dataSourceIdPromise ??= this.resolveDataSourceId();
-    return await this.dataSourceIdPromise;
-  }
-
-  private async validateSchema(dataSourceId: string): Promise<void> {
-    const dataSource = await this.request<NotionDataSourceResponse>(
-      `/v1/data_sources/${encodeURIComponent(dataSourceId)}`,
+  async createRecord(metadata: BusinessRecordMetadata): Promise<NotionWriteResult> {
+    const dataSourceId = await this.resolveDataSourceId(metadata);
+    const identityProperty = metadata.schemaProfile.properties.find(
+      (property) => property.systemFieldRole === "recordIdentity",
     );
-    const issues = validateNotionArchiveProperties(dataSource.properties ?? {});
-    if (issues.length > 0) {
-      throw new Error(`Notion data source schema is incompatible: ${issues.join("; ")}`);
+    if (!identityProperty) {
+      throw new Error("Schema Profile is missing the recordIdentity system field");
     }
-  }
-
-  private async findExisting(
-    dataSourceId: string,
-    metadata: ArchiveMetadata,
-  ): Promise<string | undefined> {
-    const response = await this.request<NotionQueryResponse>(
+    const existing = await this.request<NotionQueryResponse>(
       `/v1/data_sources/${encodeURIComponent(dataSourceId)}/query`,
       {
         method: "POST",
         body: JSON.stringify({
           page_size: 1,
           filter: {
-            or: [
-              {
-                property: "LINE Message ID",
-                rich_text: { equals: metadata.lineMessageId },
-              },
-              {
-                property: "SHA-256",
-                rich_text: { equals: metadata.sha256 },
-              },
-            ],
+            property: identityProperty.name,
+            rich_text: { equals: metadata.recordIdentity },
           },
         }),
       },
     );
-    return response.results?.[0]?.id;
-  }
-
-  async createRecord(metadata: ArchiveMetadata): Promise<NotionWriteResult> {
-    const dataSourceId = await this.dataSourceId();
-    const existingPageId = await this.findExisting(dataSourceId, metadata);
+    const existingPageId = existing.results?.[0]?.id;
     if (existingPageId) {
       return { kind: "duplicate", pageId: existingPageId };
     }
-
-    const analysis = metadata.analysis;
-    const category = sanitizeSelect(analysis?.category);
-    const tags = [
-      ...new Set(
-        analysis?.tags.map(sanitizeSelect).filter((value): value is string => Boolean(value)) ?? [],
-      ),
-    ].slice(0, 20);
-    const properties: Record<string, unknown> = {
-      Name: title(`LINE image ${metadata.lineMessageId}`),
-      "Received At": { date: { start: metadata.receivedAt } },
-      "LINE Message ID": richText(metadata.lineMessageId),
-      "LINE Webhook Event ID": richText(metadata.lineWebhookEventId),
-      "LINE Group ID": richText(metadata.lineGroupId),
-      "LINE User ID": richText(metadata.lineUserId),
-      "Sender Name": richText(metadata.senderName),
-      "Original Filename": richText(metadata.originalFilename),
-      "MIME Type": richText(metadata.mimeType),
-      "File Size": { number: metadata.fileSize },
-      "SHA-256": richText(metadata.sha256),
-      "R2 Object Key": richText(metadata.r2ObjectKey),
-      "AI Description": richText(analysis?.description),
-      Category: category ? { select: { name: category } } : { select: null },
-      Tags: { multi_select: tags.map((name) => ({ name })) },
-      Vendor: richText(analysis?.vendor),
-      Amount: { number: analysis?.amount ?? null },
-      Status: { select: { name: metadata.status } },
-      Error: richText(metadata.error),
-    };
-
+    const properties = Object.fromEntries(
+      metadata.schemaProfile.properties.map((property) => [
+        property.name,
+        notionPropertyValue(property, metadata),
+      ]),
+    );
     const page = await this.request<NotionPageResponse>("/v1/pages", {
       method: "POST",
       body: JSON.stringify({
@@ -224,8 +237,3 @@ export class NotionArchiveClient {
     return { kind: "created", pageId: page.id };
   }
 }
-
-export {
-  NOTION_VERSION,
-  NOTION_REQUIRED_PROPERTIES as REQUIRED_PROPERTIES,
-};
