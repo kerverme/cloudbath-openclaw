@@ -1,37 +1,88 @@
 import { describe, expect, it, vi } from "vitest";
 import {
-  createNotionArchiveProperties,
-  NOTION_STATUS_OPTIONS,
+  compileNotionProperties,
 } from "../../extensions/cloudbath-line-image-archive/src/notion-schema.js";
 import {
-  NOTION_DATABASE_NAME,
-  readNotionSetupConfig,
+  validateProfileConfiguration,
+} from "../../extensions/cloudbath-line-image-archive/src/profiles.js";
+import {
+  createSchemaPlanProposal,
+  readNotionSetupEnvironment,
   runNotionSetup,
 } from "./setup-notion-image-archive.js";
 
-function jsonResponse(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { "Content-Type": "application/json" },
-  });
+function schemaProfile() {
+  return validateProfileConfiguration({
+    version: 1,
+    agentProfiles: [],
+    schemaProfiles: [
+      {
+        id: "inventory",
+        name: "Inventory",
+        description: "Inventory deliveries",
+        version: 2,
+        databaseTitle: "Cloudbath Inventory Deliveries",
+        recordIdentityRule: { kind: "agent-profile-plus-sha256" },
+        suggestedViews: [],
+        exampleQuestions: ["Which deliveries need review?"],
+        properties: [
+          {
+            id: "name",
+            name: "Delivery",
+            notionType: "title",
+            required: false,
+            validationRules: [],
+            searchable: true,
+            aggregatable: false,
+            displayOrder: 1,
+          },
+          ...[
+            ["identity", "Asset ID", "rich_text", "recordIdentity"],
+            ["sha", "SHA-256", "rich_text", "sha256"],
+            ["r2", "R2 Key", "rich_text", "r2ObjectKey"],
+            ["received", "Received At", "date", "receivedAt"],
+          ].map(([id, name, notionType, systemFieldRole], index) => ({
+            id,
+            name,
+            notionType,
+            systemFieldRole,
+            required: true,
+            validationRules: [],
+            searchable: true,
+            aggregatable: notionType === "date",
+            displayOrder: index + 2,
+          })),
+          {
+            id: "quantity",
+            name: "Quantity",
+            notionType: "number",
+            required: false,
+            validationRules: [{ kind: "min", value: 0 }],
+            searchable: false,
+            aggregatable: true,
+            displayOrder: 6,
+          },
+        ],
+      },
+    ],
+  }).schemaProfiles[0]!;
 }
 
 function retrievedProperties() {
   return Object.fromEntries(
-    Object.entries(createNotionArchiveProperties()).map(([name, property]) => {
-      const propertyType = Object.keys(property as Record<string, unknown>)[0];
-      const retrieved = { type: propertyType, ...(property as Record<string, unknown>) };
-      return [name, retrieved];
-    }),
+    Object.entries(compileNotionProperties(schemaProfile())).map(([name, property]) => [
+      name,
+      { type: Object.keys(property)[0], ...property },
+    ]),
   );
 }
 
-function database(id = "database-1", dataSourceId = "source-1") {
-  return { id, data_sources: [{ id: dataSourceId, name: NOTION_DATABASE_NAME }] };
+function database() {
+  return { id: "database-1", data_sources: [{ id: "source-1" }] };
 }
 
-describe("Cloudbath Notion image archive setup", () => {
-  it("reads only the approved environment variables", () => {
+describe("generic Notion Schema Profile setup", () => {
+  it("reads only approved environment names and plan performs no API call", async () => {
     const reads: string[] = [];
     const env = new Proxy(
       {
@@ -48,8 +99,7 @@ describe("Cloudbath Notion image archive setup", () => {
         },
       },
     );
-
-    expect(readNotionSetupConfig(env)).toEqual({
+    expect(readNotionSetupEnvironment(env)).toEqual({
       apiKey: "token-placeholder",
       parentPageId: "parent-1",
       databaseId: undefined,
@@ -59,176 +109,129 @@ describe("Cloudbath Notion image archive setup", () => {
       "NOTION_PARENT_PAGE_ID",
       "NOTION_DATABASE_ID",
     ]);
-  });
-
-  it("validates an explicitly configured database without modifying it", async () => {
-    const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
-      const url = String(input);
-      if (url.endsWith("/v1/databases/database-1")) {
-        return jsonResponse(database());
-      }
-      if (url.endsWith("/v1/data_sources/source-1")) {
-        return jsonResponse({ id: "source-1", properties: retrievedProperties() });
-      }
-      throw new Error(`Unexpected URL ${url}`);
-    }) as typeof fetch;
-    const output = vi.fn();
-
-    await expect(
-      runNotionSetup(
-        { apiKey: "token-placeholder", databaseId: "database-1" },
-        { fetchImpl, output },
-      ),
-    ).resolves.toEqual({
-      kind: "validated",
-      databaseId: "database-1",
-      dataSourceId: "source-1",
-    });
-    expect(fetchImpl).toHaveBeenCalledTimes(2);
-    expect(fetchImpl.mock.calls.every((call) => (call[1]?.method ?? "GET") === "GET")).toBe(true);
-    expect(output).not.toHaveBeenCalledWith(expect.stringContaining("token-placeholder"));
-  });
-
-  it("reports every missing or incompatible property and exact Status options", async () => {
-    const properties = retrievedProperties();
-    delete properties["LINE User ID"];
-    properties.Amount = { type: "rich_text", rich_text: {} };
-    properties.Status = {
-      type: "select",
-      select: { options: [{ name: "PROCESSED" }, { name: "EXTRA" }] },
-    };
-    const fetchImpl = vi.fn(
-      async (input: string | URL | Request, _init?: RequestInit) => {
-        const url = String(input);
-        if (url.endsWith("/v1/databases/database-1")) {
-          return jsonResponse(database());
-        }
-        return jsonResponse({ id: "source-1", properties });
-      },
-    ) as typeof fetch;
-
-    await expect(
-      runNotionSetup({ apiKey: "token-placeholder", databaseId: "database-1" }, { fetchImpl }),
-    ).rejects.toThrow(
-      /Missing property "LINE User ID"[\s\S]*Property "Amount" has type rich_text[\s\S]*Property "Status" must have exactly these select options/,
+    const fetchImpl = vi.fn();
+    const result = await runNotionSetup(
+      { mode: "plan", schemaProfile: schemaProfile() },
+      { fetchImpl: fetchImpl as typeof fetch, output: vi.fn(), now: () => new Date(0) },
     );
-    expect(fetchImpl.mock.calls.every((call) => (call[1]?.method ?? "GET") === "GET")).toBe(true);
+    expect(result.kind).toBe("planned");
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 
-  it("reuses an exact-name child database instead of creating another", async () => {
-    const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
-      const url = String(input);
-      if (url.includes("/v1/blocks/parent-1/children")) {
-        return jsonResponse({
-          results: [
-            {
-              id: "database-1",
-              type: "child_database",
-              child_database: { title: NOTION_DATABASE_NAME },
-            },
-          ],
-          has_more: false,
-        });
-      }
-      if (url.endsWith("/v1/databases/database-1")) {
-        return jsonResponse(database());
-      }
-      if (url.endsWith("/v1/data_sources/source-1")) {
-        return jsonResponse({ id: "source-1", properties: retrievedProperties() });
-      }
-      throw new Error(`Unexpected URL ${url} (${init?.method ?? "GET"})`);
-    }) as typeof fetch;
-
+  it("requires the exact proposal ID before database creation", async () => {
+    const schema = schemaProfile();
+    const proposal = createSchemaPlanProposal({ schemaProfile: schema });
     await expect(
       runNotionSetup(
-        { apiKey: "token-placeholder", parentPageId: "parent-1" },
-        { fetchImpl, output: vi.fn() },
+        {
+          mode: "create",
+          schemaProfile: schema,
+          apiKey: "token",
+          parentPageId: "parent",
+          approvalId: "wrong",
+        },
+        { fetchImpl: vi.fn() as typeof fetch },
       ),
-    ).resolves.toEqual({
-      kind: "reused",
-      databaseId: "database-1",
-      dataSourceId: "source-1",
-    });
-    expect(fetchImpl.mock.calls.every((call) => (call[1]?.method ?? "GET") === "GET")).toBe(true);
+    ).rejects.toThrow(`--approve ${proposal.proposalId}`);
   });
 
-  it("creates one exact-schema database and validates its data source", async () => {
+  it("creates exactly one approved database from a dynamic Schema Profile", async () => {
+    const schema = schemaProfile();
+    const approvalId = createSchemaPlanProposal({ schemaProfile: schema }).proposalId;
     const requests: Array<{ url: string; init?: RequestInit }> = [];
     const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const url = String(input);
       requests.push({ url, init });
       if (url.includes("/v1/blocks/parent-1/children")) {
-        return jsonResponse({ results: [], has_more: false });
+        return Response.json({ results: [], has_more: false });
       }
       if (url.endsWith("/v1/databases") && init?.method === "POST") {
-        return jsonResponse(database());
+        return Response.json(database());
       }
       if (url.endsWith("/v1/databases/database-1")) {
-        return jsonResponse(database());
+        return Response.json(database());
       }
       if (url.endsWith("/v1/data_sources/source-1")) {
-        return jsonResponse({ id: "source-1", properties: retrievedProperties() });
+        return Response.json({ properties: retrievedProperties() });
       }
       throw new Error(`Unexpected URL ${url}`);
     }) as typeof fetch;
-    const output = vi.fn();
-
-    await expect(
-      runNotionSetup(
-        { apiKey: "token-placeholder", parentPageId: "parent-1" },
-        { fetchImpl, output },
-      ),
-    ).resolves.toEqual({
-      kind: "created",
-      databaseId: "database-1",
-      dataSourceId: "source-1",
-    });
-
+    const result = await runNotionSetup(
+      {
+        mode: "create",
+        schemaProfile: schema,
+        apiKey: "token-placeholder",
+        parentPageId: "parent-1",
+        approvalId,
+      },
+      { fetchImpl, output: vi.fn() },
+    );
+    expect(result.kind).toBe("created");
     const creates = requests.filter(
       (request) => request.url.endsWith("/v1/databases") && request.init?.method === "POST",
     );
     expect(creates).toHaveLength(1);
     const body = JSON.parse(String(creates[0]?.init?.body)) as {
-      parent: { type: string; page_id: string };
       title: Array<{ text: { content: string } }>;
-      initial_data_source: {
-        title: Array<{ text: { content: string } }>;
-        properties: Record<string, unknown>;
-      };
+      initial_data_source: { properties: Record<string, unknown> };
     };
-    expect(body.parent).toEqual({ type: "page_id", page_id: "parent-1" });
-    expect(body.title[0]?.text.content).toBe(NOTION_DATABASE_NAME);
-    expect(body.initial_data_source.title[0]?.text.content).toBe(NOTION_DATABASE_NAME);
-    expect(body.initial_data_source.properties).toEqual(createNotionArchiveProperties());
-    expect(
-      (
-        body.initial_data_source.properties.Status as {
-          select: { options: Array<{ name: string }> };
-        }
-      ).select.options.map((option) => option.name),
-    ).toEqual(NOTION_STATUS_OPTIONS);
-    expect(output).toHaveBeenCalledWith("Notion database created: database-1");
-    expect(output).toHaveBeenCalledWith("Notion data source ID: source-1");
+    expect(body.title[0]?.text.content).toBe(schema.databaseTitle);
+    expect(body.initial_data_source.properties).toEqual(compileNotionProperties(schema));
   });
 
-  it("fails safely when the parent has duplicate exact-name databases", async () => {
-    const fetchImpl = vi.fn(async () =>
-      jsonResponse({
-        results: ["database-1", "database-2"].map((id) => ({
-          id,
-          type: "child_database",
-          child_database: { title: NOTION_DATABASE_NAME },
-        })),
-        has_more: false,
-      }),
-    ) as typeof fetch;
+  it.each(["bind", "validate"] as const)(
+    "%s validates an existing database without mutation",
+    async (mode) => {
+      const methods: string[] = [];
+      const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        methods.push(init?.method ?? "GET");
+        return String(input).endsWith("/v1/databases/database-1")
+          ? Response.json(database())
+          : Response.json({ properties: retrievedProperties() });
+      }) as typeof fetch;
+      const result = await runNotionSetup(
+        {
+          mode,
+          schemaProfile: schemaProfile(),
+          apiKey: "token",
+          databaseId: "database-1",
+        },
+        { fetchImpl, output: vi.fn() },
+      );
+      expect(result.kind).toBe(mode === "bind" ? "bound" : "validated");
+      expect(methods).toEqual(["GET", "GET"]);
+    },
+  );
 
-    await expect(
-      runNotionSetup(
-        { apiKey: "token-placeholder", parentPageId: "parent-1" },
-        { fetchImpl },
-      ),
-    ).rejects.toThrow("Found 2 child databases");
-    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  it("migration-plan never deletes, renames, or changes property types", async () => {
+    const methods: string[] = [];
+    const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      methods.push(init?.method ?? "GET");
+      if (String(input).endsWith("/v1/databases/database-1")) {
+        return Response.json(database());
+      }
+      return Response.json({
+        properties: {
+          Delivery: { type: "title" },
+          "User Notes": { type: "rich_text" },
+        },
+      });
+    }) as typeof fetch;
+    const result = await runNotionSetup(
+      {
+        mode: "migration-plan",
+        schemaProfile: schemaProfile(),
+        apiKey: "token",
+        databaseId: "database-1",
+        fromVersion: 1,
+      },
+      { fetchImpl, output: vi.fn() },
+    );
+    expect(result.kind).toBe("migration-planned");
+    if (result.kind === "migration-planned") {
+      expect(result.migration.automaticActions).toEqual([]);
+      expect(result.migration.unrelatedExistingProperties).toContain("User Notes");
+    }
+    expect(methods).toEqual(["GET", "GET"]);
   });
 });
