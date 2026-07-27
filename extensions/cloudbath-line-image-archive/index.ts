@@ -12,6 +12,7 @@ import type {
   AgentProfile,
   ArchiveConfig,
   InboundImageJob,
+  PersistedArchiveRecord,
   SafeLogger,
   SchemaProfile,
 } from "./src/types.js";
@@ -74,7 +75,7 @@ export default definePluginEntry({
           return;
         }
         activeConfig = config;
-        const store = api.runtime.state.openKeyedStore({
+        const store = api.runtime.state.openKeyedStore<PersistedArchiveRecord>({
           namespace: "archive-jobs-v2",
           maxEntries: 100_000,
           overflowPolicy: "evict-oldest",
