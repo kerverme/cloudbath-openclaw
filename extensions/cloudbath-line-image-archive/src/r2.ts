@@ -48,9 +48,7 @@ export function buildContentAddressedObjectKey(params: {
     throw new Error("Canonical extension is invalid");
   }
   const assetPath = `assets/sha256/${params.sha256.slice(0, 2)}/${params.sha256}${params.extension}`;
-  return params.keyPrefix
-    ? `${params.keyPrefix.replace(/\/+$/, "")}/${assetPath}`
-    : assetPath;
+  return params.keyPrefix ? `${params.keyPrefix.replace(/\/+$/, "")}/${assetPath}` : assetPath;
 }
 
 export async function detectCanonicalImageExtension(filePath: string): Promise<string> {
@@ -59,13 +57,18 @@ export async function detectCanonicalImageExtension(filePath: string): Promise<s
     const bytes = Buffer.alloc(16);
     const { bytesRead } = await file.read(bytes, 0, bytes.length, 0);
     const header = bytes.subarray(0, bytesRead);
-    if (header.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
+    if (
+      header.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
+    ) {
       return ".png";
     }
     if (header[0] === 0xff && header[1] === 0xd8 && header[2] === 0xff) {
       return ".jpg";
     }
-    if (header.subarray(0, 6).toString("ascii") === "GIF87a" || header.subarray(0, 6).toString("ascii") === "GIF89a") {
+    if (
+      header.subarray(0, 6).toString("ascii") === "GIF87a" ||
+      header.subarray(0, 6).toString("ascii") === "GIF89a"
+    ) {
       return ".gif";
     }
     if (
@@ -126,7 +129,10 @@ export class R2ArchiveClient {
     };
   }
 
-  private async head(bucketName: string, objectKey: string): Promise<HeadObjectCommandOutput | null> {
+  private async head(
+    bucketName: string,
+    objectKey: string,
+  ): Promise<HeadObjectCommandOutput | null> {
     try {
       return (await withBoundedRetry(
         async () =>
