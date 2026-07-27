@@ -1,3 +1,4 @@
+import { validateProfileConfiguration } from "./profiles.js";
 import type { ArchiveConfig } from "./types.js";
 
 const DEFAULT_IMAGE_MAX_MB = 10;
@@ -65,30 +66,31 @@ function normalizeKeyPrefix(value: string | undefined): string {
     .join("/");
 }
 
-export function resolveArchiveConfig(env: NodeJS.ProcessEnv = process.env): ArchiveConfig {
+export function resolveArchiveConfig(
+  env: NodeJS.ProcessEnv = process.env,
+  pluginConfig: Record<string, unknown> = {},
+): ArchiveConfig {
   const enabled = readBoolean(env.CLOUDBATH_IMAGE_ARCHIVE_ENABLED, false);
   const analysisEnabled = readBoolean(env.CLOUDBATH_IMAGE_ANALYSIS_ENABLED, false);
-  const allowedGroupIds = new Set(
-    (env.LINE_ALLOWED_GROUP_IDS ?? "")
-      .split(",")
-      .map((value) => value.trim())
-      .filter(Boolean),
-  );
   const imageMaxMb = readPositiveNumber(env.IMAGE_MAX_MB, DEFAULT_IMAGE_MAX_MB, "IMAGE_MAX_MB");
-
   if (imageMaxMb > 100) {
     throw new Error("IMAGE_MAX_MB must not exceed 100");
   }
-  if (enabled && allowedGroupIds.size === 0) {
-    throw new Error("LINE_ALLOWED_GROUP_IDS must contain at least one group ID");
-  }
 
+  const profileInput =
+    !enabled && Object.keys(pluginConfig).length === 0
+      ? { version: 1, agentProfiles: [], schemaProfiles: [] }
+      : pluginConfig;
+  const profiles = validateProfileConfiguration(profileInput);
+  if (enabled && profiles.activeProfilesByGroupId.size === 0) {
+    throw new Error("At least one active Agent Profile is required when archiving is enabled");
+  }
   const accountId = enabled ? readRequired(env, "R2_ACCOUNT_ID") : env.R2_ACCOUNT_ID?.trim() || "";
-  const config: ArchiveConfig = {
+  return {
     enabled,
     analysisEnabled,
-    allowedGroupIds,
     imageMaxBytes: Math.floor(imageMaxMb * 1024 * 1024),
+    profiles,
     r2: {
       accountId,
       accessKeyId: enabled
@@ -103,9 +105,6 @@ export function resolveArchiveConfig(env: NodeJS.ProcessEnv = process.env): Arch
     },
     notion: {
       apiKey: enabled ? readRequired(env, "NOTION_API_KEY") : env.NOTION_API_KEY?.trim() || "",
-      databaseId: enabled
-        ? readRequired(env, "NOTION_DATABASE_ID")
-        : env.NOTION_DATABASE_ID?.trim() || "",
     },
     retry: {
       maxAttempts: DEFAULT_RETRY_ATTEMPTS,
@@ -113,6 +112,4 @@ export function resolveArchiveConfig(env: NodeJS.ProcessEnv = process.env): Arch
       maxDelayMs: DEFAULT_RETRY_MAX_DELAY_MS,
     },
   };
-
-  return config;
 }
