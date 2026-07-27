@@ -76,6 +76,14 @@ export type NotionSetupResult =
       migration: SchemaMigrationProposal;
     };
 
+type DatabaseSetupResult<K extends "created" | "reused" | "bound" | "validated"> = {
+  kind: K;
+  databaseId: string;
+  dataSourceId: string;
+  schemaProfileId: string;
+  schemaVersion: number;
+};
+
 function requiredValue(value: string | undefined, name: string): string {
   const trimmed = value?.trim();
   if (!trimmed) {
@@ -156,14 +164,13 @@ class NotionSetupClient {
   ) {}
 
   private async request<T>(path: string, init?: RequestInit): Promise<T> {
+    const headers = new Headers(init?.headers);
+    headers.set("Authorization", `Bearer ${this.apiKey}`);
+    headers.set("Content-Type", "application/json");
+    headers.set("Notion-Version", NOTION_API_VERSION);
     const response = await this.fetchImpl(`${NOTION_BASE_URL}${path}`, {
       ...init,
-      headers: {
-        Authorization: `Bearer ${this.apiKey}`,
-        "Content-Type": "application/json",
-        "Notion-Version": NOTION_API_VERSION,
-        ...init?.headers,
-      },
+      headers,
     });
     if (!response.ok) {
       throw new Error(
@@ -202,13 +209,7 @@ class NotionSetupClient {
     databaseId: string,
     schema: SchemaProfile,
     kind: K,
-  ): Promise<{
-    kind: K;
-    databaseId: string;
-    dataSourceId: string;
-    schemaProfileId: string;
-    schemaVersion: number;
-  }> {
+  ): Promise<DatabaseSetupResult<K>> {
     const current = await this.retrieveSchema(databaseId);
     const issues = validateNotionProperties(schema, current.properties);
     if (issues.length > 0) {
@@ -258,7 +259,7 @@ class NotionSetupClient {
   async createApprovedDatabase(
     parentPageId: string,
     schema: SchemaProfile,
-  ): Promise<Extract<NotionSetupResult, { kind: "created" | "reused" }>> {
+  ): Promise<DatabaseSetupResult<"created" | "reused">> {
     const matches = await this.findNamedChildDatabases(parentPageId, schema.databaseTitle);
     if (matches.length > 1) {
       throw new Error(
