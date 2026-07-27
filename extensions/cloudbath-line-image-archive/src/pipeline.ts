@@ -284,12 +284,7 @@ export class ArchivePipeline {
     let extractionError: string | undefined;
     try {
       let mediaFile: { path: string; size: number } | undefined;
-      if (
-        !record.sha256 ||
-        !record.objectKey ||
-        !record.fileSize ||
-        !record.canonicalExtension
-      ) {
+      if (!record.sha256 || !record.objectKey || !record.fileSize || !record.canonicalExtension) {
         mediaFile = await resolveSafeMediaFile({
           filePath: record.job.mediaPath,
           stateDir: this.deps.stateDir,
@@ -305,12 +300,7 @@ export class ArchivePipeline {
         });
         await this.persist(record);
       }
-      if (
-        !record.sha256 ||
-        !record.objectKey ||
-        !record.fileSize ||
-        !record.canonicalExtension
-      ) {
+      if (!record.sha256 || !record.objectKey || !record.fileSize || !record.canonicalExtension) {
         throw new Error("Archive state is missing content-addressed asset metadata");
       }
       if (!mediaFile) {
@@ -362,9 +352,7 @@ export class ArchivePipeline {
       } else if (
         (!this.deps.config.analysisEnabled ||
           !agentProfile.allowedTools.includes("extract-schema-fields")) &&
-        schemaProfile.properties.some(
-          (property) => property.required && !property.systemFieldRole,
-        )
+        schemaProfile.properties.some((property) => property.required && !property.systemFieldRole)
       ) {
         extractionError = "Schema extraction is disabled";
       }
