@@ -11,6 +11,20 @@ const logger: SafeLogger = {
   error: vi.fn(),
 };
 
+function requestUrl(input: string | URL | Request): string {
+  if (typeof input === "string") {
+    return input;
+  }
+  return input instanceof URL ? input.href : input.url;
+}
+
+function requestBody(body: BodyInit | null | undefined): string {
+  if (typeof body !== "string") {
+    throw new Error("Expected a string request body");
+  }
+  return body;
+}
+
 function profileData() {
   const config = validateProfileConfiguration({
     version: 1,
@@ -126,7 +140,7 @@ describe("profile-scoped Notion business records", () => {
     const compiled = compileNotionProperties(record.schemaProfile);
     const requests: Array<{ url: string; init?: RequestInit }> = [];
     const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
-      const url = String(input);
+      const url = requestUrl(input);
       requests.push({ url, init });
       if (url.endsWith("/v1/databases/database-finance")) {
         return Response.json({ data_sources: [{ id: "source-finance" }] });
@@ -161,14 +175,14 @@ describe("profile-scoped Notion business records", () => {
       pageId: "page-finance",
     });
     const queryBody = JSON.parse(
-      String(requests.find((request) => request.url.endsWith("/query"))?.init?.body),
+      requestBody(requests.find((request) => request.url.endsWith("/query"))?.init?.body),
     ) as { filter: { property: string; rich_text: { equals: string } } };
     expect(queryBody.filter).toEqual({
       property: "Finance Asset ID",
       rich_text: { equals: record.recordIdentity },
     });
     const pageBody = JSON.parse(
-      String(requests.find((request) => request.url.endsWith("/v1/pages"))?.init?.body),
+      requestBody(requests.find((request) => request.url.endsWith("/v1/pages"))?.init?.body),
     ) as { properties: Record<string, unknown> };
     expect(pageBody.properties).toEqual(
       expect.objectContaining({
