@@ -107,7 +107,9 @@ function parseIdentityRule(value: unknown, label: string): RecordIdentityRule {
   if (raw.kind === "agent-profile-plus-properties") {
     const propertyIds = stringArray(raw.propertyIds, `${label}.propertyIds`);
     if (propertyIds.length === 0 || raw.rejectWhenMissing !== true) {
-      throw new Error(`${label} composite identities require propertyIds and rejectWhenMissing=true`);
+      throw new Error(
+        `${label} composite identities require propertyIds and rejectWhenMissing=true`,
+      );
     }
     return { kind: "agent-profile-plus-properties", propertyIds, rejectWhenMissing: true };
   }
@@ -152,7 +154,8 @@ function parseProperty(value: unknown, label: string): SchemaPropertyDefinition 
   if (!NOTION_PROPERTY_TYPES.has(notionType)) {
     throw new Error(`${label}.notionType is unsupported`);
   }
-  const options = raw.options === undefined ? undefined : stringArray(raw.options, `${label}.options`);
+  const options =
+    raw.options === undefined ? undefined : stringArray(raw.options, `${label}.options`);
   const optionType = notionType === "select" || notionType === "multi_select";
   if (options && !optionType) {
     throw new Error(`${label}.options are allowed only for select and multi_select`);
