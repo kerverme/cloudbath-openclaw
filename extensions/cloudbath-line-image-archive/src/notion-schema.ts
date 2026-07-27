@@ -28,10 +28,7 @@ export function compileNotionProperties(
       .toSorted((left, right) => left.displayOrder - right.displayOrder)
       .map((property) => {
         if (property.notionType === "select" || property.notionType === "multi_select") {
-          return [
-            property.name,
-            { [property.notionType]: { options: propertyOptions(property) } },
-          ];
+          return [property.name, { [property.notionType]: { options: propertyOptions(property) } }];
         }
         return [property.name, { [property.notionType]: {} }];
       }),
