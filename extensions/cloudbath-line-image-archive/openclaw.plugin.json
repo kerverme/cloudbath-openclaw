@@ -1,7 +1,7 @@
 {
   "id": "cloudbath-line-image-archive",
   "name": "Cloudbath LINE Image Archive",
-  "description": "Archives authorized LINE group images to private Cloudflare R2 storage and Notion metadata.",
+  "description": "Archives universal LINE image assets and configurable Agent Profile business records.",
   "enabledByDefault": false,
   "activation": {
     "onStartup": true
@@ -9,6 +9,22 @@
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
-    "properties": {}
+    "properties": {
+      "version": {
+        "const": 1
+      },
+      "agentProfiles": {
+        "type": "array",
+        "items": {
+          "type": "object"
+        }
+      },
+      "schemaProfiles": {
+        "type": "array",
+        "items": {
+          "type": "object"
+        }
+      }
+    }
   }
 }
