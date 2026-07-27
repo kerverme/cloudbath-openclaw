@@ -1,9 +1,9 @@
-import { isRetryableStatus, withBoundedRetry } from "./retry.js";
 import {
   NOTION_API_VERSION,
   validateNotionProperties,
   type NotionPropertyDefinition,
 } from "./notion-schema.js";
+import { isRetryableStatus, withBoundedRetry } from "./retry.js";
 import type {
   ArchiveConfig,
   BusinessRecordMetadata,
@@ -77,7 +77,9 @@ function notionPropertyValue(
   metadata: BusinessRecordMetadata,
 ): Record<string, unknown> {
   const extracted = metadata.extractedFields?.values[property.id];
-  const raw = property.systemFieldRole ? systemValue(property.systemFieldRole, metadata) : extracted;
+  const raw = property.systemFieldRole
+    ? systemValue(property.systemFieldRole, metadata)
+    : extracted;
   switch (property.notionType) {
     case "title": {
       const title =
