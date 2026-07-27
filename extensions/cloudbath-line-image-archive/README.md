@@ -62,9 +62,7 @@ and a LINE group assigned to more than one active Agent Profile.
                 kind: "agent-profile-plus-sha256",
               },
               suggestedViews: [],
-              exampleQuestions: [
-                "Which maintenance issues still need action?",
-              ],
+              exampleQuestions: ["Which maintenance issues still need action?"],
               properties: [
                 {
                   id: "name",
@@ -148,11 +146,7 @@ and a LINE group assigned to more than one active Agent Profile.
               schemaProfileId: "property-maintenance",
               schemaVersion: 1,
               extractionInstructions: "Never infer facts that are not visible or supplied.",
-              allowedTools: [
-                "archive-image",
-                "extract-schema-fields",
-                "write-notion-record",
-              ],
+              allowedTools: ["archive-image", "extract-schema-fields", "write-notion-record"],
               defaultModelAlias: "vision-default",
               allowedModelAliases: ["vision-default"],
               silentToggleCode: "reserved-for-follow-up",
@@ -268,18 +262,18 @@ reported database ID into that Agent Profile's `notionDatabaseId` configuration 
 
 ## Environment variables
 
-| Variable | Runtime purpose |
-| --- | --- |
-| `CLOUDBATH_IMAGE_ARCHIVE_ENABLED` | Master switch; defaults to `false`. |
-| `CLOUDBATH_IMAGE_ANALYSIS_ENABLED` | Enables schema-based extraction; defaults to `false`. |
-| `IMAGE_MAX_MB` | Archive limit, default `10`, maximum `100`. |
-| `R2_ACCOUNT_ID` | Cloudflare account ID. |
-| `R2_ACCESS_KEY_ID` | Bucket-scoped S3 access key ID. |
-| `R2_SECRET_ACCESS_KEY` | Bucket-scoped S3 secret. |
-| `R2_BUCKET_NAME` | Existing private bucket. |
-| `R2_ENDPOINT` | Optional HTTPS S3 endpoint. |
-| `R2_KEY_PREFIX` | Optional prefix before `assets/`. |
-| `NOTION_API_KEY` | Notion integration credential shared by configured databases. |
+| Variable                           | Runtime purpose                                               |
+| ---------------------------------- | ------------------------------------------------------------- |
+| `CLOUDBATH_IMAGE_ARCHIVE_ENABLED`  | Master switch; defaults to `false`.                           |
+| `CLOUDBATH_IMAGE_ANALYSIS_ENABLED` | Enables schema-based extraction; defaults to `false`.         |
+| `IMAGE_MAX_MB`                     | Archive limit, default `10`, maximum `100`.                   |
+| `R2_ACCOUNT_ID`                    | Cloudflare account ID.                                        |
+| `R2_ACCESS_KEY_ID`                 | Bucket-scoped S3 access key ID.                               |
+| `R2_SECRET_ACCESS_KEY`             | Bucket-scoped S3 secret.                                      |
+| `R2_BUCKET_NAME`                   | Existing private bucket.                                      |
+| `R2_ENDPOINT`                      | Optional HTTPS S3 endpoint.                                   |
+| `R2_KEY_PREFIX`                    | Optional prefix before `assets/`.                             |
+| `NOTION_API_KEY`                   | Notion integration credential shared by configured databases. |
 
 LINE group allowlists and Notion database IDs are no longer global environment variables.
 
