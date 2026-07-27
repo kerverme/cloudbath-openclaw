@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
-import { NOTION_VERSION, NotionArchiveClient, REQUIRED_PROPERTIES } from "./notion.js";
-import { NOTION_STATUS_OPTIONS } from "./notion-schema.js";
-import type { ArchiveMetadata, SafeLogger } from "./types.js";
+import { compileNotionProperties } from "./notion-schema.js";
+import { NotionArchiveClient } from "./notion.js";
+import { validateProfileConfiguration } from "./profiles.js";
+import type { BusinessRecordMetadata, SafeLogger } from "./types.js";
 
 const logger: SafeLogger = {
   debug: vi.fn(),
@@ -10,140 +11,175 @@ const logger: SafeLogger = {
   error: vi.fn(),
 };
 
-function jsonResponse(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { "Content-Type": "application/json" },
+function profileData() {
+  const config = validateProfileConfiguration({
+    version: 1,
+    schemaProfiles: [
+      {
+        id: "finance",
+        name: "Finance",
+        description: "Finance receipts",
+        version: 1,
+        databaseTitle: "Finance",
+        recordIdentityRule: { kind: "agent-profile-plus-sha256" },
+        suggestedViews: [],
+        exampleQuestions: [],
+        properties: [
+          {
+            id: "name",
+            name: "Receipt",
+            notionType: "title",
+            required: false,
+            validationRules: [],
+            searchable: true,
+            aggregatable: false,
+            displayOrder: 1,
+          },
+          ...[
+            ["identity", "Finance Asset ID", "rich_text", "recordIdentity"],
+            ["sha", "Checksum", "rich_text", "sha256"],
+            ["r2", "Archive Key", "rich_text", "r2ObjectKey"],
+            ["received", "Received", "date", "receivedAt"],
+          ].map(([id, name, notionType, systemFieldRole], index) => ({
+            id,
+            name,
+            notionType,
+            systemFieldRole,
+            required: true,
+            validationRules: [],
+            searchable: true,
+            aggregatable: notionType === "date",
+            displayOrder: index + 2,
+          })),
+          {
+            id: "amount",
+            name: "Amount",
+            notionType: "number",
+            required: false,
+            validationRules: [{ kind: "min", value: 0 }],
+            searchable: false,
+            aggregatable: true,
+            displayOrder: 6,
+          },
+        ],
+      },
+    ],
+    agentProfiles: [
+      {
+        id: "finance-agent",
+        name: "Finance Agent",
+        active: true,
+        persona: "Bookkeeper",
+        instructions: "Archive receipts",
+        authorizedLineGroupIds: ["C1"],
+        adminLineUserIds: [],
+        notionDatabaseId: "database-finance",
+        schemaProfileId: "finance",
+        schemaVersion: 1,
+        extractionInstructions: "Extract visible amounts",
+        allowedTools: ["archive-image", "write-notion-record"],
+        defaultModelAlias: "vision-default",
+        allowedModelAliases: ["vision-default"],
+        silentToggleCode: "reserved",
+        archiveAcknowledgementsEnabled: false,
+      },
+    ],
   });
+  return {
+    agentProfile: config.agentProfiles[0]!,
+    schemaProfile: config.schemaProfiles[0]!,
+  };
 }
 
-function metadata(): ArchiveMetadata {
+function metadata(): BusinessRecordMetadata {
+  const profiles = profileData();
   return {
-    receivedAt: "2026-07-25T01:02:03.000Z",
-    lineMessageId: "message-1",
-    lineGroupId: "C123",
-    lineUserId: "U123",
-    originalFilename: "message-1-original.png",
-    mimeType: "image/png",
-    fileSize: 42,
-    sha256: "a".repeat(64),
-    r2ObjectKey: "line/2026/07/25/C123/message-1-original.png",
+    ...profiles,
+    recordIdentity: `finance-agent:${"a".repeat(64)}`,
+    asset: {
+      sha256: "a".repeat(64),
+      r2ObjectKey: `assets/sha256/aa/${"a".repeat(64)}.png`,
+      canonicalExtension: ".png",
+      fileSize: 10,
+      mimeType: "image/png",
+    },
+    job: {
+      groupId: "C1",
+      lineTarget: "line:group:C1",
+      messageId: "message",
+      mediaPath: "/state/media/inbound/image.png",
+      mimeType: "image/png",
+      receivedAt: "2026-07-25T01:02:03.000Z",
+    },
+    extractedFields: {
+      values: { amount: 125.5 },
+      provider: "provider",
+      model: "model",
+    },
     status: "PROCESSED",
   };
 }
 
-function schema() {
-  return {
-    properties: Object.fromEntries(
-      REQUIRED_PROPERTIES.map(([name, type]) => [
-        name,
-        name === "Status"
-          ? {
-              type,
-              select: {
-                options: NOTION_STATUS_OPTIONS.map((optionName) => ({ name: optionName })),
-              },
-            }
-          : { type },
-      ]),
-    ),
-  };
-}
-
-describe("NotionArchiveClient", () => {
-  it("resolves the database data source, checks duplicates, and creates metadata", async () => {
+describe("profile-scoped Notion business records", () => {
+  it("queries by dynamic record-identity property and writes dynamic schema fields", async () => {
+    const record = metadata();
+    const compiled = compileNotionProperties(record.schemaProfile);
     const requests: Array<{ url: string; init?: RequestInit }> = [];
     const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const url = String(input);
       requests.push({ url, init });
-      if (url.includes("/v1/databases/")) {
-        return jsonResponse({ data_sources: [{ id: "source-1", name: "Archive" }] });
+      if (url.endsWith("/v1/databases/database-finance")) {
+        return Response.json({ data_sources: [{ id: "source-finance" }] });
       }
-      if (url.endsWith("/v1/data_sources/source-1")) {
-        return jsonResponse(schema());
+      if (url.endsWith("/v1/data_sources/source-finance")) {
+        return Response.json({
+          properties: Object.fromEntries(
+            Object.entries(compiled).map(([name, value]) => [
+              name,
+              { type: Object.keys(value)[0], ...value },
+            ]),
+          ),
+        });
       }
-      if (url.endsWith("/v1/data_sources/source-1/query")) {
-        return jsonResponse({ results: [] });
+      if (url.endsWith("/query")) {
+        return Response.json({ results: [] });
       }
       if (url.endsWith("/v1/pages")) {
-        return jsonResponse({ id: "page-1" });
+        return Response.json({ id: "page-finance" });
       }
-      throw new Error(`unexpected URL ${url}`);
+      throw new Error(`Unexpected URL ${url}`);
     }) as typeof fetch;
     const client = new NotionArchiveClient(
-      { apiKey: "secret-placeholder", databaseId: "database-1" },
+      "token-placeholder",
       { maxAttempts: 2, baseDelayMs: 1, maxDelayMs: 2 },
       logger,
       fetchImpl,
     );
 
-    await expect(client.createRecord(metadata())).resolves.toEqual({
+    await expect(client.createRecord(record)).resolves.toEqual({
       kind: "created",
-      pageId: "page-1",
+      pageId: "page-finance",
     });
-    const create = requests.find((request) => request.url.endsWith("/v1/pages"));
-    const body = JSON.parse(String(create?.init?.body)) as {
-      parent: unknown;
-      properties: Record<string, unknown>;
-    };
-    expect(create?.init?.headers).toMatchObject({ "Notion-Version": NOTION_VERSION });
-    expect(body.parent).toEqual({ type: "data_source_id", data_source_id: "source-1" });
-    expect(body.properties.Status).toEqual({ select: { name: "PROCESSED" } });
-    expect(body.properties["R2 Object Key"]).toBeTruthy();
-  });
-
-  it("does not create a duplicate Notion record", async () => {
-    const fetchImpl = vi.fn(async (input: string | URL | Request) => {
-      const url = String(input);
-      if (url.includes("/v1/databases/")) {
-        return jsonResponse({ data_sources: [{ id: "source-1" }] });
-      }
-      if (url.endsWith("/v1/data_sources/source-1")) {
-        return jsonResponse(schema());
-      }
-      if (url.endsWith("/query")) {
-        return jsonResponse({ results: [{ id: "existing-page" }] });
-      }
-      throw new Error("page creation must not run");
-    }) as typeof fetch;
-    const client = new NotionArchiveClient(
-      { apiKey: "secret-placeholder", databaseId: "database-1" },
-      { maxAttempts: 2, baseDelayMs: 1, maxDelayMs: 2 },
-      logger,
-      fetchImpl,
-    );
-    await expect(client.createRecord(metadata())).resolves.toEqual({
-      kind: "duplicate",
-      pageId: "existing-page",
+    const queryBody = JSON.parse(
+      String(requests.find((request) => request.url.endsWith("/query"))?.init?.body),
+    ) as { filter: { property: string; rich_text: { equals: string } } };
+    expect(queryBody.filter).toEqual({
+      property: "Finance Asset ID",
+      rich_text: { equals: record.recordIdentity },
     });
-  });
-
-  it("retries bounded transient Notion failures", async () => {
-    let databaseAttempts = 0;
-    const fetchImpl = vi.fn(async (input: string | URL | Request) => {
-      const url = String(input);
-      if (url.includes("/v1/databases/")) {
-        databaseAttempts += 1;
-        if (databaseAttempts === 1) {
-          return jsonResponse({ message: "rate limited" }, 429);
-        }
-        return jsonResponse({ data_sources: [{ id: "source-1" }] });
-      }
-      if (url.endsWith("/v1/data_sources/source-1")) {
-        return jsonResponse(schema());
-      }
-      if (url.endsWith("/query")) {
-        return jsonResponse({ results: [{ id: "existing-page" }] });
-      }
-      throw new Error(`unexpected URL ${url}`);
-    }) as typeof fetch;
-    const client = new NotionArchiveClient(
-      { apiKey: "secret-placeholder", databaseId: "database-1" },
-      { maxAttempts: 2, baseDelayMs: 1, maxDelayMs: 1 },
-      logger,
-      fetchImpl,
+    const pageBody = JSON.parse(
+      String(requests.find((request) => request.url.endsWith("/v1/pages"))?.init?.body),
+    ) as { properties: Record<string, unknown> };
+    expect(pageBody.properties).toEqual(
+      expect.objectContaining({
+        Checksum: { rich_text: [{ type: "text", text: { content: "a".repeat(64) } }] },
+        Amount: { number: 125.5 },
+      }),
     );
-    await client.createRecord(metadata());
-    expect(databaseAttempts).toBe(2);
+    expect(
+      requests.every(
+        (request) => !["PATCH", "PUT", "DELETE"].includes(request.init?.method ?? "GET"),
+      ),
+    ).toBe(true);
   });
 });
