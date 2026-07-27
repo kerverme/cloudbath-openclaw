@@ -23,7 +23,7 @@ function stripJsonFence(value: string): string {
 function extractionPrompt(agent: AgentProfile, schema: SchemaProfile): string {
   const fields = schema.properties
     .filter((property) => !property.systemFieldRole)
-    .sort((left, right) => left.displayOrder - right.displayOrder)
+    .toSorted((left, right) => left.displayOrder - right.displayOrder)
     .map((property) => ({
       id: property.id,
       type: property.notionType,
@@ -80,6 +80,7 @@ function matchesNotionType(property: SchemaPropertyDefinition, value: unknown): 
     case "multi_select":
       return Array.isArray(value) && value.every((entry) => typeof entry === "string");
   }
+  throw new Error("Unsupported Notion property type");
 }
 
 export function validateExtractedValues(
