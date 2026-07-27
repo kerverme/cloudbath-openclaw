@@ -11,6 +11,20 @@ import {
   runNotionSetup,
 } from "./setup-notion-image-archive.js";
 
+function requestUrl(input: string | URL | Request): string {
+  if (typeof input === "string") {
+    return input;
+  }
+  return input instanceof URL ? input.href : input.url;
+}
+
+function requestBody(body: BodyInit | null | undefined): string {
+  if (typeof body !== "string") {
+    throw new Error("Expected a string request body");
+  }
+  return body;
+}
+
 function schemaProfile() {
   return validateProfileConfiguration({
     version: 1,
@@ -140,7 +154,7 @@ describe("generic Notion Schema Profile setup", () => {
     const approvalId = createSchemaPlanProposal({ schemaProfile: schema }).proposalId;
     const requests: Array<{ url: string; init?: RequestInit }> = [];
     const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
-      const url = String(input);
+      const url = requestUrl(input);
       requests.push({ url, init });
       if (url.includes("/v1/blocks/parent-1/children")) {
         return Response.json({ results: [], has_more: false });
@@ -171,7 +185,7 @@ describe("generic Notion Schema Profile setup", () => {
       (request) => request.url.endsWith("/v1/databases") && request.init?.method === "POST",
     );
     expect(creates).toHaveLength(1);
-    const body = JSON.parse(String(creates[0]?.init?.body)) as {
+    const body = JSON.parse(requestBody(creates[0]?.init?.body)) as {
       title: Array<{ text: { content: string } }>;
       initial_data_source: { properties: Record<string, unknown> };
     };
@@ -185,7 +199,7 @@ describe("generic Notion Schema Profile setup", () => {
       const methods: string[] = [];
       const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
         methods.push(init?.method ?? "GET");
-        return String(input).endsWith("/v1/databases/database-1")
+        return requestUrl(input).endsWith("/v1/databases/database-1")
           ? Response.json(database())
           : Response.json({ properties: retrievedProperties() });
       }) as typeof fetch;
@@ -207,7 +221,7 @@ describe("generic Notion Schema Profile setup", () => {
     const methods: string[] = [];
     const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       methods.push(init?.method ?? "GET");
-      if (String(input).endsWith("/v1/databases/database-1")) {
+      if (requestUrl(input).endsWith("/v1/databases/database-1")) {
         return Response.json(database());
       }
       return Response.json({
