@@ -1,0 +1,302 @@
+{
+  "version": 1,
+  "agentProfiles": [],
+  "schemaProfiles": [
+    {
+      "id": "construction-site-progress",
+      "name": "Construction Site Progress",
+      "description": "Example schema for construction progress evidence, issues, and actions. It is not a runtime default.",
+      "version": 1,
+      "databaseTitle": "Cloudbath Construction Site Progress",
+      "recordIdentityRule": {
+        "kind": "agent-profile-plus-sha256"
+      },
+      "properties": [
+        {
+          "id": "name",
+          "name": "Name",
+          "notionType": "title",
+          "required": true,
+          "extractionDescription": "A concise human-readable title for the evidence.",
+          "validationRules": [],
+          "searchable": true,
+          "aggregatable": false,
+          "displayOrder": 1
+        },
+        {
+          "id": "assetId",
+          "name": "Asset ID",
+          "notionType": "rich_text",
+          "required": true,
+          "validationRules": [],
+          "searchable": true,
+          "aggregatable": false,
+          "displayOrder": 2,
+          "systemFieldRole": "recordIdentity"
+        },
+        {
+          "id": "sha256",
+          "name": "SHA-256",
+          "notionType": "rich_text",
+          "required": true,
+          "validationRules": [],
+          "searchable": true,
+          "aggregatable": false,
+          "displayOrder": 3,
+          "systemFieldRole": "sha256"
+        },
+        {
+          "id": "r2ObjectKey",
+          "name": "R2 Object Key",
+          "notionType": "rich_text",
+          "required": true,
+          "validationRules": [],
+          "searchable": true,
+          "aggregatable": false,
+          "displayOrder": 4,
+          "systemFieldRole": "r2ObjectKey"
+        },
+        {
+          "id": "receivedAt",
+          "name": "Received At",
+          "notionType": "date",
+          "required": true,
+          "validationRules": [],
+          "searchable": true,
+          "aggregatable": true,
+          "displayOrder": 5,
+          "systemFieldRole": "receivedAt"
+        },
+        {
+          "id": "project",
+          "name": "Project",
+          "notionType": "rich_text",
+          "required": true,
+          "extractionDescription": "Project name or code visible in the evidence or supplied message.",
+          "validationRules": [],
+          "searchable": true,
+          "aggregatable": false,
+          "displayOrder": 6
+        },
+        {
+          "id": "zone",
+          "name": "Zone",
+          "notionType": "rich_text",
+          "required": false,
+          "extractionDescription": "Site zone or area.",
+          "validationRules": [],
+          "searchable": true,
+          "aggregatable": false,
+          "displayOrder": 7
+        },
+        {
+          "id": "floor",
+          "name": "Floor",
+          "notionType": "rich_text",
+          "required": false,
+          "extractionDescription": "Building floor or level.",
+          "validationRules": [],
+          "searchable": true,
+          "aggregatable": false,
+          "displayOrder": 8
+        },
+        {
+          "id": "discipline",
+          "name": "Discipline",
+          "notionType": "select",
+          "required": false,
+          "options": ["Architectural", "Civil", "Electrical", "Mechanical", "Plumbing", "Structural", "Other"],
+          "extractionDescription": "Primary construction discipline.",
+          "validationRules": [],
+          "searchable": true,
+          "aggregatable": false,
+          "displayOrder": 9
+        },
+        {
+          "id": "workPackage",
+          "name": "Work Package",
+          "notionType": "rich_text",
+          "required": false,
+          "extractionDescription": "Work package name or identifier.",
+          "validationRules": [],
+          "searchable": true,
+          "aggregatable": false,
+          "displayOrder": 10
+        },
+        {
+          "id": "constructionStage",
+          "name": "Construction Stage",
+          "notionType": "select",
+          "required": false,
+          "options": ["Not Started", "Mobilization", "In Progress", "Inspection", "Completed", "Blocked"],
+          "extractionDescription": "Current stage visible in the evidence.",
+          "validationRules": [],
+          "searchable": true,
+          "aggregatable": false,
+          "displayOrder": 11
+        },
+        {
+          "id": "progressPercent",
+          "name": "Progress Percent",
+          "notionType": "number",
+          "required": false,
+          "extractionDescription": "Estimated completion percentage only when visually supportable.",
+          "validationRules": [
+            { "kind": "min", "value": 0 },
+            { "kind": "max", "value": 100 }
+          ],
+          "searchable": false,
+          "aggregatable": true,
+          "displayOrder": 12
+        },
+        {
+          "id": "status",
+          "name": "Status",
+          "notionType": "select",
+          "required": false,
+          "options": ["ON_TRACK", "AT_RISK", "BLOCKED", "COMPLETE", "NEED_REVIEW"],
+          "extractionDescription": "Overall business status of the documented work.",
+          "validationRules": [],
+          "searchable": true,
+          "aggregatable": false,
+          "displayOrder": 13
+        },
+        {
+          "id": "contractor",
+          "name": "Contractor",
+          "notionType": "rich_text",
+          "required": false,
+          "extractionDescription": "Responsible contractor when visible or supplied.",
+          "validationRules": [],
+          "searchable": true,
+          "aggregatable": false,
+          "displayOrder": 14
+        },
+        {
+          "id": "aiSummary",
+          "name": "AI Summary",
+          "notionType": "rich_text",
+          "required": false,
+          "extractionDescription": "Objective summary of visible progress and conditions.",
+          "validationRules": [],
+          "searchable": true,
+          "aggregatable": false,
+          "displayOrder": 15
+        },
+        {
+          "id": "issueDetected",
+          "name": "Issue Detected",
+          "notionType": "checkbox",
+          "required": false,
+          "extractionDescription": "Whether visible evidence suggests a construction issue.",
+          "validationRules": [],
+          "searchable": true,
+          "aggregatable": true,
+          "displayOrder": 16
+        },
+        {
+          "id": "issueSeverity",
+          "name": "Issue Severity",
+          "notionType": "select",
+          "required": false,
+          "options": ["LOW", "MEDIUM", "HIGH", "CRITICAL"],
+          "extractionDescription": "Severity only when an issue is supported by evidence.",
+          "validationRules": [],
+          "searchable": true,
+          "aggregatable": false,
+          "displayOrder": 17
+        },
+        {
+          "id": "actionRequired",
+          "name": "Action Required",
+          "notionType": "rich_text",
+          "required": false,
+          "extractionDescription": "Concrete follow-up action supported by the evidence.",
+          "validationRules": [],
+          "searchable": true,
+          "aggregatable": false,
+          "displayOrder": 18
+        },
+        {
+          "id": "responsiblePerson",
+          "name": "Responsible Person",
+          "notionType": "rich_text",
+          "required": false,
+          "extractionDescription": "Named responsible person only when supplied.",
+          "validationRules": [],
+          "searchable": true,
+          "aggregatable": false,
+          "displayOrder": 19
+        },
+        {
+          "id": "dueDate",
+          "name": "Due Date",
+          "notionType": "date",
+          "required": false,
+          "extractionDescription": "Due date only when explicitly supplied.",
+          "validationRules": [],
+          "searchable": true,
+          "aggregatable": true,
+          "displayOrder": 20
+        },
+        {
+          "id": "verified",
+          "name": "Verified",
+          "notionType": "checkbox",
+          "required": false,
+          "extractionDescription": "Administrator-controlled verification flag; extraction should leave it false.",
+          "validationRules": [],
+          "searchable": true,
+          "aggregatable": true,
+          "displayOrder": 21
+        },
+        {
+          "id": "tags",
+          "name": "Tags",
+          "notionType": "multi_select",
+          "required": false,
+          "options": ["progress", "issue", "safety", "quality", "delivery", "inspection"],
+          "extractionDescription": "Relevant controlled tags.",
+          "validationRules": [],
+          "searchable": true,
+          "aggregatable": false,
+          "displayOrder": 22
+        }
+      ],
+      "suggestedViews": [
+        {
+          "name": "Progress by Zone",
+          "purpose": "Compare progress across project zones.",
+          "layout": "board",
+          "groupByPropertyId": "zone"
+        },
+        {
+          "name": "Open Issues",
+          "purpose": "Review evidence with detected issues by severity.",
+          "layout": "table",
+          "filterDescription": "Issue Detected is checked",
+          "sortDescription": "Issue Severity descending"
+        },
+        {
+          "name": "Due Actions",
+          "purpose": "Track required actions and due dates.",
+          "layout": "calendar",
+          "filterDescription": "Action Required is not empty"
+        },
+        {
+          "name": "Weekly Progress",
+          "purpose": "Review progress evidence over time.",
+          "layout": "timeline",
+          "sortDescription": "Received At ascending"
+        }
+      ],
+      "exampleQuestions": [
+        "Which zones have the lowest verified progress?",
+        "What high-severity issues remain open?",
+        "Which actions are overdue and who is responsible?",
+        "What changed for a work package during the past week?",
+        "Which submitted images still require verification?"
+      ]
+    }
+  ]
+}
