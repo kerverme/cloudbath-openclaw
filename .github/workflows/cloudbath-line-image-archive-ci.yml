@@ -81,18 +81,6 @@ jobs:
             exit 1
           fi
 
-      - name: Upload formatter output for diagnosis
-        if: failure() && steps.dependencies.outcome == 'success' && !cancelled()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: cloudbath-line-image-archive-formatter-output
-          path: |
-            extensions/cloudbath-line-image-archive
-            scripts/cloudbath/setup-notion-image-archive.ts
-            scripts/cloudbath/setup-notion-image-archive.test.ts
-          if-no-files-found: error
-          retention-days: 1
-
       - name: Lint plugin
         if: steps.dependencies.outcome == 'success' && !cancelled()
         run: |
