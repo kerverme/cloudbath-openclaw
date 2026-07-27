@@ -2,7 +2,7 @@
   "name": "@openclaw/cloudbath-line-image-archive",
   "version": "2026.7.2",
   "private": true,
-  "description": "Archive authorized LINE group images to Cloudflare R2 and Notion.",
+  "description": "Archive universal LINE image assets and profile-scoped Notion records.",
   "type": "module",
   "dependencies": {
     "@aws-sdk/client-s3": "3.1078.0"
