@@ -136,7 +136,7 @@ function parseValidationRules(
     if (raw.kind === "regex") {
       const pattern = stringValue(raw.pattern, `${ruleLabel}.pattern`);
       try {
-        new RegExp(pattern);
+        RegExp(pattern);
       } catch {
         throw new Error(`${ruleLabel}.pattern must be a valid regular expression`);
       }
