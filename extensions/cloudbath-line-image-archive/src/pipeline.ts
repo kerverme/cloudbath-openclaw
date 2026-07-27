@@ -2,17 +2,19 @@ import crypto, { type BinaryLike } from "node:crypto";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
-import { extensionForMime } from "openclaw/plugin-sdk/media-mime";
+import { buildContentAddressedObjectKey, detectCanonicalImageExtension } from "./r2.js";
 import type {
+  AgentProfile,
   ArchiveConfig,
-  ArchiveMetadata,
   AsyncKeyedStore,
-  ImageAnalysis,
+  BusinessRecordMetadata,
+  ExtractedFields,
   InboundImageJob,
   NotionWriteResult,
   PersistedArchiveRecord,
   ProcessingStatus,
   SafeLogger,
+  SchemaProfile,
 } from "./types.js";
 
 type R2ClientLike = {
@@ -23,12 +25,11 @@ type R2ClientLike = {
     contentType: string;
     contentLength: number;
     sha256: string;
-    messageId: string;
   }): Promise<{ kind: "uploaded" | "existing"; etag?: string }>;
 };
 
 type NotionClientLike = {
-  createRecord(metadata: ArchiveMetadata): Promise<NotionWriteResult>;
+  createRecord(metadata: BusinessRecordMetadata): Promise<NotionWriteResult>;
 };
 
 export type ArchivePipelineDependencies = {
@@ -38,23 +39,22 @@ export type ArchivePipelineDependencies = {
   r2: R2ClientLike;
   notion: NotionClientLike;
   logger: SafeLogger;
-  analyze?: (job: InboundImageJob, filePath: string) => Promise<ImageAnalysis>;
+  extract?: (
+    job: InboundImageJob,
+    filePath: string,
+    agentProfile: AgentProfile,
+    schemaProfile: SchemaProfile,
+  ) => Promise<ExtractedFields>;
   sendAcknowledgement?: (job: InboundImageJob, text: string) => Promise<void>;
 };
 
-function sanitizePathComponent(value: string, fallback: string): string {
-  const sanitized = value
-    .normalize("NFKC")
-    .replace(/[^A-Za-z0-9._-]+/g, "_")
-    .replace(/^[_\-.]+|[_\-.]+$/g, "")
-    .slice(0, 128);
-  return sanitized || fallback;
-}
-
-function archiveRecordKey(job: InboundImageJob): string {
+function archiveRecordKey(job: InboundImageJob, agentProfileId: string): string {
   return crypto
     .createHash("sha256")
-    .update(`${job.accountId ?? "default"}\0${job.groupId}\0${job.messageId}`, "utf8")
+    .update(
+      `${job.accountId ?? "default"}\0${agentProfileId}\0${job.groupId}\0${job.messageId}`,
+      "utf8",
+    )
     .digest("hex");
 }
 
@@ -66,33 +66,6 @@ function safeErrorMessage(error: unknown): string {
       .trim()
       .slice(0, 1_000) || "Unknown processing error"
   );
-}
-
-function buildObjectDetails(
-  config: ArchiveConfig,
-  job: InboundImageJob,
-): { objectKey: string; originalFilename: string } {
-  const received = new Date(job.receivedAt);
-  if (Number.isNaN(received.getTime())) {
-    throw new Error("Invalid LINE message timestamp");
-  }
-  const extension = extensionForMime(job.mimeType) || ".bin";
-  const safeExtension = /^\.[a-z0-9]{1,10}$/i.test(extension) ? extension.toLowerCase() : ".bin";
-  const group = sanitizePathComponent(job.groupId, "unknown-group");
-  const message = sanitizePathComponent(job.messageId, "unknown-message");
-  const datePath = [
-    received.getUTCFullYear().toString().padStart(4, "0"),
-    (received.getUTCMonth() + 1).toString().padStart(2, "0"),
-    received.getUTCDate().toString().padStart(2, "0"),
-  ].join("/");
-  const filename = `${message}-original${safeExtension}`;
-  const archivePath = `line/${datePath}/${group}/${filename}`;
-  return {
-    objectKey: config.r2.keyPrefix
-      ? `${config.r2.keyPrefix.replace(/\/+$/, "")}/${archivePath}`
-      : archivePath,
-    originalFilename: filename,
-  };
 }
 
 async function resolveSafeMediaFile(params: {
@@ -137,14 +110,47 @@ async function sha256File(filePath: string): Promise<string> {
   return hash.digest("hex");
 }
 
+function canonicalIdentityValue(value: unknown): string {
+  if (value === null || value === undefined || value === "") {
+    throw new Error("Record identity property is missing");
+  }
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return JSON.stringify([...value].map(canonicalIdentityValue).sort());
+  }
+  throw new Error("Record identity property must be a scalar or array");
+}
+
+function resolveRecordIdentity(params: {
+  agentProfile: AgentProfile;
+  schemaProfile: SchemaProfile;
+  sha256: string;
+  extractedFields?: ExtractedFields;
+}): string {
+  const rule = params.agentProfile.recordIdentityRule ?? params.schemaProfile.recordIdentityRule;
+  if (rule.kind === "agent-profile-plus-sha256") {
+    return `${params.agentProfile.id}:${params.sha256}`;
+  }
+  const parts = rule.propertyIds.map((propertyId) =>
+    canonicalIdentityValue(params.extractedFields?.values[propertyId]),
+  );
+  const digest = crypto
+    .createHash("sha256")
+    .update(`${params.agentProfile.id}\0${parts.join("\0")}`, "utf8")
+    .digest("hex");
+  return `${params.agentProfile.id}:${digest}`;
+}
+
 function acknowledgementFor(status: ProcessingStatus): string {
   switch (status) {
     case "PROCESSED":
       return "Image archived successfully.";
     case "DUPLICATE":
-      return "Image was already archived.";
+      return "Image was already archived for this agent.";
     case "NEED_REVIEW":
-      return "Image archived, but its metadata needs review.";
+      return "Image archived, but its business record needs review.";
     case "ERROR":
       return "Sorry, the image could not be archived.";
     case "NEW":
@@ -162,12 +168,18 @@ export class ArchivePipeline {
     await this.deps.store.register(record.key, record);
   }
 
-  private schedule(record: PersistedArchiveRecord, acknowledge: boolean): void {
+  private schedule(
+    record: PersistedArchiveRecord,
+    agentProfile: AgentProfile,
+    schemaProfile: SchemaProfile,
+    acknowledge: boolean,
+  ): void {
     const work = this.tail.then(async () => {
-      await this.process(record, acknowledge);
+      await this.process(record, agentProfile, schemaProfile, acknowledge);
     });
     this.tail = work.catch((error) => {
       this.deps.logger.error("archive_worker_failed", {
+        agentProfileId: agentProfile.id,
         messageId: record.job.messageId,
         groupId: record.job.groupId,
         error: safeErrorMessage(error),
@@ -175,103 +187,137 @@ export class ArchivePipeline {
     });
   }
 
-  async enqueue(job: InboundImageJob): Promise<"queued" | "duplicate"> {
-    const key = archiveRecordKey(job);
+  async enqueue(
+    job: InboundImageJob,
+    agentProfile: AgentProfile,
+    schemaProfile: SchemaProfile,
+  ): Promise<"queued" | "duplicate"> {
+    const key = archiveRecordKey(job, agentProfile.id);
     const record: PersistedArchiveRecord = {
       key,
       job,
+      agentProfileId: agentProfile.id,
+      schemaProfileId: schemaProfile.id,
+      schemaVersion: schemaProfile.version,
       status: "NEW",
       attempts: 0,
       updatedAt: new Date().toISOString(),
     };
-    const registered = await this.deps.store.registerIfAbsent(key, record);
-    if (!registered) {
+    if (!(await this.deps.store.registerIfAbsent(key, record))) {
       this.deps.logger.info("archive_duplicate_event", {
+        agentProfileId: agentProfile.id,
         messageId: job.messageId,
         groupId: job.groupId,
       });
       return "duplicate";
     }
-    this.schedule(record, true);
+    this.schedule(record, agentProfile, schemaProfile, true);
     return "queued";
   }
 
   async recoverIncomplete(): Promise<number> {
-    const entries = await this.deps.store.entries();
-    const recoverable = entries
+    const recoverable = (await this.deps.store.entries())
       .map((entry) => entry.value)
       .filter(
         (record) =>
           (record.status === "NEW" || (record.status === "NEED_REVIEW" && !record.notionPageId)) &&
           record.attempts < this.deps.config.retry.maxAttempts,
       );
+    let scheduled = 0;
     for (const record of recoverable) {
-      this.schedule(record, false);
+      const agentProfile = this.deps.config.profiles.agentProfiles.find(
+        (profile) => profile.id === record.agentProfileId && profile.active,
+      );
+      const schemaProfile = this.deps.config.profiles.schemasByKey.get(
+        `${record.schemaProfileId}@${record.schemaVersion}`,
+      );
+      if (!agentProfile || !schemaProfile) {
+        this.deps.logger.error("archive_recovery_profile_missing", {
+          agentProfileId: record.agentProfileId,
+          schemaProfileId: record.schemaProfileId,
+          schemaVersion: record.schemaVersion,
+        });
+        continue;
+      }
+      this.schedule(record, agentProfile, schemaProfile, false);
+      scheduled += 1;
     }
-    return recoverable.length;
+    return scheduled;
   }
 
   async waitForIdle(): Promise<void> {
     await this.tail;
   }
 
-  private async sendAcknowledgement(
+  private async acknowledge(
     record: PersistedArchiveRecord,
-    acknowledge: boolean,
+    agentProfile: AgentProfile,
+    enabled: boolean,
   ): Promise<void> {
-    if (!acknowledge || !this.deps.sendAcknowledgement) {
+    if (
+      !enabled ||
+      !agentProfile.archiveAcknowledgementsEnabled ||
+      !this.deps.sendAcknowledgement
+    ) {
       return;
     }
     try {
       await this.deps.sendAcknowledgement(record.job, acknowledgementFor(record.status));
     } catch (error) {
       this.deps.logger.warn("line_acknowledgement_failed", {
+        agentProfileId: agentProfile.id,
         messageId: record.job.messageId,
-        groupId: record.job.groupId,
         error: safeErrorMessage(error),
       });
     }
   }
 
-  private async process(record: PersistedArchiveRecord, acknowledge: boolean): Promise<void> {
+  private async process(
+    record: PersistedArchiveRecord,
+    agentProfile: AgentProfile,
+    schemaProfile: SchemaProfile,
+    acknowledge: boolean,
+  ): Promise<void> {
     record.attempts += 1;
     await this.persist(record);
-    let analysisError: string | undefined;
-
+    let extractionError: string | undefined;
     try {
       let mediaFile: { path: string; size: number } | undefined;
-      if (!record.sha256 || !record.objectKey || !record.fileSize || !record.originalFilename) {
+      if (
+        !record.sha256 ||
+        !record.objectKey ||
+        !record.fileSize ||
+        !record.canonicalExtension
+      ) {
         mediaFile = await resolveSafeMediaFile({
           filePath: record.job.mediaPath,
           stateDir: this.deps.stateDir,
           maxBytes: this.deps.config.imageMaxBytes,
         });
-        const object = buildObjectDetails(this.deps.config, record.job);
         record.fileSize = mediaFile.size;
         record.sha256 = await sha256File(mediaFile.path);
-        record.objectKey = object.objectKey;
-        record.originalFilename = object.originalFilename;
+        record.canonicalExtension = await detectCanonicalImageExtension(mediaFile.path);
+        record.objectKey = buildContentAddressedObjectKey({
+          keyPrefix: this.deps.config.r2.keyPrefix,
+          sha256: record.sha256,
+          extension: record.canonicalExtension,
+        });
         await this.persist(record);
       }
-
-      if (!record.sha256 || !record.objectKey || !record.fileSize || !record.originalFilename) {
-        throw new Error("Archive state is missing required object metadata");
+      if (
+        !record.sha256 ||
+        !record.objectKey ||
+        !record.fileSize ||
+        !record.canonicalExtension
+      ) {
+        throw new Error("Archive state is missing content-addressed asset metadata");
       }
-
       if (!mediaFile) {
-        try {
-          mediaFile = await resolveSafeMediaFile({
-            filePath: record.job.mediaPath,
-            stateDir: this.deps.stateDir,
-            maxBytes: this.deps.config.imageMaxBytes,
-          });
-        } catch (error) {
-          this.deps.logger.warn("recovery_media_unavailable", {
-            messageId: record.job.messageId,
-            groupId: record.job.groupId,
-            error: safeErrorMessage(error),
-          });
-        }
+        mediaFile = await resolveSafeMediaFile({
+          filePath: record.job.mediaPath,
+          stateDir: this.deps.stateDir,
+          maxBytes: this.deps.config.imageMaxBytes,
+        }).catch(() => undefined);
       }
       await this.deps.r2.ensureObject({
         filePath: mediaFile?.path ?? record.job.mediaPath,
@@ -280,65 +326,94 @@ export class ArchivePipeline {
         contentType: record.job.mimeType,
         contentLength: record.fileSize,
         sha256: record.sha256,
-        messageId: record.job.messageId,
       });
 
-      if (this.deps.config.analysisEnabled && this.deps.analyze && !record.analysis && mediaFile) {
+      if (
+        this.deps.config.analysisEnabled &&
+        this.deps.extract &&
+        !record.extractedFields &&
+        mediaFile &&
+        agentProfile.allowedTools.includes("extract-schema-fields")
+      ) {
         try {
-          record.analysis = await this.deps.analyze(record.job, mediaFile.path);
+          record.extractedFields = await this.deps.extract(
+            record.job,
+            mediaFile.path,
+            agentProfile,
+            schemaProfile,
+          );
+          await this.persist(record);
         } catch (error) {
-          analysisError = `Image analysis failed: ${safeErrorMessage(error)}`;
-          this.deps.logger.warn("image_analysis_failed", {
+          extractionError = `Schema extraction failed: ${safeErrorMessage(error)}`;
+          this.deps.logger.warn("schema_extraction_failed", {
+            agentProfileId: agentProfile.id,
             messageId: record.job.messageId,
-            groupId: record.job.groupId,
             error: safeErrorMessage(error),
           });
         }
-      } else if (this.deps.config.analysisEnabled && !record.analysis && !mediaFile) {
-        analysisError = "Image analysis failed: source media is no longer available";
+      } else if (
+        this.deps.config.analysisEnabled &&
+        agentProfile.allowedTools.includes("extract-schema-fields") &&
+        !record.extractedFields &&
+        !mediaFile
+      ) {
+        extractionError = "Schema extraction failed: source media is no longer available";
+      } else if (
+        (!this.deps.config.analysisEnabled ||
+          !agentProfile.allowedTools.includes("extract-schema-fields")) &&
+        schemaProfile.properties.some(
+          (property) => property.required && !property.systemFieldRole,
+        )
+      ) {
+        extractionError = "Schema extraction is disabled";
       }
 
-      const metadata: ArchiveMetadata = {
-        receivedAt: record.job.receivedAt,
-        lineMessageId: record.job.messageId,
-        lineWebhookEventId: record.job.webhookEventId,
-        lineGroupId: record.job.groupId,
-        lineUserId: record.job.userId,
-        senderName: record.job.senderName,
-        originalFilename: record.originalFilename,
-        mimeType: record.job.mimeType,
-        fileSize: record.fileSize,
+      record.recordIdentity = resolveRecordIdentity({
+        agentProfile,
+        schemaProfile,
         sha256: record.sha256,
-        r2ObjectKey: record.objectKey,
-        analysis: record.analysis,
-        status: analysisError ? "NEED_REVIEW" : "PROCESSED",
-        error: analysisError,
+        extractedFields: record.extractedFields,
+      });
+      const metadata: BusinessRecordMetadata = {
+        agentProfile,
+        schemaProfile,
+        recordIdentity: record.recordIdentity,
+        asset: {
+          sha256: record.sha256,
+          r2ObjectKey: record.objectKey,
+          canonicalExtension: record.canonicalExtension,
+          fileSize: record.fileSize,
+          mimeType: record.job.mimeType,
+        },
+        job: record.job,
+        extractedFields: record.extractedFields,
+        status: extractionError ? "NEED_REVIEW" : "PROCESSED",
+        error: extractionError,
       };
-
       let notionResult: NotionWriteResult;
       try {
         notionResult = await this.deps.notion.createRecord(metadata);
       } catch (error) {
         record.status = "NEED_REVIEW";
-        record.error = `Notion metadata failed: ${safeErrorMessage(error)}`;
+        record.error = `Notion business record failed: ${safeErrorMessage(error)}`;
         await this.persist(record);
         this.deps.logger.error("notion_archive_failed", {
+          agentProfileId: agentProfile.id,
           messageId: record.job.messageId,
-          groupId: record.job.groupId,
           objectKey: record.objectKey,
           error: safeErrorMessage(error),
         });
-        await this.sendAcknowledgement(record, acknowledge);
+        await this.acknowledge(record, agentProfile, acknowledge);
         return;
       }
-
       record.notionPageId = notionResult.pageId;
       record.status = notionResult.kind === "duplicate" ? "DUPLICATE" : metadata.status;
-      record.error = analysisError;
+      record.error = extractionError;
       await this.persist(record);
       this.deps.logger.info("archive_processed", {
+        agentProfileId: agentProfile.id,
+        schemaProfileId: schemaProfile.id,
         messageId: record.job.messageId,
-        groupId: record.job.groupId,
         objectKey: record.objectKey,
         status: record.status,
         fileSize: record.fileSize,
@@ -348,20 +423,19 @@ export class ArchivePipeline {
       record.error = safeErrorMessage(error);
       await this.persist(record);
       this.deps.logger.error("archive_failed", {
+        agentProfileId: agentProfile.id,
         messageId: record.job.messageId,
-        groupId: record.job.groupId,
         error: record.error,
       });
     }
-
-    await this.sendAcknowledgement(record, acknowledge);
+    await this.acknowledge(record, agentProfile, acknowledge);
   }
 }
 
 export {
   acknowledgementFor,
   archiveRecordKey,
-  buildObjectDetails,
+  resolveRecordIdentity,
   resolveSafeMediaFile,
   safeErrorMessage,
   sha256File,
