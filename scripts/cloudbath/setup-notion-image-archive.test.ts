@@ -1,10 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import {
-  compileNotionProperties,
-} from "../../extensions/cloudbath-line-image-archive/src/notion-schema.js";
-import {
-  validateProfileConfiguration,
-} from "../../extensions/cloudbath-line-image-archive/src/profiles.js";
+import { compileNotionProperties } from "../../extensions/cloudbath-line-image-archive/src/notion-schema.js";
+import { validateProfileConfiguration } from "../../extensions/cloudbath-line-image-archive/src/profiles.js";
 import {
   createSchemaPlanProposal,
   readNotionSetupEnvironment,
@@ -118,11 +114,7 @@ describe("generic Notion Schema Profile setup", () => {
       parentPageId: "parent-1",
       databaseId: undefined,
     });
-    expect(reads).toEqual([
-      "NOTION_API_KEY",
-      "NOTION_PARENT_PAGE_ID",
-      "NOTION_DATABASE_ID",
-    ]);
+    expect(reads).toEqual(["NOTION_API_KEY", "NOTION_PARENT_PAGE_ID", "NOTION_DATABASE_ID"]);
     const fetchImpl = vi.fn();
     const result = await runNotionSetup(
       { mode: "plan", schemaProfile: schemaProfile() },
