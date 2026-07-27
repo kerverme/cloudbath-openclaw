@@ -25,7 +25,7 @@ export function compileNotionProperties(
 ): Record<string, Record<string, unknown>> {
   return Object.fromEntries(
     [...schema.properties]
-      .sort((left, right) => left.displayOrder - right.displayOrder)
+      .toSorted((left, right) => left.displayOrder - right.displayOrder)
       .map((property) => {
         if (property.notionType === "select" || property.notionType === "multi_select") {
           return [
