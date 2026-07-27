@@ -108,9 +108,8 @@ export default definePluginEntry({
         });
         const recovered = await pipeline.recoverIncomplete();
         logger.info("archive_started", {
-          activeAgentProfileCount: config.profiles.agentProfiles.filter(
-            (profile) => profile.active,
-          ).length,
+          activeAgentProfileCount: config.profiles.agentProfiles.filter((profile) => profile.active)
+            .length,
           authorizedGroupCount: config.profiles.activeProfilesByGroupId.size,
           schemaProfileCount: config.profiles.schemaProfiles.length,
           analysisEnabled: config.analysisEnabled,
@@ -153,8 +152,4 @@ export default definePluginEntry({
   },
 });
 
-export {
-  extractInboundLineImage,
-  resolveArchiveConfig,
-  resolveSchemaForAgent,
-};
+export { extractInboundLineImage, resolveArchiveConfig, resolveSchemaForAgent };
