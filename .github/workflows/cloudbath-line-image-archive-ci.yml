@@ -70,10 +70,16 @@ jobs:
       - name: Check formatting
         if: steps.dependencies.outcome == 'success' && !cancelled()
         run: |
-          pnpm exec oxfmt --check --threads=1 \
-            extensions/cloudbath-line-image-archive \
-            scripts/cloudbath/setup-notion-image-archive.ts \
+          paths=(
+            extensions/cloudbath-line-image-archive
+            scripts/cloudbath/setup-notion-image-archive.ts
             scripts/cloudbath/setup-notion-image-archive.test.ts
+          )
+          if ! pnpm exec oxfmt --check --threads=1 "${paths[@]}"; then
+            pnpm exec oxfmt --write --threads=1 "${paths[@]}"
+            git --no-pager diff -- "${paths[@]}"
+            exit 1
+          fi
 
       - name: Lint plugin
         if: steps.dependencies.outcome == 'success' && !cancelled()
