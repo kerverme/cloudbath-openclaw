@@ -135,8 +135,7 @@ describe("Agent Profile configuration", () => {
   it("rejects ingestible schemas missing required semantic fields", () => {
     const invalid = schema();
     invalid.properties = invalid.properties.filter(
-      (property) =>
-        !("systemFieldRole" in property) || property.systemFieldRole !== "sha256",
+      (property) => !("systemFieldRole" in property) || property.systemFieldRole !== "sha256",
     );
     expect(() =>
       validateProfileConfiguration({
