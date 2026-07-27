@@ -94,10 +94,3 @@ export function extractInboundLineImage(
     receivedAt: new Date(timestamp).toISOString(),
   };
 }
-
-export function isAuthorizedLineGroup(
-  groupId: string,
-  allowedGroupIds: ReadonlySet<string>,
-): boolean {
-  return allowedGroupIds.has(groupId);
-}
