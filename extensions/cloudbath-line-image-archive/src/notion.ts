@@ -32,16 +32,19 @@ class NotionHttpError extends Error {
   }
 }
 
-function retryAfterMs(headers: Headers): number | undefined {
+function parseRetryAfterMs(headers: Headers): number | undefined {
   const seconds = Number(headers.get("retry-after"));
   return Number.isFinite(seconds) && seconds >= 0 ? seconds * 1_000 : undefined;
 }
 
 function textValue(value: unknown): string {
-  if (value === undefined || value === null) {
-    return "";
+  if (typeof value === "string") {
+    return value.trim().slice(0, MAX_TEXT_LENGTH);
   }
-  return String(value).trim().slice(0, MAX_TEXT_LENGTH);
+  if (typeof value === "number" || typeof value === "boolean") {
+    return `${value}`.slice(0, MAX_TEXT_LENGTH);
+  }
+  return "";
 }
 
 function systemValue(role: SystemFieldRole, metadata: BusinessRecordMetadata): unknown {
@@ -66,6 +69,7 @@ function systemValue(role: SystemFieldRole, metadata: BusinessRecordMetadata): u
     case "error":
       return metadata.error;
   }
+  throw new Error("Unsupported system field role");
 }
 
 function notionPropertyValue(
@@ -109,6 +113,7 @@ function notionPropertyValue(
     case "phone_number":
       return { phone_number: typeof raw === "string" && raw ? raw : null };
   }
+  throw new Error("Unsupported Notion property type");
 }
 
 export class NotionArchiveClient {
@@ -124,20 +129,19 @@ export class NotionArchiveClient {
   private async request<T>(path: string, init?: RequestInit): Promise<T> {
     return await withBoundedRetry(
       async () => {
+        const headers = new Headers(init?.headers);
+        headers.set("Authorization", `Bearer ${this.apiKey}`);
+        headers.set("Content-Type", "application/json");
+        headers.set("Notion-Version", NOTION_API_VERSION);
         const response = await this.fetchImpl(`${NOTION_BASE_URL}${path}`, {
           ...init,
-          headers: {
-            Authorization: `Bearer ${this.apiKey}`,
-            "Content-Type": "application/json",
-            "Notion-Version": NOTION_API_VERSION,
-            ...init?.headers,
-          },
+          headers,
         });
         if (!response.ok) {
           throw new NotionHttpError(
             response.status,
             `Notion API request failed (${response.status})`,
-            retryAfterMs(response.headers),
+            parseRetryAfterMs(response.headers),
           );
         }
         return (await response.json()) as T;
