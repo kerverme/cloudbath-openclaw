@@ -119,7 +119,9 @@ export function validateExtractedValues(
       (property.notionType === "select" || property.notionType === "multi_select")
     ) {
       const values = Array.isArray(value) ? value : [value];
-      if (!values.every((entry) => typeof entry === "string" && property.options?.includes(entry))) {
+      if (
+        !values.every((entry) => typeof entry === "string" && property.options?.includes(entry))
+      ) {
         throw new Error(`Extracted field ${property.id} contains an unsupported option`);
       }
     }
