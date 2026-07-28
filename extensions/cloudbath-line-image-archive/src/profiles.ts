@@ -229,8 +229,14 @@ function parseSchemaProfile(value: unknown, index: number): SchemaProfile {
   const identityRule = parseIdentityRule(raw.recordIdentityRule, `${label}.recordIdentityRule`);
   if (identityRule.kind === "agent-profile-plus-properties") {
     for (const propertyId of identityRule.propertyIds) {
-      if (!propertyIds.includes(propertyId)) {
+      const property = properties.find((candidate) => candidate.id === propertyId);
+      if (!property) {
         throw new Error(`${label} identity property ${propertyId} does not exist`);
+      }
+      if (property.systemFieldRole) {
+        throw new Error(
+          `${label} identity property ${propertyId} is unavailable to runtime extraction`,
+        );
       }
     }
   }
@@ -326,11 +332,21 @@ export function validateProfileConfiguration(value: unknown): ValidatedProfileCo
     }
     const identityRule = profile.recordIdentityRule ?? schema.recordIdentityRule;
     if (identityRule.kind === "agent-profile-plus-properties") {
-      const propertyIds = new Set(schema.properties.map((property) => property.id));
       for (const propertyId of identityRule.propertyIds) {
-        if (!propertyIds.has(propertyId)) {
+        const property = schema.properties.find((candidate) => candidate.id === propertyId);
+        if (!property) {
           throw new Error(`Agent Profile ${profile.id} identity property ${propertyId} is missing`);
         }
+        if (property.systemFieldRole) {
+          throw new Error(
+            `Agent Profile ${profile.id} identity property ${propertyId} is unavailable to runtime extraction`,
+          );
+        }
+      }
+      if (!profile.allowedTools.includes("extract-schema-fields")) {
+        throw new Error(
+          `Agent Profile ${profile.id} composite identity requires extract-schema-fields`,
+        );
       }
     }
     if (!profile.active) {

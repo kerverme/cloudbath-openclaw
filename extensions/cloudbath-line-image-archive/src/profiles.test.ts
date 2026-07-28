@@ -145,4 +145,40 @@ describe("Agent Profile configuration", () => {
       }),
     ).toThrow("exactly one sha256 system field");
   });
+
+  it("rejects composite identities that reference system-managed values", () => {
+    const invalid = {
+      ...schema(),
+      recordIdentityRule: {
+        kind: "agent-profile-plus-properties",
+        propertyIds: ["sha"],
+        rejectWhenMissing: true,
+      },
+    };
+    expect(() =>
+      validateProfileConfiguration({
+        version: 1,
+        schemaProfiles: [invalid],
+        agentProfiles: [],
+      }),
+    ).toThrow("identity property sha is unavailable to runtime extraction");
+  });
+
+  it("requires runtime extraction for an Agent Profile composite identity", () => {
+    const compositeAgent = {
+      ...agent("one", "C1"),
+      recordIdentityRule: {
+        kind: "agent-profile-plus-properties",
+        propertyIds: ["name"],
+        rejectWhenMissing: true,
+      },
+    };
+    expect(() =>
+      validateProfileConfiguration({
+        version: 1,
+        schemaProfiles: [schema()],
+        agentProfiles: [compositeAgent],
+      }),
+    ).toThrow("composite identity requires extract-schema-fields");
+  });
 });

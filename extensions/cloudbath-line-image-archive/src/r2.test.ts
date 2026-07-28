@@ -57,8 +57,6 @@ describe("content-addressed R2 archive", () => {
             $metadata: { httpStatusCode: 404 },
           });
         }
-        const body = (command as PutObjectCommand).input.Body as { destroy?: () => void };
-        body.destroy?.();
         return { ETag: "etag" };
       }),
     };
@@ -78,7 +76,7 @@ describe("content-addressed R2 archive", () => {
     const sha256 = "a".repeat(64);
     await expect(
       archive.ensureObject({
-        filePath,
+        body: await fs.readFile(filePath),
         bucketName: "bucket",
         objectKey: `assets/sha256/aa/${sha256}.png`,
         contentType: "image/png",
@@ -89,6 +87,7 @@ describe("content-addressed R2 archive", () => {
     const put = commands.find((command) => command instanceof PutObjectCommand) as PutObjectCommand;
     expect(put.input.IfNoneMatch).toBe("*");
     expect(put.input).not.toHaveProperty("ACL");
+    expect(put.input.Body).toEqual(await fs.readFile(filePath));
   });
 
   it("reuses an existing globally matching object", async () => {
@@ -114,11 +113,9 @@ describe("content-addressed R2 archive", () => {
       client,
     );
     await expect(
-      archive.ensureObject({
-        filePath,
+      archive.findExistingObject({
         bucketName: "bucket",
         objectKey: `assets/sha256/aa/${sha256}.png`,
-        contentType: "image/png",
         contentLength: 10,
         sha256,
       }),

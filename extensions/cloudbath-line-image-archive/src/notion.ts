@@ -15,6 +15,7 @@ import type {
 
 const NOTION_BASE_URL = "https://api.notion.com";
 const MAX_TEXT_LENGTH = 1_900;
+const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
 type FetchLike = typeof fetch;
 type NotionDatabaseResponse = { data_sources?: Array<{ id?: string }> };
 type NotionDataSourceResponse = { properties?: Record<string, NotionPropertyDefinition> };
@@ -126,27 +127,46 @@ export class NotionArchiveClient {
     private readonly retry: ArchiveConfig["retry"],
     private readonly logger: SafeLogger,
     private readonly fetchImpl: FetchLike = fetch,
+    private readonly requestTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
   ) {}
 
   private async request<T>(path: string, init?: RequestInit): Promise<T> {
     return await withBoundedRetry(
       async () => {
+        const controller = new AbortController();
+        const abortFromCaller = () => controller.abort(init?.signal?.reason);
+        if (init?.signal?.aborted) {
+          abortFromCaller();
+        } else {
+          init?.signal?.addEventListener("abort", abortFromCaller, { once: true });
+        }
+        const timeout = setTimeout(
+          () => controller.abort(new Error("Notion API request timed out")),
+          this.requestTimeoutMs,
+        );
+        timeout.unref?.();
         const headers = new Headers(init?.headers);
         headers.set("Authorization", `Bearer ${this.apiKey}`);
         headers.set("Content-Type", "application/json");
         headers.set("Notion-Version", NOTION_API_VERSION);
-        const response = await this.fetchImpl(`${NOTION_BASE_URL}${path}`, {
-          ...init,
-          headers,
-        });
-        if (!response.ok) {
-          throw new NotionHttpError(
-            response.status,
-            `Notion API request failed (${response.status})`,
-            parseRetryAfterMs(response.headers),
-          );
+        try {
+          const response = await this.fetchImpl(`${NOTION_BASE_URL}${path}`, {
+            ...init,
+            headers,
+            signal: controller.signal,
+          });
+          if (!response.ok) {
+            throw new NotionHttpError(
+              response.status,
+              `Notion API request failed (${response.status})`,
+              parseRetryAfterMs(response.headers),
+            );
+          }
+          return (await response.json()) as T;
+        } finally {
+          clearTimeout(timeout);
+          init?.signal?.removeEventListener("abort", abortFromCaller);
         }
-        return (await response.json()) as T;
       },
       {
         ...this.retry,
@@ -196,7 +216,14 @@ export class NotionArchiveClient {
       })();
       this.dataSources.set(cacheKey, pending);
     }
-    return await pending;
+    try {
+      return await pending;
+    } catch (error) {
+      if (this.dataSources.get(cacheKey) === pending) {
+        this.dataSources.delete(cacheKey);
+      }
+      throw error;
+    }
   }
 
   async createRecord(metadata: BusinessRecordMetadata): Promise<NotionWriteResult> {

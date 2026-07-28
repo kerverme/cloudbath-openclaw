@@ -196,4 +196,71 @@ describe("profile-scoped Notion business records", () => {
       ),
     ).toBe(true);
   });
+
+  it("evicts a rejected schema lookup so a later request can recover", async () => {
+    const record = metadata();
+    const compiled = compileNotionProperties(record.schemaProfile);
+    let databaseRequests = 0;
+    const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+      const url = requestUrl(input);
+      if (url.endsWith("/v1/databases/database-finance")) {
+        databaseRequests += 1;
+        return Response.json(
+          databaseRequests === 1
+            ? { data_sources: [] }
+            : { data_sources: [{ id: "source-finance" }] },
+        );
+      }
+      if (url.endsWith("/v1/data_sources/source-finance")) {
+        return Response.json({
+          properties: Object.fromEntries(
+            Object.entries(compiled).map(([name, value]) => [
+              name,
+              { type: Object.keys(value)[0], ...value },
+            ]),
+          ),
+        });
+      }
+      if (url.endsWith("/query")) {
+        return Response.json({ results: [{ id: "existing-page" }] });
+      }
+      throw new Error(`Unexpected URL ${url}`);
+    }) as typeof fetch;
+    const client = new NotionArchiveClient(
+      "token-placeholder",
+      { maxAttempts: 1, baseDelayMs: 1, maxDelayMs: 1 },
+      logger,
+      fetchImpl,
+    );
+
+    await expect(client.createRecord(record)).rejects.toThrow("exactly one data source");
+    await expect(client.createRecord(record)).resolves.toEqual({
+      kind: "duplicate",
+      pageId: "existing-page",
+    });
+    expect(databaseRequests).toBe(2);
+  });
+
+  it("aborts a Notion request after the bounded per-attempt timeout", async () => {
+    const fetchImpl = vi.fn(
+      async (_input: string | URL | Request, init?: RequestInit): Promise<Response> =>
+        await new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener(
+            "abort",
+            () => reject(init.signal?.reason ?? new Error("aborted")),
+            { once: true },
+          );
+        }),
+    ) as typeof fetch;
+    const client = new NotionArchiveClient(
+      "token-placeholder",
+      { maxAttempts: 1, baseDelayMs: 1, maxDelayMs: 1 },
+      logger,
+      fetchImpl,
+      5,
+    );
+
+    await expect(client.createRecord(metadata())).rejects.toThrow("timed out");
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
 });

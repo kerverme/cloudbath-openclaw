@@ -1,4 +1,3 @@
-import { createReadStream } from "node:fs";
 import fsp from "node:fs/promises";
 import {
   HeadObjectCommand,
@@ -13,13 +12,18 @@ type S3Command = HeadObjectCommand | PutObjectCommand;
 type S3Like = { send(command: S3Command): Promise<unknown> };
 
 export type EnsureR2ObjectParams = {
-  filePath: string;
+  body: Uint8Array;
   bucketName: string;
   objectKey: string;
   contentType: string;
   contentLength: number;
   sha256: string;
 };
+
+export type FindR2ObjectParams = Pick<
+  EnsureR2ObjectParams,
+  "bucketName" | "objectKey" | "contentLength" | "sha256"
+>;
 
 function httpStatus(error: unknown): number | undefined {
   return error && typeof error === "object"
@@ -51,49 +55,53 @@ export function buildContentAddressedObjectKey(params: {
   return params.keyPrefix ? `${params.keyPrefix.replace(/\/+$/, "")}/${assetPath}` : assetPath;
 }
 
+export function detectCanonicalImageExtensionFromBytes(bytes: Uint8Array): string {
+  const header = Buffer.from(bytes.buffer, bytes.byteOffset, Math.min(bytes.byteLength, 16));
+  if (
+    header.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
+  ) {
+    return ".png";
+  }
+  if (header[0] === 0xff && header[1] === 0xd8 && header[2] === 0xff) {
+    return ".jpg";
+  }
+  if (
+    header.subarray(0, 6).toString("ascii") === "GIF87a" ||
+    header.subarray(0, 6).toString("ascii") === "GIF89a"
+  ) {
+    return ".gif";
+  }
+  if (
+    header.subarray(0, 4).toString("ascii") === "RIFF" &&
+    header.subarray(8, 12).toString("ascii") === "WEBP"
+  ) {
+    return ".webp";
+  }
+  if (header.subarray(0, 2).toString("ascii") === "BM") {
+    return ".bmp";
+  }
+  const tiff = header.subarray(0, 4).toString("hex");
+  if (tiff === "49492a00" || tiff === "4d4d002a") {
+    return ".tiff";
+  }
+  if (header.subarray(4, 8).toString("ascii") === "ftyp") {
+    const brand = header.subarray(8, 12).toString("ascii");
+    if (brand === "avif" || brand === "avis") {
+      return ".avif";
+    }
+    if (["heic", "heix", "hevc", "hevx", "mif1"].includes(brand)) {
+      return ".heic";
+    }
+  }
+  return ".bin";
+}
+
 export async function detectCanonicalImageExtension(filePath: string): Promise<string> {
   const file = await fsp.open(filePath, "r");
   try {
     const bytes = Buffer.alloc(16);
     const { bytesRead } = await file.read(bytes, 0, bytes.length, 0);
-    const header = bytes.subarray(0, bytesRead);
-    if (
-      header.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
-    ) {
-      return ".png";
-    }
-    if (header[0] === 0xff && header[1] === 0xd8 && header[2] === 0xff) {
-      return ".jpg";
-    }
-    if (
-      header.subarray(0, 6).toString("ascii") === "GIF87a" ||
-      header.subarray(0, 6).toString("ascii") === "GIF89a"
-    ) {
-      return ".gif";
-    }
-    if (
-      header.subarray(0, 4).toString("ascii") === "RIFF" &&
-      header.subarray(8, 12).toString("ascii") === "WEBP"
-    ) {
-      return ".webp";
-    }
-    if (header.subarray(0, 2).toString("ascii") === "BM") {
-      return ".bmp";
-    }
-    const tiff = header.subarray(0, 4).toString("hex");
-    if (tiff === "49492a00" || tiff === "4d4d002a") {
-      return ".tiff";
-    }
-    if (header.subarray(4, 8).toString("ascii") === "ftyp") {
-      const brand = header.subarray(8, 12).toString("ascii");
-      if (brand === "avif" || brand === "avis") {
-        return ".avif";
-      }
-      if (["heic", "heix", "hevc", "hevx", "mif1"].includes(brand)) {
-        return ".heic";
-      }
-    }
-    return ".bin";
+    return detectCanonicalImageExtensionFromBytes(bytes.subarray(0, bytesRead));
   } finally {
     await file.close();
   }
@@ -149,26 +157,30 @@ export class R2ArchiveClient {
 
   private verifyExisting(
     existing: HeadObjectCommandOutput,
-    params: EnsureR2ObjectParams,
+    params: FindR2ObjectParams,
   ): { kind: "existing"; etag?: string } {
     if (existing.Metadata?.sha256 !== params.sha256) {
       throw new Error(`R2 content-addressed object conflict for ${params.objectKey}`);
     }
-    if (
-      typeof existing.ContentLength === "number" &&
-      existing.ContentLength !== params.contentLength
-    ) {
+    if (existing.ContentLength !== params.contentLength) {
       throw new Error(`R2 content-addressed object size conflict for ${params.objectKey}`);
     }
     return { kind: "existing", etag: existing.ETag };
   }
 
+  async findExistingObject(
+    params: FindR2ObjectParams,
+  ): Promise<{ kind: "existing"; etag?: string } | null> {
+    const existing = await this.head(params.bucketName, params.objectKey);
+    return existing ? this.verifyExisting(existing, params) : null;
+  }
+
   async ensureObject(
     params: EnsureR2ObjectParams,
   ): Promise<{ kind: "uploaded" | "existing"; etag?: string }> {
-    const existing = await this.head(params.bucketName, params.objectKey);
+    const existing = await this.findExistingObject(params);
     if (existing) {
-      return this.verifyExisting(existing, params);
+      return existing;
     }
     try {
       const uploaded = (await withBoundedRetry(
@@ -177,7 +189,7 @@ export class R2ArchiveClient {
             new PutObjectCommand({
               Bucket: params.bucketName,
               Key: params.objectKey,
-              Body: createReadStream(params.filePath),
+              Body: params.body,
               ContentLength: params.contentLength,
               ContentType: params.contentType,
               IfNoneMatch: "*",

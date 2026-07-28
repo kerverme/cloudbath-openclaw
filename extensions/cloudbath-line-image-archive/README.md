@@ -279,8 +279,15 @@ LINE group allowlists and Notion database IDs are no longer global environment v
 
 ## Runtime safety
 
+- Production assumes exactly one Railway gateway replica while the plugin uses its process-local
+  serial worker.
+- Use a dedicated private R2 bucket or credentials restricted to an exclusive plugin prefix.
+- Official LINE `allowFrom` controls remain responsible for sender authorization; Agent Profile
+  group routing is an additional scope boundary, not a replacement for `allowFrom`.
+- Keep `CLOUDBATH_IMAGE_ANALYSIS_ENABLED=false` for the first production pilot.
 - The official LINE integration continues to own webhook verification and media download.
-- Original bytes are streamed to R2 without recompression.
+- Original bytes are read into a bounded `IMAGE_MAX_MB` buffer and uploaded to R2 without
+  recompression.
 - Persistent job state uses OpenClaw's shared SQLite-backed plugin store namespace
   `archive-jobs-v2`.
 - R2 and Notion use bounded retries.

@@ -2,7 +2,10 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
-import { buildContentAddressedObjectKey, detectCanonicalImageExtension } from "./r2.js";
+import {
+  buildContentAddressedObjectKey,
+  detectCanonicalImageExtensionFromBytes,
+} from "./r2.js";
 import type {
   AgentProfile,
   ArchiveConfig,
@@ -18,8 +21,14 @@ import type {
 } from "./types.js";
 
 type R2ClientLike = {
+  findExistingObject(params: {
+    bucketName: string;
+    objectKey: string;
+    contentLength: number;
+    sha256: string;
+  }): Promise<{ kind: "existing"; etag?: string } | null>;
   ensureObject(params: {
-    filePath: string;
+    body: Uint8Array;
     bucketName: string;
     objectKey: string;
     contentType: string;
@@ -73,41 +82,75 @@ async function resolveSafeMediaFile(params: {
   stateDir: string;
   maxBytes: number;
 }): Promise<{ path: string; size: number }> {
-  const inboundRoot = await fsp.realpath(path.join(params.stateDir, "media", "inbound"));
-  const resolvedFile = await fsp.realpath(params.filePath);
-  const relative = path.relative(inboundRoot, resolvedFile);
-  if (
-    !relative ||
-    relative.startsWith("..") ||
-    path.isAbsolute(relative) ||
-    relative.includes(path.sep)
-  ) {
-    throw new Error("Inbound image path is outside the managed media directory");
+  try {
+    const inboundRoot = await fsp.realpath(path.join(params.stateDir, "media", "inbound"));
+    const resolvedFile = await fsp.realpath(params.filePath);
+    const relative = path.relative(inboundRoot, resolvedFile);
+    if (
+      !relative ||
+      relative.startsWith("..") ||
+      path.isAbsolute(relative) ||
+      relative.includes(path.sep)
+    ) {
+      throw new Error("Inbound image path is outside the managed media directory");
+    }
+    const stat = await fsp.stat(resolvedFile);
+    if (!stat.isFile()) {
+      throw new Error("Inbound image path is not a regular file");
+    }
+    if (stat.size <= 0) {
+      throw new Error("Inbound image is empty");
+    }
+    if (stat.size > params.maxBytes) {
+      throw new Error(
+        `Inbound image exceeds IMAGE_MAX_MB (${Math.ceil(params.maxBytes / 1024 / 1024)} MB)`,
+      );
+    }
+    return { path: resolvedFile, size: stat.size };
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith("Inbound image ")) {
+      throw error;
+    }
+    throw new Error("Inbound image file is unavailable or unsafe");
   }
-  const stat = await fsp.stat(resolvedFile);
-  if (!stat.isFile()) {
-    throw new Error("Inbound image path is not a regular file");
-  }
-  if (stat.size <= 0) {
-    throw new Error("Inbound image is empty");
-  }
-  if (stat.size > params.maxBytes) {
-    throw new Error(
-      `Inbound image exceeds IMAGE_MAX_MB (${Math.ceil(params.maxBytes / 1024 / 1024)} MB)`,
-    );
-  }
-  return { path: resolvedFile, size: stat.size };
 }
 
-async function sha256File(filePath: string): Promise<string> {
-  const hash = crypto.createHash("sha256");
-  await new Promise<void>((resolve, reject) => {
-    const stream = fs.createReadStream(filePath);
-    stream.on("data", (chunk: Buffer) => hash.update(chunk));
-    stream.once("error", reject);
-    stream.once("end", resolve);
-  });
-  return hash.digest("hex");
+async function readSafeMediaFile(params: {
+  filePath: string;
+  stateDir: string;
+  maxBytes: number;
+  expectedSize?: number;
+  expectedSha256?: string;
+}): Promise<{ path: string; size: number; bytes: Buffer; sha256: string }> {
+  const mediaFile = await resolveSafeMediaFile(params);
+  let file: Awaited<ReturnType<typeof fsp.open>> | undefined;
+  try {
+    file = await fsp.open(mediaFile.path, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    const before = await file.stat();
+    if (!before.isFile() || before.size !== mediaFile.size) {
+      throw new Error("Inbound image changed before it could be read safely");
+    }
+    const bytes = await file.readFile();
+    const after = await file.stat();
+    if (after.size !== before.size || bytes.byteLength !== before.size) {
+      throw new Error("Inbound image changed while it was being read");
+    }
+    if (params.expectedSize !== undefined && bytes.byteLength !== params.expectedSize) {
+      throw new Error("Inbound image size no longer matches archived state");
+    }
+    const sha256 = crypto.createHash("sha256").update(bytes).digest("hex");
+    if (params.expectedSha256 !== undefined && sha256 !== params.expectedSha256) {
+      throw new Error("Inbound image SHA-256 no longer matches archived state");
+    }
+    return { path: mediaFile.path, size: bytes.byteLength, bytes, sha256 };
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith("Inbound image ")) {
+      throw error;
+    }
+    throw new Error("Inbound image file is unavailable or unsafe");
+  } finally {
+    await file?.close();
+  }
 }
 
 function canonicalIdentityValue(value: unknown): string {
@@ -283,16 +326,18 @@ export class ArchivePipeline {
     await this.persist(record);
     let extractionError: string | undefined;
     try {
-      let mediaFile: { path: string; size: number } | undefined;
+      let mediaFile:
+        | { path: string; size: number; bytes: Buffer; sha256: string }
+        | undefined;
       if (!record.sha256 || !record.objectKey || !record.fileSize || !record.canonicalExtension) {
-        mediaFile = await resolveSafeMediaFile({
+        mediaFile = await readSafeMediaFile({
           filePath: record.job.mediaPath,
           stateDir: this.deps.stateDir,
           maxBytes: this.deps.config.imageMaxBytes,
         });
         record.fileSize = mediaFile.size;
-        record.sha256 = await sha256File(mediaFile.path);
-        record.canonicalExtension = await detectCanonicalImageExtension(mediaFile.path);
+        record.sha256 = mediaFile.sha256;
+        record.canonicalExtension = detectCanonicalImageExtensionFromBytes(mediaFile.bytes);
         record.objectKey = buildContentAddressedObjectKey({
           keyPrefix: this.deps.config.r2.keyPrefix,
           sha256: record.sha256,
@@ -303,21 +348,42 @@ export class ArchivePipeline {
       if (!record.sha256 || !record.objectKey || !record.fileSize || !record.canonicalExtension) {
         throw new Error("Archive state is missing content-addressed asset metadata");
       }
-      if (!mediaFile) {
-        mediaFile = await resolveSafeMediaFile({
-          filePath: record.job.mediaPath,
-          stateDir: this.deps.stateDir,
-          maxBytes: this.deps.config.imageMaxBytes,
-        }).catch(() => undefined);
-      }
-      await this.deps.r2.ensureObject({
-        filePath: mediaFile?.path ?? record.job.mediaPath,
+      const existingObject = await this.deps.r2.findExistingObject({
         bucketName: this.deps.config.r2.bucketName,
         objectKey: record.objectKey,
-        contentType: record.job.mimeType,
         contentLength: record.fileSize,
         sha256: record.sha256,
       });
+      if (!existingObject) {
+        mediaFile = await readSafeMediaFile({
+          filePath: record.job.mediaPath,
+          stateDir: this.deps.stateDir,
+          maxBytes: this.deps.config.imageMaxBytes,
+          expectedSize: record.fileSize,
+          expectedSha256: record.sha256,
+        });
+        await this.deps.r2.ensureObject({
+          body: mediaFile.bytes,
+          bucketName: this.deps.config.r2.bucketName,
+          objectKey: record.objectKey,
+          contentType: record.job.mimeType,
+          contentLength: record.fileSize,
+          sha256: record.sha256,
+        });
+      } else if (
+        this.deps.config.analysisEnabled &&
+        this.deps.extract &&
+        !record.extractedFields &&
+        agentProfile.allowedTools.includes("extract-schema-fields")
+      ) {
+        mediaFile = await readSafeMediaFile({
+          filePath: record.job.mediaPath,
+          stateDir: this.deps.stateDir,
+          maxBytes: this.deps.config.imageMaxBytes,
+          expectedSize: record.fileSize,
+          expectedSha256: record.sha256,
+        }).catch(() => undefined);
+      }
 
       if (
         this.deps.config.analysisEnabled &&
@@ -426,6 +492,6 @@ export {
   archiveRecordKey,
   resolveRecordIdentity,
   resolveSafeMediaFile,
+  readSafeMediaFile,
   safeErrorMessage,
-  sha256File,
 };
