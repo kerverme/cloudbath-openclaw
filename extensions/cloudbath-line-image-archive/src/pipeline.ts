@@ -2,10 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
-import {
-  buildContentAddressedObjectKey,
-  detectCanonicalImageExtensionFromBytes,
-} from "./r2.js";
+import { buildContentAddressedObjectKey, detectCanonicalImageExtensionFromBytes } from "./r2.js";
 import type {
   AgentProfile,
   ArchiveConfig,
@@ -111,7 +108,7 @@ async function resolveSafeMediaFile(params: {
     if (error instanceof Error && error.message.startsWith("Inbound image ")) {
       throw error;
     }
-    throw new Error("Inbound image file is unavailable or unsafe");
+    throw new Error("Inbound image file is unavailable or unsafe", { cause: error });
   }
 }
 
@@ -147,7 +144,7 @@ async function readSafeMediaFile(params: {
     if (error instanceof Error && error.message.startsWith("Inbound image ")) {
       throw error;
     }
-    throw new Error("Inbound image file is unavailable or unsafe");
+    throw new Error("Inbound image file is unavailable or unsafe", { cause: error });
   } finally {
     await file?.close();
   }
@@ -326,9 +323,7 @@ export class ArchivePipeline {
     await this.persist(record);
     let extractionError: string | undefined;
     try {
-      let mediaFile:
-        | { path: string; size: number; bytes: Buffer; sha256: string }
-        | undefined;
+      let mediaFile: { path: string; size: number; bytes: Buffer; sha256: string } | undefined;
       if (!record.sha256 || !record.objectKey || !record.fileSize || !record.canonicalExtension) {
         mediaFile = await readSafeMediaFile({
           filePath: record.job.mediaPath,

@@ -247,7 +247,10 @@ describe("profile-scoped Notion business records", () => {
         await new Promise<Response>((_resolve, reject) => {
           init?.signal?.addEventListener(
             "abort",
-            () => reject(init.signal?.reason ?? new Error("aborted")),
+            () => {
+              const reason = init.signal?.reason;
+              reject(reason instanceof Error ? reason : new Error("aborted"));
+            },
             { once: true },
           );
         }),
