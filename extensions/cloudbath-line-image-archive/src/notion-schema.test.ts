@@ -97,7 +97,7 @@ describe("dynamic Notion schema", () => {
         name,
         { type: Object.keys(value)[0], ...value },
       ]),
-    );
+    ) as Record<string, NotionPropertyDefinition>;
     retrieved.Priority = {
       type: "select",
       select: { options: [{ name: "LOW" }, { name: "UNCONFIGURED" }] },
