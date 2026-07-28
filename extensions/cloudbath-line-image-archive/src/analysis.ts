@@ -2,7 +2,7 @@ import {
   resolveDefaultModelForAgent,
   resolveSessionAgentIds,
 } from "openclaw/plugin-sdk/agent-runtime";
-import type { OpenClawConfig } from "openclaw/plugin-sdk/config-types";
+import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk/plugin-entry";
 import type {
   AgentProfile,

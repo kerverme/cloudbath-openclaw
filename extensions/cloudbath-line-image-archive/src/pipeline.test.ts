@@ -399,11 +399,13 @@ describe("universal asset and profile-scoped business records", () => {
     await pipeline.waitForIdle();
 
     expect(r2.ensureObject).toHaveBeenCalledTimes(1);
-    expect(r2.ensureObject.mock.calls[0]?.[0]).toMatchObject({
-      body: expectedBytes,
-      contentLength: expectedBytes.byteLength,
-      sha256: record.sha256,
-    });
+    expect(r2.ensureObject).toHaveBeenCalledWith(
+      expect.objectContaining({
+        body: expectedBytes,
+        contentLength: expectedBytes.byteLength,
+        sha256: record.sha256,
+      }),
+    );
     expect(notion.createRecord).toHaveBeenCalledTimes(1);
     expect(store.values.get(record.key)).toMatchObject({ status: "PROCESSED" });
   });

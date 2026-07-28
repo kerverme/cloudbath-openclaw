@@ -57,7 +57,23 @@ jobs:
             extensions/cloudbath-line-image-archive/src/profiles.test.ts \
             extensions/cloudbath-line-image-archive/src/r2.test.ts \
             extensions/cloudbath-line-image-archive/src/retry.test.ts \
-            scripts/cloudbath/setup-notion-image-archive.test.ts
+
+      - name: Run setup-script Vitest suite
+        if: steps.dependencies.outcome == 'success' && !cancelled()
+        run: |
+          config_file=.cloudbath-setup-vitest.config.ts
+          trap 'rm -f "$config_file"' EXIT
+          cat > "$config_file" <<'EOF'
+          import { defineConfig } from "vitest/config";
+
+          export default defineConfig({
+            test: {
+              include: ["scripts/cloudbath/setup-notion-image-archive.test.ts"],
+              passWithNoTests: false,
+            },
+          });
+          EOF
+          pnpm exec vitest run --config "$config_file"
 
       - name: Typecheck extensions
         if: steps.dependencies.outcome == 'success' && !cancelled()

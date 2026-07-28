@@ -4,6 +4,7 @@ import {
   createMigrationProposal,
   validateNotionProperties,
 } from "./notion-schema.js";
+import type { NotionPropertyDefinition } from "./notion-schema.js";
 import { validateProfileConfiguration } from "./profiles.js";
 
 function dynamicSchema() {
@@ -84,7 +85,7 @@ describe("dynamic Notion schema", () => {
         name,
         { type: Object.keys(value)[0], ...value },
       ]),
-    );
+    ) as Record<string, NotionPropertyDefinition>;
     expect(validateNotionProperties(schema, retrieved)).toEqual([]);
   });
 
