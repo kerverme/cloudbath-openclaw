@@ -1,0 +1,30 @@
+{
+  "id": "cloudbath-line-image-archive",
+  "name": "Cloudbath LINE Image Archive",
+  "description": "Archives universal LINE image assets and configurable Agent Profile business records.",
+  "enabledByDefault": false,
+  "activation": {
+    "onStartup": true
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "version": {
+        "const": 1
+      },
+      "agentProfiles": {
+        "type": "array",
+        "items": {
+          "type": "object"
+        }
+      },
+      "schemaProfiles": {
+        "type": "array",
+        "items": {
+          "type": "object"
+        }
+      }
+    }
+  }
+}

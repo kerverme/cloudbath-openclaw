@@ -1,0 +1,321 @@
+# Cloudbath LINE Image Archive
+
+This additive OpenClaw plugin separates permanent image assets from configurable business agents:
+
+1. The official LINE plugin verifies and downloads an image unchanged.
+2. This plugin calculates SHA-256 and stores the bytes once in private Cloudflare R2.
+3. The exact LINE group selects one active Agent Profile.
+4. The Agent Profile selects its Schema Profile and Notion database.
+5. Optional model extraction produces fields defined by that schema.
+6. A profile-scoped Notion record references the shared R2 object.
+
+It targets OpenClaw `2026.7.2`, uses the supported `message_received` hook, and does not patch
+OpenClaw core or `extensions/line`.
+
+## Universal asset identity
+
+R2 is the permanent, shared asset archive. Keys are content-addressed:
+
+```text
+[R2_KEY_PREFIX/]assets/sha256/<first-two-hash-chars>/<sha256>.<extension>
+```
+
+The extension is derived from file bytes rather than an inbound filename. `HeadObject` plus
+conditional `PutObject` prevents overwrites and handles concurrent creation. An existing object
+must have matching SHA-256 metadata and size.
+
+The same bytes sent to construction and finance agents therefore produce one R2 object.
+
+## Business-record identity
+
+Notion records are owned by Agent Profiles, not by the global asset store. The default identity is:
+
+```text
+<agent-profile-id>:<sha256>
+```
+
+The same R2 object can have one construction record and one finance record. A Schema Profile may
+instead define an ordered composite identity from extracted property IDs.
+
+## Agent and Schema Profiles
+
+Profiles are ordinary plugin configuration. Adding an agent role or schema does not require source
+changes. Startup validation rejects duplicate IDs, missing schema versions, invalid system fields,
+and a LINE group assigned to more than one active Agent Profile.
+
+```json5
+{
+  plugins: {
+    entries: {
+      "cloudbath-line-image-archive": {
+        enabled: true,
+        config: {
+          version: 1,
+          schemaProfiles: [
+            {
+              id: "property-maintenance",
+              name: "Property Maintenance",
+              description: "Maintenance evidence and follow-up work",
+              version: 1,
+              databaseTitle: "Cloudbath Property Maintenance",
+              recordIdentityRule: {
+                kind: "agent-profile-plus-sha256",
+              },
+              suggestedViews: [],
+              exampleQuestions: ["Which maintenance issues still need action?"],
+              properties: [
+                {
+                  id: "name",
+                  name: "Name",
+                  notionType: "title",
+                  required: false,
+                  validationRules: [],
+                  searchable: true,
+                  aggregatable: false,
+                  displayOrder: 1,
+                },
+                {
+                  id: "assetId",
+                  name: "Asset ID",
+                  notionType: "rich_text",
+                  required: true,
+                  validationRules: [],
+                  searchable: true,
+                  aggregatable: false,
+                  displayOrder: 2,
+                  systemFieldRole: "recordIdentity",
+                },
+                {
+                  id: "sha256",
+                  name: "SHA-256",
+                  notionType: "rich_text",
+                  required: true,
+                  validationRules: [],
+                  searchable: true,
+                  aggregatable: false,
+                  displayOrder: 3,
+                  systemFieldRole: "sha256",
+                },
+                {
+                  id: "r2ObjectKey",
+                  name: "R2 Object Key",
+                  notionType: "rich_text",
+                  required: true,
+                  validationRules: [],
+                  searchable: true,
+                  aggregatable: false,
+                  displayOrder: 4,
+                  systemFieldRole: "r2ObjectKey",
+                },
+                {
+                  id: "receivedAt",
+                  name: "Received At",
+                  notionType: "date",
+                  required: true,
+                  validationRules: [],
+                  searchable: true,
+                  aggregatable: true,
+                  displayOrder: 5,
+                  systemFieldRole: "receivedAt",
+                },
+                {
+                  id: "issueType",
+                  name: "Issue Type",
+                  notionType: "select",
+                  required: false,
+                  options: ["PLUMBING", "ELECTRICAL", "STRUCTURAL", "OTHER"],
+                  extractionDescription: "Visible maintenance issue category",
+                  validationRules: [],
+                  searchable: true,
+                  aggregatable: false,
+                  displayOrder: 6,
+                },
+              ],
+            },
+          ],
+          agentProfiles: [
+            {
+              id: "maintenance-bangkok",
+              name: "Bangkok Maintenance Agent",
+              active: true,
+              persona: "Property maintenance coordinator",
+              instructions: "Archive authorized evidence and record visible facts.",
+              authorizedLineGroupIds: ["<EXACT_LINE_GROUP_ID>"],
+              adminLineUserIds: ["<EXACT_ADMIN_USER_ID>"],
+              notionDatabaseId: "<NOTION_DATABASE_ID>",
+              schemaProfileId: "property-maintenance",
+              schemaVersion: 1,
+              extractionInstructions: "Never infer facts that are not visible or supplied.",
+              allowedTools: ["archive-image", "extract-schema-fields", "write-notion-record"],
+              defaultModelAlias: "vision-default",
+              allowedModelAliases: ["vision-default"],
+              silentToggleCode: "reserved-for-follow-up",
+              archiveAcknowledgementsEnabled: true,
+            },
+          ],
+        },
+      },
+    },
+  },
+}
+```
+
+Every ingestible Schema Profile must have exactly one `title` property and exactly one property for
+each required semantic role:
+
+- `recordIdentity` as `rich_text`
+- `sha256` as `rich_text`
+- `r2ObjectKey` as `rich_text`
+- `receivedAt` as `date`
+
+Visible property names remain entirely profile-specific.
+
+## Construction example
+
+`profiles/construction-site-progress.v1.json` is an example Schema Profile only. Its
+`agentProfiles` array is empty, so it cannot activate itself or become a global default. It
+demonstrates progress, project, zone, floor, discipline, work package, issue, action, due date,
+verification, and tag fields.
+
+Copy or adapt the profile into explicit plugin configuration and provide an Agent Profile binding
+before runtime use.
+
+## One-time Notion workflow
+
+Create a Notion internal integration in **Settings → Connections**, grant it permission to read
+and insert content, and keep its token outside the repository. Create or choose a parent page,
+open **Share**, and invite that integration. When binding an existing database, share that
+database with the same integration as well.
+
+The manual setup script supports:
+
+- `plan`: render an immutable `SchemaPlanProposal`; no Notion API call.
+- `create`: create or safely reuse a database only with the exact proposal approval ID.
+- `bind`: validate a database and return the IDs needed by an Agent Profile.
+- `validate`: read-only schema validation.
+- `migration-plan`: read-only version comparison with `automaticActions: []`.
+
+The script has no `PATCH`, `PUT`, or `DELETE` path. It never runs during gateway startup.
+
+Set a reusable profile path:
+
+```bash
+PROFILE_CONFIG=extensions/cloudbath-line-image-archive/profiles/construction-site-progress.v1.json
+```
+
+Generate the proposal:
+
+```bash
+pnpm exec tsx scripts/cloudbath/setup-notion-image-archive.ts \
+  --mode plan \
+  --profile-config "$PROFILE_CONFIG" \
+  --schema-profile construction-site-progress \
+  --schema-version 1
+```
+
+Review the proposal, then explicitly approve its exact `proposalId`:
+
+```bash
+NOTION_API_KEY="$NOTION_API_KEY" \
+NOTION_PARENT_PAGE_ID="$NOTION_PARENT_PAGE_ID" \
+pnpm exec tsx scripts/cloudbath/setup-notion-image-archive.ts \
+  --mode create \
+  --profile-config "$PROFILE_CONFIG" \
+  --schema-profile construction-site-progress \
+  --schema-version 1 \
+  --approve "<EXACT_PROPOSAL_ID>"
+```
+
+Bind or validate an existing database without changing it:
+
+```bash
+NOTION_API_KEY="$NOTION_API_KEY" \
+NOTION_DATABASE_ID="$NOTION_DATABASE_ID" \
+pnpm exec tsx scripts/cloudbath/setup-notion-image-archive.ts \
+  --mode bind \
+  --profile-config "$PROFILE_CONFIG" \
+  --schema-profile construction-site-progress \
+  --schema-version 1
+```
+
+Create a migration proposal:
+
+```bash
+NOTION_API_KEY="$NOTION_API_KEY" \
+NOTION_DATABASE_ID="$NOTION_DATABASE_ID" \
+pnpm exec tsx scripts/cloudbath/setup-notion-image-archive.ts \
+  --mode migration-plan \
+  --profile-config "$PROFILE_CONFIG" \
+  --schema-profile construction-site-progress \
+  --schema-version 1 \
+  --from-version 0
+```
+
+A migration proposal reports missing, incompatible, possible-rename, and unrelated properties.
+It never applies them. Administrators must review and make any schema changes separately.
+
+`NOTION_PARENT_PAGE_ID` and `NOTION_DATABASE_ID` are setup inputs. Runtime reads only
+`NOTION_API_KEY`; each runtime database ID comes from its Agent Profile. After setup, copy the
+reported database ID into that Agent Profile's `notionDatabaseId` configuration field. Add only
+`NOTION_API_KEY` to Railway for Notion runtime access; do not create a global
+`NOTION_DATABASE_ID` runtime variable.
+
+## Environment variables
+
+| Variable                           | Runtime purpose                                               |
+| ---------------------------------- | ------------------------------------------------------------- |
+| `CLOUDBATH_IMAGE_ARCHIVE_ENABLED`  | Master switch; defaults to `false`.                           |
+| `CLOUDBATH_IMAGE_ANALYSIS_ENABLED` | Enables schema-based extraction; defaults to `false`.         |
+| `IMAGE_MAX_MB`                     | Archive limit, default `10`, maximum `100`.                   |
+| `R2_ACCOUNT_ID`                    | Cloudflare account ID.                                        |
+| `R2_ACCESS_KEY_ID`                 | Bucket-scoped S3 access key ID.                               |
+| `R2_SECRET_ACCESS_KEY`             | Bucket-scoped S3 secret.                                      |
+| `R2_BUCKET_NAME`                   | Existing private bucket.                                      |
+| `R2_ENDPOINT`                      | Optional HTTPS S3 endpoint.                                   |
+| `R2_KEY_PREFIX`                    | Optional prefix before `assets/`.                             |
+| `NOTION_API_KEY`                   | Notion integration credential shared by configured databases. |
+
+LINE group allowlists and Notion database IDs are no longer global environment variables.
+
+## Runtime safety
+
+- Production assumes exactly one Railway gateway replica while the plugin uses its process-local
+  serial worker.
+- Use a dedicated private R2 bucket or credentials restricted to an exclusive plugin prefix.
+- Official LINE `allowFrom` controls remain responsible for sender authorization; Agent Profile
+  group routing is an additional scope boundary, not a replacement for `allowFrom`.
+- Keep `CLOUDBATH_IMAGE_ANALYSIS_ENABLED=false` for the first production pilot.
+- The official LINE integration continues to own webhook verification and media download.
+- Original bytes are read into a bounded `IMAGE_MAX_MB` buffer and uploaded to R2 without
+  recompression.
+- Persistent job state uses OpenClaw's shared SQLite-backed plugin store namespace
+  `archive-jobs-v2`.
+- R2 and Notion use bounded retries.
+- Runtime validates Notion schemas but never creates or modifies database properties.
+- An unknown group is ignored.
+- Ambiguous active group routing prevents startup.
+- Optional extraction failure leaves the asset archived and marks the business record for review.
+- Acknowledgements are controlled independently by each Agent Profile.
+- Logs never include image contents, API tokens, access keys, or credentials.
+
+## Deferred capabilities
+
+This PR defines model aliases, allowed tools, and `SchemaPlanProposal`, but deliberately does not
+implement:
+
+- Notion search/get/stats tools for the model
+- chat-driven model switching
+- persistent `7272` silent mode
+- advanced multi-agent routing
+- LLM-generated schema planning
+
+## OpenClaw 2026.7.2 limitations
+
+- `message_received` does not expose raw LINE `webhookEventId` or the original `replyToken`.
+- LINE image events do not contain an original filename.
+- The current session model is used for optional extraction; profile-driven model switching is
+  deferred.
+- Notion databases must contain exactly one data source.
+
+All automated tests mock R2, Notion, LINE, and model boundaries. They do not access production
+services or secrets.

@@ -1,0 +1,175 @@
+name: Cloudbath LINE Image Archive CI
+
+on:
+  pull_request:
+    paths:
+      - "extensions/cloudbath-line-image-archive/**"
+      - "scripts/cloudbath/setup-notion-image-archive*"
+      - "deploy/cloudbath/railway/Dockerfile"
+      - "pnpm-lock.yaml"
+      - ".github/workflows/cloudbath-line-image-archive-ci.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  targeted-validation:
+    name: Targeted validation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      OPENCLAW_VITEST_MAX_WORKERS: "4"
+    steps:
+      - name: Checkout PR commit
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Setup Node, Corepack, pnpm, cache, and dependencies
+        id: dependencies
+        uses: ./.github/actions/setup-node-env
+        with:
+          node-version: "24.x"
+          install-bun: "false"
+          frozen-lockfile: "true"
+          use-actions-cache: "true"
+          save-actions-cache: "true"
+
+      - name: Run focused Vitest suite
+        if: steps.dependencies.outcome == 'success' && !cancelled()
+        run: |
+          node scripts/run-vitest.mjs run \
+            extensions/cloudbath-line-image-archive/src/analysis.test.ts \
+            extensions/cloudbath-line-image-archive/src/config.test.ts \
+            extensions/cloudbath-line-image-archive/src/inbound.test.ts \
+            extensions/cloudbath-line-image-archive/src/notion-schema.test.ts \
+            extensions/cloudbath-line-image-archive/src/notion.test.ts \
+            extensions/cloudbath-line-image-archive/src/pipeline.test.ts \
+            extensions/cloudbath-line-image-archive/src/profiles.test.ts \
+            extensions/cloudbath-line-image-archive/src/r2.test.ts \
+            extensions/cloudbath-line-image-archive/src/retry.test.ts \
+
+      - name: Run setup-script Vitest suite
+        if: steps.dependencies.outcome == 'success' && !cancelled()
+        run: |
+          config_file=.cloudbath-setup-vitest.config.ts
+          trap 'rm -f "$config_file"' EXIT
+          cat > "$config_file" <<'EOF'
+          import { defineConfig } from "vitest/config";
+
+          export default defineConfig({
+            test: {
+              include: ["scripts/cloudbath/setup-notion-image-archive.test.ts"],
+              passWithNoTests: false,
+            },
+          });
+          EOF
+          pnpm exec vitest run --config "$config_file"
+
+      - name: Typecheck extensions
+        if: steps.dependencies.outcome == 'success' && !cancelled()
+        run: pnpm tsgo:extensions
+
+      - name: Typecheck scripts
+        if: steps.dependencies.outcome == 'success' && !cancelled()
+        run: pnpm tsgo:scripts
+
+      - name: Check formatting
+        if: steps.dependencies.outcome == 'success' && !cancelled()
+        run: |
+          paths=(
+            extensions/cloudbath-line-image-archive
+            scripts/cloudbath/setup-notion-image-archive.ts
+            scripts/cloudbath/setup-notion-image-archive.test.ts
+          )
+          if ! pnpm exec oxfmt --check --threads=1 "${paths[@]}"; then
+            pnpm exec oxfmt --write --threads=1 "${paths[@]}"
+            git --no-pager diff -- "${paths[@]}"
+            exit 1
+          fi
+
+      - name: Lint plugin
+        if: steps.dependencies.outcome == 'success' && !cancelled()
+        run: |
+          node scripts/run-oxlint.mjs \
+            --tsconfig config/tsconfig/oxlint.extensions.json \
+            extensions/cloudbath-line-image-archive
+
+      - name: Lint setup script
+        if: steps.dependencies.outcome == 'success' && !cancelled()
+        run: |
+          node scripts/run-oxlint.mjs \
+            --tsconfig config/tsconfig/oxlint.scripts.json \
+            scripts/cloudbath/setup-notion-image-archive.ts \
+            scripts/cloudbath/setup-notion-image-archive.test.ts
+
+  production-image:
+    name: Production Docker image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout PR commit
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Build production image
+        run: |
+          docker build \
+            --file deploy/cloudbath/railway/Dockerfile \
+            --tag cloudbath-openclaw:line-image-archive-ci \
+            --build-arg OPENCLAW_EXTENSIONS=cloudbath-line-image-archive \
+            .
+
+      - name: Verify plugin runtime contents
+        run: |
+          docker run --rm --network none \
+            --entrypoint /bin/sh \
+            cloudbath-openclaw:line-image-archive-ci \
+            -ec '
+              test -f /app/extensions/cloudbath-line-image-archive/index.ts
+              test -f /app/extensions/cloudbath-line-image-archive/openclaw.plugin.json
+              test -f /app/extensions/cloudbath-line-image-archive/profiles/construction-site-progress.v1.json
+              node --input-type=module -e "await import(\"@aws-sdk/client-s3\")"
+            '
+
+      - name: Verify no credential-bearing image environment values
+        run: |
+          python3 - <<'PY'
+          import json
+          import re
+          import subprocess
+
+          image = json.loads(
+              subprocess.check_output(
+                  ["docker", "image", "inspect", "cloudbath-openclaw:line-image-archive-ci"],
+                  text=True,
+              )
+          )[0]
+          credential_name = re.compile(
+              r"(?:TOKEN|SECRET|PASSWORD|API_KEY|ACCESS_KEY|PRIVATE_KEY|CREDENTIAL)",
+              re.IGNORECASE,
+          )
+          embedded = []
+          for entry in image.get("Config", {}).get("Env", []):
+              name, separator, value = entry.partition("=")
+              if separator and value and credential_name.search(name):
+                  embedded.append(name)
+
+          if embedded:
+              raise SystemExit(
+                  "Credential-bearing environment values found in image: "
+                  + ", ".join(sorted(embedded))
+              )
+          print("No credential-bearing environment values are embedded in the image.")
+          PY

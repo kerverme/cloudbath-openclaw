@@ -41,6 +41,10 @@
       - any-glob-to-any-file:
           - "extensions/logbook/**"
           - "docs/plugins/logbook.md"
+"plugin: cloudbath-line-image-archive":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "extensions/cloudbath-line-image-archive/**"
 "plugin: google-meet":
   - changed-files:
       - any-glob-to-any-file:
