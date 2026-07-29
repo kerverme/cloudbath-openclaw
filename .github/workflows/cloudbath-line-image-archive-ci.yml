@@ -160,9 +160,13 @@ jobs:
               node --input-type=module -e "await import(\"@line/bot-sdk\")"
             '
           docker run --rm --network none \
-            --entrypoint node \
+            --entrypoint /bin/sh \
             cloudbath-openclaw:line-image-archive-ci \
-            openclaw.mjs plugins inspect line --runtime --json > /tmp/openclaw-line-inspect.json
+            -ec '
+              printf "%s\n" "{\"channels\":{\"line\":{\"enabled\":true}}}" > /tmp/openclaw.json
+              OPENCLAW_CONFIG_PATH=/tmp/openclaw.json \
+                node openclaw.mjs plugins inspect line --runtime --json
+            ' > /tmp/openclaw-line-inspect.json
           node --input-type=module <<'NODE'
           import fs from "node:fs";
 
