@@ -162,7 +162,7 @@ jobs:
           docker run --rm --network none \
             --entrypoint node \
             cloudbath-openclaw:line-image-archive-ci \
-            openclaw.mjs plugins inspect line --json > /tmp/openclaw-line-inspect.json
+            openclaw.mjs plugins inspect line --runtime --json > /tmp/openclaw-line-inspect.json
           node --input-type=module <<'NODE'
           import fs from "node:fs";
 
