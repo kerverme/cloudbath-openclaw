@@ -9,6 +9,7 @@ import {
 } from "../../infra/gateway-suspend-coordinator.js";
 import { dispatchGatewayMethod } from "../../plugin-sdk/gateway-method-runtime.js";
 import type { PluginHttpRouteRegistration } from "../../plugins/registry.js";
+import { enqueueCommandInLane } from "../../process/command-queue.js";
 import {
   getActiveGatewayRootWorkCount,
   resetGatewayWorkAdmission,
@@ -151,6 +152,36 @@ describe("plugin HTTP suspension admission", () => {
 
     finish.resolve();
     await expect(pending).resolves.toBe(true);
+    expect(getActiveGatewayRootWorkCount()).toBe(0);
+  });
+
+  it("accepts subordinate queue work after the route sends its HTTP response", async () => {
+    const acknowledged = deferred();
+    const continueProcessing = deferred();
+    const queueWork = vi.fn(async () => {});
+    const response = makeMockHttpResponse();
+    const handler = createRequestHandler([
+      createRoute({
+        handler: async (_req, res) => {
+          res.statusCode = 200;
+          res.end("ok");
+          acknowledged.resolve();
+          await continueProcessing.promise;
+          await enqueueCommandInLane("plugin-http-post-ack", queueWork);
+          return true;
+        },
+      }),
+    ]);
+
+    const pending = handler({ url: ROUTE_PATH } as IncomingMessage, response.res);
+    await acknowledged.promise;
+
+    expect(response.end).toHaveBeenCalledWith("ok");
+    expect(getActiveGatewayRootWorkCount()).toBe(1);
+
+    continueProcessing.resolve();
+    await expect(pending).resolves.toBe(true);
+    expect(queueWork).toHaveBeenCalledOnce();
     expect(getActiveGatewayRootWorkCount()).toBe(0);
   });
 

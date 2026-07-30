@@ -437,15 +437,23 @@ describe("monitorLineProvider lifecycle", () => {
     }) as unknown as IncomingMessage;
     const res = createRouteResponse();
 
-    await route.handler(req, res);
+    let routeSettled = false;
+    const routeRequest = route.handler(req, res).finally(() => {
+      routeSettled = true;
+    });
 
-    expect(res.statusCode).toBe(200);
-    expect(res.headersSent).toBe(true);
-    expect(bot.handleWebhook).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => {
+      expect(res.statusCode).toBe(200);
+      expect(res.headersSent).toBe(true);
+      expect(bot.handleWebhook).toHaveBeenCalledTimes(1);
+    });
+    expect(routeSettled).toBe(false);
     if (!releaseWebhook) {
       throw new Error("expected pending LINE webhook handler");
     }
     releaseWebhook();
+    await routeRequest;
+    expect(routeSettled).toBe(true);
     monitor.stop();
   });
 

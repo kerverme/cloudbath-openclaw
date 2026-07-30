@@ -461,21 +461,25 @@ describe("createLineNodeWebhookHandler", () => {
     });
 
     const { res } = createRes();
-    const request = runSignedPost({ handler, rawBody, secret: SECRET, res });
+    let requestSettled = false;
+    const request = runSignedPost({ handler, rawBody, secret: SECRET, res }).finally(() => {
+      requestSettled = true;
+    });
 
     await vi.waitFor(() => {
       expect(onRequestAuthenticated).toHaveBeenCalledTimes(1);
       expect(bot.handleWebhook).toHaveBeenCalledTimes(1);
+      expect(res.statusCode).toBe(200);
+      expect(res.headersSent).toBe(true);
     });
 
-    await request;
-
-    expect(res.statusCode).toBe(200);
-    expect(res.headersSent).toBe(true);
+    expect(requestSettled).toBe(false);
     if (!releaseAuthenticated) {
       throw new Error("Expected LINE authenticated request release callback to be initialized");
     }
     releaseAuthenticated();
+    await request;
+    expect(requestSettled).toBe(true);
   });
 
   it("returns 400 for invalid JSON payload even when signature is valid", async () => {

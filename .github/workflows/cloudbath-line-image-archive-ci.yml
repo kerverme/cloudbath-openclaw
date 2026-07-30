@@ -4,8 +4,11 @@ on:
   pull_request:
     paths:
       - "extensions/cloudbath-line-image-archive/**"
+      - "extensions/line/**"
       - "scripts/cloudbath/setup-notion-image-archive*"
       - "deploy/cloudbath/railway/Dockerfile"
+      - "src/gateway/server/plugins-http.suspension-admission.test.ts"
+      - "railway.json"
       - "pnpm-lock.yaml"
       - ".github/workflows/cloudbath-line-image-archive-ci.yml"
   workflow_dispatch:
