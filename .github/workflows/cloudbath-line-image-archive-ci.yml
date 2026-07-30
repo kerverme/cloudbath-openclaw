@@ -75,6 +75,17 @@ jobs:
           EOF
           pnpm exec vitest run --config "$config_file"
 
+      - name: Verify LINE plugin selection and startup activation
+        if: steps.dependencies.outcome == 'success' && !cancelled()
+        run: |
+          selected="$(node scripts/lib/docker-plugin-selection.mjs extensions 'cloudbath-line-image-archive,line')"
+          test "$selected" = "$(printf 'cloudbath-line-image-archive\nline')"
+          node scripts/run-vitest.mjs run \
+            test/scripts/docker-plugin-selection.test.ts \
+            src/plugins/bundled-channel-runtime.test.ts \
+            src/plugins/channel-plugin-ids.test.ts \
+            src/gateway/server-startup-log.test.ts
+
       - name: Typecheck extensions
         if: steps.dependencies.outcome == 'success' && !cancelled()
         run: pnpm tsgo:extensions
@@ -128,7 +139,6 @@ jobs:
           docker build \
             --file deploy/cloudbath/railway/Dockerfile \
             --tag cloudbath-openclaw:line-image-archive-ci \
-            --build-arg OPENCLAW_EXTENSIONS=cloudbath-line-image-archive \
             .
 
       - name: Verify plugin runtime contents
@@ -140,8 +150,37 @@ jobs:
               test -f /app/extensions/cloudbath-line-image-archive/index.ts
               test -f /app/extensions/cloudbath-line-image-archive/openclaw.plugin.json
               test -f /app/extensions/cloudbath-line-image-archive/profiles/construction-site-progress.v1.json
+              test -f /app/extensions/line/index.ts
+              test -f /app/extensions/line/openclaw.plugin.json
+              test -f /app/extensions/line/package.json
+              test -f /app/dist/extensions/line/index.js
+              test -f /app/dist/extensions/line/openclaw.plugin.json
+              test -f /app/dist/extensions/line/package.json
               node --input-type=module -e "await import(\"@aws-sdk/client-s3\")"
+              node --input-type=module -e "await import(\"@line/bot-sdk\")"
             '
+          docker run --rm --network none \
+            --entrypoint /bin/sh \
+            cloudbath-openclaw:line-image-archive-ci \
+            -ec '
+              printf "%s\n" "{\"channels\":{\"line\":{\"enabled\":true}}}" > /tmp/openclaw.json
+              OPENCLAW_CONFIG_PATH=/tmp/openclaw.json \
+                node openclaw.mjs plugins inspect line --runtime --json
+            ' > /tmp/openclaw-line-inspect.json
+          node --input-type=module <<'NODE'
+          import fs from "node:fs";
+
+          const inspect = JSON.parse(fs.readFileSync("/tmp/openclaw-line-inspect.json", "utf8"));
+          if (inspect.plugin?.id !== "line" || inspect.plugin?.status !== "loaded") {
+            throw new Error("official LINE plugin did not load from the runtime image");
+          }
+          const ownsLine = inspect.capabilities?.some(
+            (entry) => entry?.kind === "channel" && entry.ids?.includes("line"),
+          );
+          if (!ownsLine) {
+            throw new Error("official LINE plugin did not register ownership of channels.line");
+          }
+          NODE
 
       - name: Verify no credential-bearing image environment values
         run: |
