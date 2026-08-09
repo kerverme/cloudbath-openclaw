@@ -6,6 +6,32 @@
   "activation": {
     "onStartup": true
   },
+  "contracts": {
+    "tools": [
+      "wellness_notion_query",
+      "wellness_notion_get_record",
+      "wellness_notion_search",
+      "construction_upload_create",
+      "construction_upload_update"
+    ]
+  },
+  "toolMetadata": {
+    "wellness_notion_query": {
+      "optional": true
+    },
+    "wellness_notion_get_record": {
+      "optional": true
+    },
+    "wellness_notion_search": {
+      "optional": true
+    },
+    "construction_upload_create": {
+      "optional": true
+    },
+    "construction_upload_update": {
+      "optional": true
+    }
+  },
   "configSchema": {
     "type": "object",
     "additionalProperties": false,

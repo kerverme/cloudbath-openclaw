@@ -274,8 +274,58 @@ reported database ID into that Agent Profile's `notionDatabaseId` configuration 
 | `R2_ENDPOINT`                      | Optional HTTPS S3 endpoint.                                   |
 | `R2_KEY_PREFIX`                    | Optional prefix before `assets/`.                             |
 | `NOTION_API_KEY`                   | Notion integration credential shared by configured databases. |
+| `NOTION_WELLNESS_READ_TOKEN`       | Read-only Wellness tool credential.                           |
+| `NOTION_CONSTRUCTION_WRITE_TOKEN`  | Construction Upload Inbox tool credential.                    |
 
 LINE group allowlists and Notion database IDs are no longer global environment variables.
+
+## Scoped Wellness and Construction tools
+
+The plugin also registers five optional agent tools. They are unavailable to agents until each
+tool is explicitly allowlisted:
+
+- `wellness_notion_query`, `wellness_notion_get_record`, and `wellness_notion_search` are
+  read-only and fixed to the Wellness project database. The search tool scans only that
+  database's data sources; it never uses Notion's workspace-wide search endpoint.
+- `construction_upload_create` and `construction_upload_update` write only allowlisted
+  properties in the Construction Upload Inbox. Creation always uses the fixed data source, and
+  updates resolve a page by its `Record ID` inside that data source rather than accepting a page
+  or database target from the model.
+
+Both connections are independently authenticated. The tools read their credentials only from
+`NOTION_WELLNESS_READ_TOKEN` and `NOTION_CONSTRUCTION_WRITE_TOKEN`, respectively. The Wellness
+integration should have read-content capability only. The Construction integration needs read,
+insert, and update-content capabilities on the Upload Inbox so the plugin can validate its schema,
+prevent duplicate Record IDs, and update an existing row. Neither integration needs schema-update,
+comment, or delete capabilities.
+
+All five tools are registered as optional. Enable only the intended tools on the LINE agent, for
+example:
+
+```json5
+{
+  agents: {
+    list: [
+      {
+        id: "<LINE_AGENT_ID>",
+        tools: {
+          allow: [
+            "wellness_notion_query",
+            "wellness_notion_get_record",
+            "wellness_notion_search",
+            "construction_upload_create",
+            "construction_upload_update",
+          ],
+        },
+      },
+    ],
+  },
+}
+```
+
+This tool allowlist does not replace the official LINE channel's group and sender authorization.
+The plugin does not register a generic Notion request tool and does not expose credentials or
+environment variables in tool results.
 
 ## Runtime safety
 
@@ -303,7 +353,7 @@ LINE group allowlists and Notion database IDs are no longer global environment v
 This PR defines model aliases, allowed tools, and `SchemaPlanProposal`, but deliberately does not
 implement:
 
-- Notion search/get/stats tools for the model
+- Notion aggregate/statistics tools for the model
 - chat-driven model switching
 - persistent `7272` silent mode
 - advanced multi-agent routing
