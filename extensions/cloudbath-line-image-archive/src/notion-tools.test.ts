@@ -188,7 +188,9 @@ describe("Cloudbath scoped Notion tools", () => {
         recordCount: 2,
       }),
     );
-    expect(requests.some((request) => request.url.endsWith(`/v1/databases/${WELLNESS_ROOT_PAGE_ID}`))).toBe(false);
+    expect(
+      requests.some((request) => request.url.endsWith(`/v1/databases/${WELLNESS_ROOT_PAGE_ID}`)),
+    ).toBe(false);
     expect(
       requests.every((request) => request.authorization === `Bearer ${WELLNESS_TEST_CREDENTIAL}`),
     ).toBe(true);
@@ -300,10 +302,7 @@ describe("Cloudbath scoped Notion tools", () => {
     });
 
     expect(second.details).toEqual(expect.objectContaining({ recordCount: 1, hasMore: false }));
-    expect(bodies).toEqual([
-      { page_size: 1 },
-      { page_size: 1, start_cursor: notionCursor },
-    ]);
+    expect(bodies).toEqual([{ page_size: 1 }, { page_size: 1, start_cursor: notionCursor }]);
   });
 
   it("searches only discovered root-scoped data sources and never uses workspace search", async () => {

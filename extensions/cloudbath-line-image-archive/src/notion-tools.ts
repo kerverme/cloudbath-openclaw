@@ -141,7 +141,13 @@ function safeNotionErrorField(value: unknown, token: string): string | undefined
   if (typeof value !== "string") {
     return undefined;
   }
-  let safe = value.replace(/[\u0000-\u001f\u007f]+/g, " ").trim().slice(0, 300);
+  let safe = Array.from(value, (character) => {
+    const code = character.charCodeAt(0);
+    return code <= 0x1f || code === 0x7f ? " " : character;
+  })
+    .join("")
+    .trim()
+    .slice(0, 300);
   if (!safe) {
     return undefined;
   }
@@ -157,9 +163,7 @@ async function notionErrorDetails(
   try {
     const body = (await response.json()) as { code?: unknown; message?: unknown };
     const code =
-      typeof body.code === "string" && /^[a-z0-9_]{1,64}$/i.test(body.code)
-        ? body.code
-        : undefined;
+      typeof body.code === "string" && /^[a-z0-9_]{1,64}$/i.test(body.code) ? body.code : undefined;
     const message = safeNotionErrorField(body.message, token);
     return { ...(code ? { code } : {}), ...(message ? { message } : {}) };
   } catch {
@@ -326,7 +330,9 @@ function decodeWellnessCursor(value: string | undefined): WellnessQueryCursor | 
     return undefined;
   }
   try {
-    const parsed = JSON.parse(Buffer.from(value, "base64url").toString("utf8")) as Partial<WellnessQueryCursor>;
+    const parsed = JSON.parse(
+      Buffer.from(value, "base64url").toString("utf8"),
+    ) as Partial<WellnessQueryCursor>;
     if (
       parsed.version !== 1 ||
       !Number.isInteger(parsed.sourceIndex) ||
@@ -373,7 +379,8 @@ class WellnessNotionReader {
         const childDatabaseIds: string[] = [];
         let cursor: string | undefined;
         let scannedBlocks = 0;
-        do {
+        let hasMore = true;
+        while (hasMore) {
           const query = new URLSearchParams({ page_size: "100" });
           if (cursor) {
             query.set("start_cursor", cursor);
@@ -391,20 +398,19 @@ class WellnessNotionReader {
             if (block.object === "block" && block.type === "child_database" && block.id) {
               canonicalNotionId(block.id);
               childDatabaseIds.push(block.id);
-              if (new Set(childDatabaseIds.map(canonicalNotionId)).size > MAX_WELLNESS_CHILD_DATABASES) {
+              if (
+                new Set(childDatabaseIds.map(canonicalNotionId)).size > MAX_WELLNESS_CHILD_DATABASES
+              ) {
                 throw new Error("Wellness root page has too many child databases");
               }
             }
           }
-          const hasMore = result.has_more === true;
+          hasMore = result.has_more === true;
           cursor = result.next_cursor ?? undefined;
           if (hasMore && !cursor) {
             throw new Error("Wellness root page pagination response is invalid");
           }
-          if (!hasMore) {
-            break;
-          }
-        } while (true);
+        }
 
         const databaseIds = [
           ...new Map(childDatabaseIds.map((id) => [canonicalNotionId(id), id])).values(),
@@ -420,10 +426,7 @@ class WellnessNotionReader {
             {},
             signal,
           );
-          if (
-            database.object !== "database" ||
-            !sameNotionId(database.id, databaseId)
-          ) {
+          if (database.object !== "database" || !sameNotionId(database.id, databaseId)) {
             throw new Error("Wellness child database identity could not be verified");
           }
           for (const source of database.data_sources ?? []) {
@@ -857,7 +860,8 @@ const WellnessQuerySchema = Type.Object(
         minimum: 0,
         maximum: 100,
         default: 0,
-        description: "Optional zero-based root-scoped data-source index. Omit to query across every discovered Wellness child database.",
+        description:
+          "Optional zero-based root-scoped data-source index. Omit to query across every discovered Wellness child database.",
       }),
     ),
     max_records: Type.Optional(
@@ -1005,7 +1009,7 @@ export function createCloudbathNotionTools(fetchImpl: FetchLike = fetch) {
       name: "wellness_notion_search",
       label: "Wellness Notion Search",
       description:
-        "READ ONLY. Search property values only inside data sources discovered beneath the configured Wellness root page; never workspace-wide.",
+        "READ ONLY. Search property values only inside data sources discovered beneath the configured Wellness root page; never workspace-wide. Cannot mutate Notion.",
       parameters: WellnessSearchSchema,
       execute: async (_toolCallId: string, rawParams: unknown, signal?: AbortSignal) => {
         const params = paramsRecord(rawParams);
