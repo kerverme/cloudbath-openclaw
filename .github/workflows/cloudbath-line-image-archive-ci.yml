@@ -56,6 +56,7 @@ jobs:
             extensions/cloudbath-line-image-archive/src/inbound.test.ts \
             extensions/cloudbath-line-image-archive/src/notion-schema.test.ts \
             extensions/cloudbath-line-image-archive/src/notion.test.ts \
+            extensions/cloudbath-line-image-archive/src/notion-tools.test.ts \
             extensions/cloudbath-line-image-archive/src/pipeline.test.ts \
             extensions/cloudbath-line-image-archive/src/profiles.test.ts \
             extensions/cloudbath-line-image-archive/src/r2.test.ts \
@@ -88,6 +89,17 @@ jobs:
             src/plugins/bundled-channel-runtime.test.ts \
             src/plugins/channel-plugin-ids.test.ts \
             src/gateway/server-startup-log.test.ts
+
+      - name: Run official LINE regression tests
+        if: steps.dependencies.outcome == 'success' && !cancelled()
+        run: |
+          node scripts/run-vitest.mjs run \
+            extensions/line/src/bot-handlers.test.ts \
+            extensions/line/src/config-schema.test.ts \
+            extensions/line/src/monitor.lifecycle.test.ts \
+            extensions/line/src/session-route.test.ts \
+            extensions/line/src/signature.test.ts \
+            extensions/line/src/webhook-node.test.ts
 
       - name: Typecheck extensions
         if: steps.dependencies.outcome == 'success' && !cancelled()
@@ -152,6 +164,7 @@ jobs:
             -ec '
               test -f /app/extensions/cloudbath-line-image-archive/index.ts
               test -f /app/extensions/cloudbath-line-image-archive/openclaw.plugin.json
+              test -f /app/extensions/cloudbath-line-image-archive/src/notion-tools.ts
               test -f /app/extensions/cloudbath-line-image-archive/profiles/construction-site-progress.v1.json
               test -f /app/extensions/line/index.ts
               test -f /app/extensions/line/openclaw.plugin.json
@@ -160,6 +173,7 @@ jobs:
               test -f /app/dist/extensions/line/openclaw.plugin.json
               test -f /app/dist/extensions/line/package.json
               node --input-type=module -e "await import(\"@aws-sdk/client-s3\")"
+              node --input-type=module -e "await import(\"typebox\")"
               node --input-type=module -e "await import(\"@line/bot-sdk\")"
             '
           docker run --rm --network none \

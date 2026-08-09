@@ -4,6 +4,7 @@ import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { extractSchemaFieldsWithCurrentModel } from "./src/analysis.js";
 import { resolveArchiveConfig } from "./src/config.js";
 import { extractInboundLineImage } from "./src/inbound.js";
+import { CLOUDBATH_NOTION_TOOL_NAMES, createCloudbathNotionTools } from "./src/notion-tools.js";
 import { NotionArchiveClient } from "./src/notion.js";
 import { ArchivePipeline } from "./src/pipeline.js";
 import { resolveSchemaForAgent } from "./src/profiles.js";
@@ -65,6 +66,11 @@ export default definePluginEntry({
     const logger = structuredLogger(api.logger);
     let pipeline: ArchivePipeline | undefined;
     let activeConfig: ArchiveConfig | undefined;
+
+    api.registerTool(() => createCloudbathNotionTools(), {
+      names: [...CLOUDBATH_NOTION_TOOL_NAMES],
+      optional: true,
+    });
 
     api.registerService({
       id: "cloudbath-line-image-archive",
