@@ -285,8 +285,9 @@ The plugin also registers five optional agent tools. They are unavailable to age
 tool is explicitly allowlisted:
 
 - `wellness_notion_query`, `wellness_notion_get_record`, and `wellness_notion_search` are
-  read-only and fixed to the Wellness project database. The search tool scans only that
-  database's data sources; it never uses Notion's workspace-wide search endpoint.
+  read-only and fixed to the Wellness project root page. They discover only direct
+  `child_database` blocks beneath that root, query those databases' data sources, and never use
+  Notion's workspace-wide search endpoint.
 - `construction_upload_create` and `construction_upload_update` write only allowlisted
   properties in the Construction Upload Inbox. Creation always uses the fixed data source, and
   updates resolve a page by its `Record ID` inside that data source rather than accepting a page
@@ -294,7 +295,8 @@ tool is explicitly allowlisted:
 
 Both connections are independently authenticated. The tools read their credentials only from
 `NOTION_WELLNESS_READ_TOKEN` and `NOTION_CONSTRUCTION_WRITE_TOKEN`, respectively. The Wellness
-integration should have read-content capability only. The Construction integration needs read,
+integration should have read-content capability only and must be shared with the configured
+Wellness root page so its direct child databases are visible. The Construction integration needs read,
 insert, and update-content capabilities on the Upload Inbox so the plugin can validate its schema,
 prevent duplicate Record IDs, and update an existing row. Neither integration needs schema-update,
 comment, or delete capabilities.

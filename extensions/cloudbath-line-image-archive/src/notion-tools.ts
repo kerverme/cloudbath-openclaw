@@ -4,7 +4,7 @@ import { NOTION_API_VERSION } from "./notion-schema.js";
 import { isRetryableStatus, withBoundedRetry } from "./retry.js";
 
 const NOTION_BASE_URL = "https://api.notion.com";
-const WELLNESS_DATABASE_ID = "39575d42-f42b-808c-8a66-faed4274521b";
+const WELLNESS_ROOT_PAGE_ID = "39575d42-f42b-808c-8a66-faed4274521b";
 const CONSTRUCTION_DATABASE_ID = "9e0360ad-8993-480e-8b79-d7d269c4534e";
 const CONSTRUCTION_DATA_SOURCE_ID = "22c0c780-106b-418b-8576-62d0b1fd1030";
 const WELLNESS_TOKEN_ENV = "NOTION_WELLNESS_READ_TOKEN";
@@ -13,6 +13,8 @@ const REQUEST_TIMEOUT_MS = 15_000;
 const MAX_NOTION_TEXT_LENGTH = 1_900;
 const MAX_QUERY_RECORDS = 500;
 const MAX_SEARCH_RECORDS = 1_000;
+const MAX_WELLNESS_ROOT_BLOCKS = 1_000;
+const MAX_WELLNESS_CHILD_DATABASES = 100;
 const NOTION_ID_PATTERN = /^[0-9a-f]{32}$/;
 
 type FetchLike = typeof fetch;
@@ -30,8 +32,24 @@ type NotionPage = {
   properties?: Record<string, unknown>;
 };
 type NotionDatabase = {
+  object?: string;
   id?: string;
   data_sources?: Array<{ id?: string }>;
+};
+type NotionBlock = {
+  object?: string;
+  id?: string;
+  type?: string;
+  child_database?: { title?: string };
+};
+type NotionBlockChildrenResponse = {
+  results?: NotionBlock[];
+  has_more?: boolean;
+  next_cursor?: string | null;
+};
+type WellnessDataSourceScope = {
+  databaseId: string;
+  dataSourceId: string;
 };
 type NotionPropertySchema = {
   type?: string;
@@ -53,6 +71,12 @@ type SafeNotionPage = {
   createdAt?: string;
   lastEditedAt?: string;
   properties: Record<string, unknown>;
+};
+type ScopedWellnessPage = SafeNotionPage & WellnessDataSourceScope;
+type WellnessQueryCursor = {
+  version: 1;
+  sourceIndex: number;
+  notionCursor?: string;
 };
 type ConstructionValues = {
   name?: string;
@@ -113,6 +137,36 @@ function parseRetryAfterMs(headers: Headers): number | undefined {
   return Number.isFinite(seconds) && seconds >= 0 ? seconds * 1_000 : undefined;
 }
 
+function safeNotionErrorField(value: unknown, token: string): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  let safe = value.replace(/[\u0000-\u001f\u007f]+/g, " ").trim().slice(0, 300);
+  if (!safe) {
+    return undefined;
+  }
+  safe = safe.replaceAll(token, "[REDACTED]");
+  safe = safe.replace(/Bearer\s+[^\s,;]+/gi, "Bearer [REDACTED]");
+  return safe;
+}
+
+async function notionErrorDetails(
+  response: Response,
+  token: string,
+): Promise<{ code?: string; message?: string }> {
+  try {
+    const body = (await response.json()) as { code?: unknown; message?: unknown };
+    const code =
+      typeof body.code === "string" && /^[a-z0-9_]{1,64}$/i.test(body.code)
+        ? body.code
+        : undefined;
+    const message = safeNotionErrorField(body.message, token);
+    return { ...(code ? { code } : {}), ...(message ? { message } : {}) };
+  } catch {
+    return {};
+  }
+}
+
 class ScopedNotionClient {
   constructor(
     private readonly scope: "wellness" | "construction",
@@ -150,8 +204,14 @@ class ScopedNotionClient {
           });
           if (!response.ok) {
             const status = response.status;
+            const details = await notionErrorDetails(response, this.token);
+            const label = this.scope === "wellness" ? "Wellness" : "Construction";
+            const diagnostic = [
+              `status ${status}`,
+              ...(details.code ? [`code ${details.code}`] : []),
+            ].join(", ");
             throw new ScopedNotionError(
-              `${this.scope === "wellness" ? "Wellness" : "Construction"} Notion request failed (${status})`,
+              `${label} Notion request failed (${diagnostic})${details.message ? `: ${details.message}` : ""}`,
               status,
               parseRetryAfterMs(response.headers),
               isRetryableStatus(status),
@@ -246,15 +306,43 @@ function readInteger(
   return raw as number;
 }
 
-function readDataSourceIndex(params: Record<string, unknown>): number {
+function readDataSourceIndex(params: Record<string, unknown>): number | undefined {
   const raw = params.data_source_index;
   if (raw === undefined) {
-    return 0;
+    return undefined;
   }
   if (!Number.isInteger(raw) || (raw as number) < 0 || (raw as number) > 100) {
     throw new Error("data_source_index must be an integer from 0 to 100");
   }
   return raw as number;
+}
+
+function encodeWellnessCursor(cursor: WellnessQueryCursor): string {
+  return Buffer.from(JSON.stringify(cursor), "utf8").toString("base64url");
+}
+
+function decodeWellnessCursor(value: string | undefined): WellnessQueryCursor | undefined {
+  if (!value) {
+    return undefined;
+  }
+  try {
+    const parsed = JSON.parse(Buffer.from(value, "base64url").toString("utf8")) as Partial<WellnessQueryCursor>;
+    if (
+      parsed.version !== 1 ||
+      !Number.isInteger(parsed.sourceIndex) ||
+      (parsed.sourceIndex as number) < 0 ||
+      (parsed.sourceIndex as number) > MAX_WELLNESS_CHILD_DATABASES * 100 ||
+      (parsed.notionCursor !== undefined &&
+        (typeof parsed.notionCursor !== "string" ||
+          parsed.notionCursor.length === 0 ||
+          parsed.notionCursor.length > 512))
+    ) {
+      throw new Error("invalid cursor");
+    }
+    return parsed as WellnessQueryCursor;
+  } catch {
+    throw new Error("start_cursor is not a valid Wellness continuation cursor");
+  }
 }
 
 function safePage(page: NotionPage, expectedDataSourceId: string): SafeNotionPage {
@@ -274,40 +362,95 @@ function safePage(page: NotionPage, expectedDataSourceId: string): SafeNotionPag
 }
 
 class WellnessNotionReader {
-  private dataSourceIdsPromise: Promise<string[]> | undefined;
+  private scopesPromise: Promise<WellnessDataSourceScope[]> | undefined;
 
   constructor(private readonly client: ScopedNotionClient) {}
 
-  private async dataSourceIds(signal?: AbortSignal): Promise<string[]> {
-    let pending = this.dataSourceIdsPromise;
+  private async discoverScopes(signal?: AbortSignal): Promise<WellnessDataSourceScope[]> {
+    let pending = this.scopesPromise;
     if (!pending) {
       pending = (async () => {
-        const database = await this.client.request<NotionDatabase>(
-          `/v1/databases/${encodeURIComponent(WELLNESS_DATABASE_ID)}`,
-          {},
-          signal,
-        );
-        if (!sameNotionId(database.id, WELLNESS_DATABASE_ID)) {
-          throw new Error("Wellness Notion database identity could not be verified");
+        const childDatabaseIds: string[] = [];
+        let cursor: string | undefined;
+        let scannedBlocks = 0;
+        do {
+          const query = new URLSearchParams({ page_size: "100" });
+          if (cursor) {
+            query.set("start_cursor", cursor);
+          }
+          const result = await this.client.request<NotionBlockChildrenResponse>(
+            `/v1/blocks/${encodeURIComponent(WELLNESS_ROOT_PAGE_ID)}/children?${query}`,
+            {},
+            signal,
+          );
+          for (const block of result.results ?? []) {
+            scannedBlocks += 1;
+            if (scannedBlocks > MAX_WELLNESS_ROOT_BLOCKS) {
+              throw new Error("Wellness root page exceeds the safe discovery limit");
+            }
+            if (block.object === "block" && block.type === "child_database" && block.id) {
+              canonicalNotionId(block.id);
+              childDatabaseIds.push(block.id);
+              if (new Set(childDatabaseIds.map(canonicalNotionId)).size > MAX_WELLNESS_CHILD_DATABASES) {
+                throw new Error("Wellness root page has too many child databases");
+              }
+            }
+          }
+          const hasMore = result.has_more === true;
+          cursor = result.next_cursor ?? undefined;
+          if (hasMore && !cursor) {
+            throw new Error("Wellness root page pagination response is invalid");
+          }
+          if (!hasMore) {
+            break;
+          }
+        } while (true);
+
+        const databaseIds = [
+          ...new Map(childDatabaseIds.map((id) => [canonicalNotionId(id), id])).values(),
+        ];
+        if (databaseIds.length === 0) {
+          throw new Error("Wellness root page has no accessible child database");
         }
-        const ids = (database.data_sources ?? [])
-          .map((source) => source.id?.trim())
-          .filter((id): id is string => Boolean(id));
-        if (ids.length === 0) {
-          throw new Error("Wellness Notion database has no accessible data source");
+
+        const scopes: WellnessDataSourceScope[] = [];
+        for (const databaseId of databaseIds) {
+          const database = await this.client.request<NotionDatabase>(
+            `/v1/databases/${encodeURIComponent(databaseId)}`,
+            {},
+            signal,
+          );
+          if (
+            database.object !== "database" ||
+            !sameNotionId(database.id, databaseId)
+          ) {
+            throw new Error("Wellness child database identity could not be verified");
+          }
+          for (const source of database.data_sources ?? []) {
+            if (!source.id) {
+              continue;
+            }
+            canonicalNotionId(source.id);
+            scopes.push({ databaseId, dataSourceId: source.id });
+          }
         }
-        for (const id of ids) {
-          canonicalNotionId(id);
+        const uniqueScopes = [
+          ...new Map(
+            scopes.map((scope) => [canonicalNotionId(scope.dataSourceId), scope]),
+          ).values(),
+        ];
+        if (uniqueScopes.length === 0) {
+          throw new Error("Wellness child databases have no accessible data source");
         }
-        return [...new Set(ids)];
+        return uniqueScopes;
       })();
-      this.dataSourceIdsPromise = pending;
+      this.scopesPromise = pending;
     }
     try {
       return await pending;
     } catch (error) {
-      if (this.dataSourceIdsPromise === pending) {
-        this.dataSourceIdsPromise = undefined;
+      if (this.scopesPromise === pending) {
+        this.scopesPromise = undefined;
       }
       throw error;
     }
@@ -354,10 +497,10 @@ class WellnessNotionReader {
           return { records, hasMore: true, scanned };
         }
         if (scanned >= maxRecords) {
-          hasMore = result.has_more === true || pages.indexOf(rawPage) < pages.length - 1;
+          const moreInPage = pages.indexOf(rawPage) < pages.length - 1;
           return {
             records,
-            hasMore,
+            hasMore: result.has_more === true || moreInPage,
             scanned,
             ...(result.next_cursor ? { nextCursor: result.next_cursor } : {}),
           };
@@ -368,45 +511,86 @@ class WellnessNotionReader {
       if (hasMore && !cursor) {
         throw new Error("Wellness Notion pagination response is invalid");
       }
-    } while (hasMore);
+    } while (hasMore && scanned < maxRecords);
     return { records, hasMore: false, scanned };
   }
 
   async query(
-    dataSourceIndex: number,
+    dataSourceIndex: number | undefined,
     maxRecords: number,
     startCursor?: string,
     signal?: AbortSignal,
   ) {
-    const ids = await this.dataSourceIds(signal);
-    const dataSourceId = ids[dataSourceIndex];
-    if (!dataSourceId) {
-      throw new Error("data_source_index is outside the Wellness database");
+    const scopes = await this.discoverScopes(signal);
+    const decoded = decodeWellnessCursor(startCursor);
+    if (decoded && dataSourceIndex !== undefined) {
+      throw new Error("data_source_index cannot be combined with start_cursor");
     }
-    const result = await this.queryDataSource(
-      dataSourceId,
-      maxRecords,
-      signal,
-      undefined,
-      startCursor,
-    );
+    let sourceIndex = decoded?.sourceIndex ?? dataSourceIndex ?? 0;
+    if (!scopes[sourceIndex]) {
+      throw new Error("Wellness continuation is outside the root-page scope");
+    }
+    const singleSource = dataSourceIndex !== undefined;
+    const records: ScopedWellnessPage[] = [];
+    let scanned = 0;
+    let nextCursor: string | undefined;
+    let notionCursor = decoded?.notionCursor;
+
+    while (sourceIndex < scopes.length && scanned < maxRecords) {
+      const scope = scopes[sourceIndex]!;
+      const result = await this.queryDataSource(
+        scope.dataSourceId,
+        maxRecords - scanned,
+        signal,
+        undefined,
+        notionCursor,
+      );
+      records.push(
+        ...result.records.map((page) => ({
+          ...page,
+          databaseId: scope.databaseId,
+          dataSourceId: scope.dataSourceId,
+        })),
+      );
+      scanned += result.scanned;
+      if (result.hasMore) {
+        if (!result.nextCursor) {
+          throw new Error("Wellness Notion continuation cursor is missing");
+        }
+        nextCursor = encodeWellnessCursor({
+          version: 1,
+          sourceIndex,
+          notionCursor: result.nextCursor,
+        });
+        break;
+      }
+      if (singleSource) {
+        break;
+      }
+      sourceIndex += 1;
+      notionCursor = undefined;
+      if (scanned >= maxRecords && sourceIndex < scopes.length) {
+        nextCursor = encodeWellnessCursor({ version: 1, sourceIndex });
+      }
+    }
+
     return {
-      databaseId: WELLNESS_DATABASE_ID,
-      dataSourceId,
-      dataSourceIndex,
-      dataSourceCount: ids.length,
-      records: result.records,
-      recordCount: result.scanned,
-      hasMore: result.hasMore,
-      ...(result.nextCursor ? { nextCursor: result.nextCursor } : {}),
+      rootPageId: WELLNESS_ROOT_PAGE_ID,
+      dataSourceCount: scopes.length,
+      databaseCount: new Set(scopes.map((scope) => canonicalNotionId(scope.databaseId))).size,
+      records,
+      recordCount: scanned,
+      hasMore: Boolean(nextCursor),
+      ...(nextCursor ? { nextCursor } : {}),
+      ...(singleSource ? { dataSourceIndex } : {}),
     };
   }
 
-  async getRecord(recordId: string, signal?: AbortSignal): Promise<SafeNotionPage> {
+  async getRecord(recordId: string, signal?: AbortSignal): Promise<ScopedWellnessPage> {
     const wanted = canonicalNotionId(recordId);
-    for (const dataSourceId of await this.dataSourceIds(signal)) {
+    for (const scope of await this.discoverScopes(signal)) {
       let found: SafeNotionPage | undefined;
-      await this.queryDataSource(dataSourceId, 10_000, signal, (page) => {
+      await this.queryDataSource(scope.dataSourceId, 10_000, signal, (page) => {
         if (canonicalNotionId(page.id) === wanted) {
           found = page;
           return "stop";
@@ -414,30 +598,35 @@ class WellnessNotionReader {
         return false;
       });
       if (found) {
-        return found;
+        return { ...found, databaseId: scope.databaseId, dataSourceId: scope.dataSourceId };
       }
     }
-    throw new Error("Wellness record is outside the allowed database or does not exist");
+    throw new Error("Wellness record is outside the allowed root page or does not exist");
   }
 
   async search(query: string, maxResults: number, maxRecordsScanned: number, signal?: AbortSignal) {
     const needle = query.toLocaleLowerCase();
-    const matches: SafeNotionPage[] = [];
+    const matches: ScopedWellnessPage[] = [];
     let scanned = 0;
     let hasMore = false;
-    for (const dataSourceId of await this.dataSourceIds(signal)) {
+    const scopes = await this.discoverScopes(signal);
+    for (const scope of scopes) {
       if (scanned >= maxRecordsScanned || matches.length >= maxResults) {
         hasMore = true;
         break;
       }
       const result = await this.queryDataSource(
-        dataSourceId,
+        scope.dataSourceId,
         maxRecordsScanned - scanned,
         signal,
         (page) => {
           const matched = JSON.stringify(page.properties).toLocaleLowerCase().includes(needle);
           if (matched && matches.length < maxResults) {
-            matches.push(page);
+            matches.push({
+              ...page,
+              databaseId: scope.databaseId,
+              dataSourceId: scope.dataSourceId,
+            });
           }
           return matches.length >= maxResults ? "stop" : false;
         },
@@ -446,7 +635,7 @@ class WellnessNotionReader {
       hasMore ||= result.hasMore || matches.length >= maxResults;
     }
     return {
-      databaseId: WELLNESS_DATABASE_ID,
+      rootPageId: WELLNESS_ROOT_PAGE_ID,
       query,
       matches,
       scannedRecords: scanned,
@@ -668,7 +857,7 @@ const WellnessQuerySchema = Type.Object(
         minimum: 0,
         maximum: 100,
         default: 0,
-        description: "Zero-based index from the previous Wellness query result.",
+        description: "Optional zero-based root-scoped data-source index. Omit to query across every discovered Wellness child database.",
       }),
     ),
     max_records: Type.Optional(
@@ -786,7 +975,7 @@ export function createCloudbathNotionTools(fetchImpl: FetchLike = fetch) {
       name: "wellness_notion_query",
       label: "Wellness Notion Query",
       description:
-        "READ ONLY. Query records only from the configured Wellness project database. Cannot create, update, delete, archive, comment, or change schemas.",
+        "READ ONLY. Query records only from child databases directly beneath the configured Wellness root page. Cannot create, update, delete, archive, comment, or change schemas.",
       parameters: WellnessQuerySchema,
       execute: async (_toolCallId: string, rawParams: unknown, signal?: AbortSignal) => {
         const params = paramsRecord(rawParams);
@@ -803,7 +992,7 @@ export function createCloudbathNotionTools(fetchImpl: FetchLike = fetch) {
       name: "wellness_notion_get_record",
       label: "Wellness Notion Get Record",
       description:
-        "READ ONLY. Retrieve one record only after proving it belongs to the configured Wellness project database. Cannot mutate Notion.",
+        "READ ONLY. Retrieve one record only after proving it belongs to a data source discovered beneath the configured Wellness root page. Cannot mutate Notion.",
       parameters: WellnessGetRecordSchema,
       execute: async (_toolCallId: string, rawParams: unknown, signal?: AbortSignal) => {
         const params = paramsRecord(rawParams);
@@ -816,7 +1005,7 @@ export function createCloudbathNotionTools(fetchImpl: FetchLike = fetch) {
       name: "wellness_notion_search",
       label: "Wellness Notion Search",
       description:
-        "READ ONLY. Search property values only inside the configured Wellness project database; never workspace-wide.",
+        "READ ONLY. Search property values only inside data sources discovered beneath the configured Wellness root page; never workspace-wide.",
       parameters: WellnessSearchSchema,
       execute: async (_toolCallId: string, rawParams: unknown, signal?: AbortSignal) => {
         const params = paramsRecord(rawParams);

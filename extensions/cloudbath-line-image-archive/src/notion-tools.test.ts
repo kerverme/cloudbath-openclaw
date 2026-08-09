@@ -1,9 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CLOUDBATH_NOTION_TOOL_NAMES, createCloudbathNotionTools } from "./notion-tools.js";
 
-const WELLNESS_DATABASE_ID = "39575d42-f42b-808c-8a66-faed4274521b";
+const WELLNESS_ROOT_PAGE_ID = "39575d42-f42b-808c-8a66-faed4274521b";
+const WELLNESS_DATABASE_ID = "11111111-1111-4111-8111-111111111111";
+const WELLNESS_DATABASE_2_ID = "22222222-2222-4222-8222-222222222222";
 const WELLNESS_DATA_SOURCE_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const WELLNESS_DATA_SOURCE_2_ID = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
 const WELLNESS_PAGE_ID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+const WELLNESS_PAGE_2_ID = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
 const CONSTRUCTION_DATABASE_ID = "9e0360ad-8993-480e-8b79-d7d269c4534e";
 const CONSTRUCTION_DATA_SOURCE_ID = "22c0c780-106b-418b-8576-62d0b1fd1030";
 const CONSTRUCTION_PAGE_ID = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
@@ -36,11 +40,15 @@ function authorization(init?: RequestInit): string | null {
   return new Headers(init?.headers).get("authorization");
 }
 
-function wellnessPage(overrides: Record<string, unknown> = {}) {
+function wellnessPage(
+  dataSourceId = WELLNESS_DATA_SOURCE_ID,
+  pageId = WELLNESS_PAGE_ID,
+  overrides: Record<string, unknown> = {},
+) {
   return {
     object: "page",
-    id: WELLNESS_PAGE_ID,
-    parent: { type: "data_source_id", data_source_id: WELLNESS_DATA_SOURCE_ID },
+    id: pageId,
+    parent: { type: "data_source_id", data_source_id: dataSourceId },
     created_time: "2026-08-01T01:02:03.000Z",
     last_edited_time: "2026-08-02T01:02:03.000Z",
     properties: {
@@ -48,6 +56,15 @@ function wellnessPage(overrides: Record<string, unknown> = {}) {
       Amount: { type: "number", number: 125 },
     },
     ...overrides,
+  };
+}
+
+function childDatabaseBlock(id: string) {
+  return {
+    object: "block",
+    id,
+    type: "child_database",
+    child_database: { title: "Wellness child database" },
   };
 }
 
@@ -109,7 +126,7 @@ describe("Cloudbath scoped Notion tools", () => {
     expect(names).toEqual(CLOUDBATH_NOTION_TOOL_NAMES);
   });
 
-  it("uses only the Wellness credential and exposes no mutation path", async () => {
+  it("treats the configured Wellness ID as a root page and reads multiple child databases", async () => {
     const requests: Array<{ url: string; method: string; authorization: string | null }> = [];
     const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const url = requestUrl(input);
@@ -118,16 +135,45 @@ describe("Cloudbath scoped Notion tools", () => {
         method: init?.method ?? "GET",
         authorization: authorization(init),
       });
+      if (url.includes(`/v1/blocks/${WELLNESS_ROOT_PAGE_ID}/children`)) {
+        return Response.json({
+          results: [
+            childDatabaseBlock(WELLNESS_DATABASE_ID),
+            childDatabaseBlock(WELLNESS_DATABASE_2_ID),
+          ],
+          has_more: false,
+          next_cursor: null,
+        });
+      }
       if (url.endsWith(`/v1/databases/${WELLNESS_DATABASE_ID}`)) {
         return Response.json({
+          object: "database",
           id: WELLNESS_DATABASE_ID,
           data_sources: [{ id: WELLNESS_DATA_SOURCE_ID }],
         });
       }
-      if (url.endsWith(`/v1/data_sources/${WELLNESS_DATA_SOURCE_ID}/query`)) {
-        return Response.json({ results: [wellnessPage()], has_more: false, next_cursor: null });
+      if (url.endsWith(`/v1/databases/${WELLNESS_DATABASE_2_ID}`)) {
+        return Response.json({
+          object: "database",
+          id: WELLNESS_DATABASE_2_ID,
+          data_sources: [{ id: WELLNESS_DATA_SOURCE_2_ID }],
+        });
       }
-      throw new Error("unexpected request");
+      if (url.endsWith(`/v1/data_sources/${WELLNESS_DATA_SOURCE_ID}/query`)) {
+        return Response.json({
+          results: [wellnessPage()],
+          has_more: false,
+          next_cursor: null,
+        });
+      }
+      if (url.endsWith(`/v1/data_sources/${WELLNESS_DATA_SOURCE_2_ID}/query`)) {
+        return Response.json({
+          results: [wellnessPage(WELLNESS_DATA_SOURCE_2_ID, WELLNESS_PAGE_2_ID)],
+          has_more: false,
+          next_cursor: null,
+        });
+      }
+      throw new Error(`unexpected request: ${url}`);
     }) as typeof fetch;
 
     const result = await tool("wellness_notion_query", fetchImpl).execute("call", {
@@ -135,9 +181,14 @@ describe("Cloudbath scoped Notion tools", () => {
     });
 
     expect(result.details).toEqual(
-      expect.objectContaining({ databaseId: WELLNESS_DATABASE_ID, recordCount: 1 }),
+      expect.objectContaining({
+        rootPageId: WELLNESS_ROOT_PAGE_ID,
+        databaseCount: 2,
+        dataSourceCount: 2,
+        recordCount: 2,
+      }),
     );
-    expect(requests).toHaveLength(2);
+    expect(requests.some((request) => request.url.endsWith(`/v1/databases/${WELLNESS_ROOT_PAGE_ID}`))).toBe(false);
     expect(
       requests.every((request) => request.authorization === `Bearer ${WELLNESS_TEST_CREDENTIAL}`),
     ).toBe(true);
@@ -149,13 +200,126 @@ describe("Cloudbath scoped Notion tools", () => {
     expect(JSON.stringify(result)).not.toContain(CONSTRUCTION_TEST_CREDENTIAL);
   });
 
-  it("searches inside the Wellness data source without workspace-wide search", async () => {
+  it("paginates root-page block discovery before retrieving child databases", async () => {
     const urls: string[] = [];
     const fetchImpl = vi.fn(async (input: string | URL | Request) => {
       const url = requestUrl(input);
       urls.push(url);
+      if (url.includes(`/v1/blocks/${WELLNESS_ROOT_PAGE_ID}/children`)) {
+        const parsed = new URL(url);
+        if (!parsed.searchParams.has("start_cursor")) {
+          return Response.json({
+            results: [childDatabaseBlock(WELLNESS_DATABASE_ID)],
+            has_more: true,
+            next_cursor: "root-page-2",
+          });
+        }
+        expect(parsed.searchParams.get("start_cursor")).toBe("root-page-2");
+        return Response.json({
+          results: [childDatabaseBlock(WELLNESS_DATABASE_2_ID)],
+          has_more: false,
+          next_cursor: null,
+        });
+      }
       if (url.endsWith(`/v1/databases/${WELLNESS_DATABASE_ID}`)) {
         return Response.json({
+          object: "database",
+          id: WELLNESS_DATABASE_ID,
+          data_sources: [{ id: WELLNESS_DATA_SOURCE_ID }],
+        });
+      }
+      if (url.endsWith(`/v1/databases/${WELLNESS_DATABASE_2_ID}`)) {
+        return Response.json({
+          object: "database",
+          id: WELLNESS_DATABASE_2_ID,
+          data_sources: [{ id: WELLNESS_DATA_SOURCE_2_ID }],
+        });
+      }
+      if (url.includes("/query")) {
+        return Response.json({ results: [], has_more: false, next_cursor: null });
+      }
+      throw new Error(`unexpected request: ${url}`);
+    }) as typeof fetch;
+
+    const result = await tool("wellness_notion_query", fetchImpl).execute("call", {
+      max_records: 10,
+    });
+
+    expect(result.details).toEqual(
+      expect.objectContaining({ databaseCount: 2, dataSourceCount: 2 }),
+    );
+    expect(
+      urls.filter((url) => url.includes(`/v1/blocks/${WELLNESS_ROOT_PAGE_ID}/children`)),
+    ).toHaveLength(2);
+  });
+
+  it("continues root-scoped data-source pagination with an opaque tool cursor", async () => {
+    const notionCursor = "notion-page-2";
+    const bodies: Array<Record<string, unknown>> = [];
+    const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = requestUrl(input);
+      if (url.includes(`/v1/blocks/${WELLNESS_ROOT_PAGE_ID}/children`)) {
+        return Response.json({
+          results: [childDatabaseBlock(WELLNESS_DATABASE_ID)],
+          has_more: false,
+        });
+      }
+      if (url.endsWith(`/v1/databases/${WELLNESS_DATABASE_ID}`)) {
+        return Response.json({
+          object: "database",
+          id: WELLNESS_DATABASE_ID,
+          data_sources: [{ id: WELLNESS_DATA_SOURCE_ID }],
+        });
+      }
+      if (url.endsWith(`/v1/data_sources/${WELLNESS_DATA_SOURCE_ID}/query`)) {
+        const body = JSON.parse(init?.body as string) as Record<string, unknown>;
+        bodies.push(body);
+        return Response.json(
+          body.start_cursor
+            ? { results: [wellnessPage()], has_more: false, next_cursor: null }
+            : {
+                results: [wellnessPage()],
+                has_more: true,
+                next_cursor: notionCursor,
+              },
+        );
+      }
+      throw new Error(`unexpected request: ${url}`);
+    }) as typeof fetch;
+
+    const first = await tool("wellness_notion_query", fetchImpl).execute("call", {
+      max_records: 1,
+    });
+    const nextCursor = (first.details as { nextCursor: string }).nextCursor;
+    expect(nextCursor).toBeTruthy();
+    expect(nextCursor).not.toBe(notionCursor);
+
+    const second = await tool("wellness_notion_query", fetchImpl).execute("call", {
+      max_records: 1,
+      start_cursor: nextCursor,
+    });
+
+    expect(second.details).toEqual(expect.objectContaining({ recordCount: 1, hasMore: false }));
+    expect(bodies).toEqual([
+      { page_size: 1 },
+      { page_size: 1, start_cursor: notionCursor },
+    ]);
+  });
+
+  it("searches only discovered root-scoped data sources and never uses workspace search", async () => {
+    const urls: string[] = [];
+    const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+      const url = requestUrl(input);
+      urls.push(url);
+      if (url.includes(`/v1/blocks/${WELLNESS_ROOT_PAGE_ID}/children`)) {
+        return Response.json({
+          results: [childDatabaseBlock(WELLNESS_DATABASE_ID)],
+          has_more: false,
+        });
+      }
+      if (url.endsWith(`/v1/databases/${WELLNESS_DATABASE_ID}`)) {
+        return Response.json({
+          object: "database",
           id: WELLNESS_DATABASE_ID,
           data_sources: [{ id: WELLNESS_DATA_SOURCE_ID }],
         });
@@ -163,7 +327,7 @@ describe("Cloudbath scoped Notion tools", () => {
       if (url.endsWith(`/v1/data_sources/${WELLNESS_DATA_SOURCE_ID}/query`)) {
         return Response.json({ results: [wellnessPage()], has_more: false, next_cursor: null });
       }
-      throw new Error("unexpected request");
+      throw new Error(`unexpected request: ${url}`);
     }) as typeof fetch;
 
     const result = await tool("wellness_notion_search", fetchImpl).execute("call", {
@@ -174,80 +338,97 @@ describe("Cloudbath scoped Notion tools", () => {
 
     expect(result.details).toEqual(expect.objectContaining({ scannedRecords: 1 }));
     expect(urls.some((url) => url.endsWith("/v1/search"))).toBe(false);
+    expect(urls.every((url) => !url.includes("/v1/pages/"))).toBe(true);
   });
 
-  it("continues large Wellness queries with an allowlisted data-source index and cursor", async () => {
-    const nextCursor = "opaque-cursor:page/2";
-    const bodies: Array<Record<string, unknown>> = [];
-    const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
-      const url = requestUrl(input);
-      if (url.endsWith(`/v1/databases/${WELLNESS_DATABASE_ID}`)) {
-        return Response.json({
-          id: WELLNESS_DATABASE_ID,
-          data_sources: [{ id: WELLNESS_DATA_SOURCE_ID }],
-        });
-      }
-      if (url.endsWith(`/v1/data_sources/${WELLNESS_DATA_SOURCE_ID}/query`)) {
-        bodies.push(JSON.parse(init?.body as string) as Record<string, unknown>);
-        return Response.json({
-          results: [wellnessPage()],
-          has_more: true,
-          next_cursor: nextCursor,
-        });
-      }
-      throw new Error("unexpected request");
-    }) as typeof fetch;
-
-    const first = await tool("wellness_notion_query", fetchImpl).execute("call", {
-      data_source_index: 0,
-      max_records: 1,
-    });
-    const second = await tool("wellness_notion_query", fetchImpl).execute("call", {
-      data_source_index: 0,
-      max_records: 1,
-      start_cursor: nextCursor,
-    });
-
-    expect(first.details).toEqual(
-      expect.objectContaining({ dataSourceIndex: 0, hasMore: true, nextCursor }),
-    );
-    expect(second.details).toEqual(expect.objectContaining({ dataSourceIndex: 0 }));
-    expect(bodies).toEqual([{ page_size: 1 }, { page_size: 1, start_cursor: nextCursor }]);
-  });
-
-  it("does not retrieve an arbitrary Wellness page before proving membership", async () => {
+  it("does not return a record that escapes the discovered root-page scope", async () => {
     const urls: string[] = [];
+    const foreignDataSourceId = "ffffffff-ffff-4fff-8fff-ffffffffffff";
     const fetchImpl = vi.fn(async (input: string | URL | Request) => {
       const url = requestUrl(input);
       urls.push(url);
+      if (url.includes(`/v1/blocks/${WELLNESS_ROOT_PAGE_ID}/children`)) {
+        return Response.json({
+          results: [childDatabaseBlock(WELLNESS_DATABASE_ID)],
+          has_more: false,
+        });
+      }
       if (url.endsWith(`/v1/databases/${WELLNESS_DATABASE_ID}`)) {
         return Response.json({
+          object: "database",
           id: WELLNESS_DATABASE_ID,
           data_sources: [{ id: WELLNESS_DATA_SOURCE_ID }],
         });
       }
       if (url.endsWith(`/v1/data_sources/${WELLNESS_DATA_SOURCE_ID}/query`)) {
-        return Response.json({ results: [], has_more: false, next_cursor: null });
+        return Response.json({
+          results: [wellnessPage(foreignDataSourceId)],
+          has_more: false,
+          next_cursor: null,
+        });
       }
-      throw new Error("unexpected request");
+      throw new Error(`unexpected request: ${url}`);
     }) as typeof fetch;
 
     await expect(
       tool("wellness_notion_get_record", fetchImpl).execute("call", {
-        record_id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        record_id: WELLNESS_PAGE_ID,
       }),
-    ).rejects.toThrow("outside the allowed database");
+    ).rejects.toThrow("outside the configured data source");
     expect(urls.some((url) => url.includes("/v1/pages/"))).toBe(false);
   });
 
-  it("rejects model-supplied Wellness targets before making a request", async () => {
+  it("exposes no Wellness mutation path and rejects model-supplied targets", async () => {
     const fetchImpl = vi.fn() as typeof fetch;
+    for (const name of [
+      "wellness_notion_query",
+      "wellness_notion_get_record",
+      "wellness_notion_search",
+    ]) {
+      const wellnessTool = tool(name, fetchImpl);
+      expect(wellnessTool.description).toContain("READ ONLY");
+      expect(wellnessTool.description.toLowerCase()).toContain("cannot");
+    }
     await expect(
       tool("wellness_notion_query", fetchImpl).execute("call", {
         database_id: CONSTRUCTION_DATABASE_ID,
       }),
     ).rejects.toThrow("Unsupported tool parameter");
+    await expect(
+      tool("wellness_notion_search", fetchImpl).execute("call", {
+        query: "cashflow",
+        page_id: WELLNESS_ROOT_PAGE_ID,
+      }),
+    ).rejects.toThrow("Unsupported tool parameter");
     expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("returns safe Notion status, code, and message diagnostics without credentials", async () => {
+    const fetchImpl = vi.fn(async () =>
+      Response.json(
+        {
+          object: "error",
+          status: 400,
+          code: "validation_error",
+          message: `Invalid root ${WELLNESS_TEST_CREDENTIAL}; Bearer provider-secret`,
+        },
+        { status: 400 },
+      ),
+    ) as typeof fetch;
+
+    let message = "";
+    try {
+      await tool("wellness_notion_query", fetchImpl).execute("call", {});
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+
+    expect(message).toContain("status 400");
+    expect(message).toContain("code validation_error");
+    expect(message).toContain("Invalid root");
+    expect(message).not.toContain(WELLNESS_TEST_CREDENTIAL);
+    expect(message).not.toContain("provider-secret");
+    expect(message).toContain("[REDACTED]");
   });
 
   it("creates only in the allowlisted Construction Upload Inbox with its own credential", async () => {
@@ -286,7 +467,7 @@ describe("Cloudbath scoped Notion tools", () => {
         (request) => authorization(request.init) === `Bearer ${CONSTRUCTION_TEST_CREDENTIAL}`,
       ),
     ).toBe(true);
-    expect(requests.every((request) => !request.url.includes(WELLNESS_DATABASE_ID))).toBe(true);
+    expect(requests.every((request) => !request.url.includes(WELLNESS_ROOT_PAGE_ID))).toBe(true);
     const createRequest = requests.find((request) => request.url.endsWith("/v1/pages"));
     expect(JSON.parse(createRequest?.init?.body as string)).toEqual(
       expect.objectContaining({
@@ -303,7 +484,7 @@ describe("Cloudbath scoped Notion tools", () => {
     await expect(
       tool("construction_upload_create", fetchImpl).execute("call", {
         ...validConstructionCreate(),
-        database_id: WELLNESS_DATABASE_ID,
+        database_id: WELLNESS_ROOT_PAGE_ID,
       }),
     ).rejects.toThrow("Unsupported tool parameter");
     await expect(
