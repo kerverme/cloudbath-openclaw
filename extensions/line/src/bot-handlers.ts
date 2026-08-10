@@ -515,7 +515,6 @@ async function handleMessageEvent(event: MessageEvent, context: LineHandlerConte
       cfg,
       agentId: messageContext.route.agentId,
       ctx: messageContext.ctxPayload,
-      commandAuthorized: decision.commandAccess.authorized,
     });
     if (naturalModelAction.kind === "directive") {
       // The existing /model directive owns validation, session persistence, and verification.
