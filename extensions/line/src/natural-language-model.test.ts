@@ -22,7 +22,7 @@ const CFG: OpenClawConfig = {
     },
   },
   commands: {
-    ownerAllowFrom: ["line:owner-user"],
+    ownerAllowFrom: ["owner-user"],
   },
 };
 
@@ -41,14 +41,9 @@ function catalog(): ModelsProviderData {
     byProvider: new Map([["openrouter", new Set(refs)]]),
     providers: ["openrouter"],
     resolvedDefault: { provider: "openrouter", model: "openai/gpt-5.6-luna" },
-    modelNames: new Map(
-      models.map(([id, name]) => [`openrouter/${id}`, name]),
-    ),
+    modelNames: new Map(models.map(([id, name]) => [`openrouter/${id}`, name])),
     modelCapabilities: new Map(
-      models.map(([id, , supportsTools]) => [
-        `openrouter/${id}`,
-        { supportsTools },
-      ]),
+      models.map(([id, , supportsTools]) => [`openrouter/${id}`, { supportsTools }]),
     ),
     runtimeChoicesByProvider: new Map(),
   };
