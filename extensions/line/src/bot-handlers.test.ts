@@ -411,7 +411,8 @@ describe("handleLineWebhookEvents", () => {
     buildLineMessageContextMock.mockImplementation(async () => ({
       ctxPayload: { From: "line:group:group-1" },
       replyToken: "reply-token",
-      route: { agentId: "default" },
+      route: { agentId: "default", sessionKey: "line:group:group-1" },
+      turn: { storePath: "sessions.json", record: {} },
       isGroup: true,
       accountId: "default",
     }));
@@ -456,7 +457,12 @@ describe("handleLineWebhookEvents", () => {
       replyMessageLineMock.mockResolvedValue(undefined);
       const processMessage = vi.fn();
       const event = createTestMessageEvent({
-        message: { id: `natural-owner-${_label}`, type: "text", text },
+        message: {
+          id: `natural-owner-${_label}`,
+          type: "text",
+          text,
+          quoteToken: "quote-token",
+        },
         source: { type: "group", groupId: "group-1", userId: "owner-user" },
         webhookEventId: `natural-owner-${_label}`,
       });
@@ -506,7 +512,12 @@ describe("handleLineWebhookEvents", () => {
     mockMessageContextForSender("owner-user");
     const processMessage = vi.fn();
     const event = createTestMessageEvent({
-      message: { id: `natural-owner-${_label}`, type: "text", text },
+      message: {
+          id: `natural-owner-${_label}`,
+          type: "text",
+          text,
+          quoteToken: "quote-token",
+        },
       source: { type: "group", groupId: "group-1", userId: "owner-user" },
       webhookEventId: `natural-owner-${_label}`,
     });
@@ -534,7 +545,12 @@ describe("handleLineWebhookEvents", () => {
     const processMessage = vi.fn();
     const text = "เปลี่ยนเป็น Claude Sonnet";
     const event = createTestMessageEvent({
-      message: { id: "natural-non-owner", type: "text", text },
+      message: {
+        id: "natural-non-owner",
+        type: "text",
+        text,
+        quoteToken: "quote-token",
+      },
       source: { type: "group", groupId: "group-1", userId: "ordinary-member" },
       webhookEventId: "natural-non-owner",
     });
@@ -564,7 +580,12 @@ describe("handleLineWebhookEvents", () => {
     mockMessageContextForSender("owner-user");
     const processMessage = vi.fn();
     const event = createTestMessageEvent({
-      message: { id: "ordinary-chat", type: "text", text: "ช่วยสรุปงานวันนี้" },
+      message: {
+        id: "ordinary-chat",
+        type: "text",
+        text: "ช่วยสรุปงานวันนี้",
+        quoteToken: "quote-token",
+      },
       source: { type: "group", groupId: "group-1", userId: "owner-user" },
       webhookEventId: "ordinary-chat",
     });
@@ -595,6 +616,7 @@ describe("handleLineWebhookEvents", () => {
         id: "slash-model",
         type: "text",
         text: `/model ${NATURAL_MODEL_REF}`,
+        quoteToken: "quote-token",
       },
       source: { type: "group", groupId: "group-1", userId: "owner-user" },
       webhookEventId: "slash-model",
