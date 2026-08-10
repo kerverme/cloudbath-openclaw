@@ -298,6 +298,8 @@ function createLineWebhookTestContext(params: {
   groupHistories?: Map<string, HistoryEntry[]>;
   replayCache?: ReturnType<typeof createLineWebhookReplayCache>;
   accessGroups?: Record<string, { type: "message.senders"; members: Record<string, string[]> }>;
+  naturalModelCatalogLoader?: LineWebhookContext["naturalModelCatalogLoader"];
+  naturalModelSwitch?: LineWebhookContext["naturalModelSwitch"];
 }): Parameters<typeof handleLineWebhookEvents>[1] {
   const allowFrom = params.allowFrom ?? (params.dmPolicy === "open" ? ["*"] : undefined);
   const lineConfig = {
@@ -327,8 +329,9 @@ function createLineWebhookTestContext(params: {
     runtime: createRuntime(),
     mediaMaxBytes: 1,
     processMessage: params.processMessage,
-    naturalModelCatalogLoader: async () => naturalModelCatalog(),
-    naturalModelSwitch: naturalModelSwitchMock,
+    naturalModelCatalogLoader:
+      params.naturalModelCatalogLoader ?? (async () => naturalModelCatalog()),
+    naturalModelSwitch: params.naturalModelSwitch ?? naturalModelSwitchMock,
     ...(params.groupHistories ? { groupHistories: params.groupHistories } : {}),
     ...(params.replayCache ? { replayCache: params.replayCache } : {}),
   };
@@ -504,6 +507,119 @@ describe("handleLineWebhookEvents", () => {
     },
   );
 
+  it("captures the production phrase before ordinary AI when no Luna Pro catalog entry exists", async () => {
+    enableVerifiedOwnerNaturalModelAuthorization();
+    mockMessageContextForSender("owner-user");
+    replyMessageLineMock.mockResolvedValue(undefined);
+    const processMessage = vi.fn();
+    const catalogLoader = vi.fn(async () => naturalModelCatalog());
+    const event = createTestMessageEvent({
+      message: {
+        id: "natural-production-no-match",
+        type: "text",
+        text: "สลับไปใช้ luna pro",
+        quoteToken: "quote-token",
+      },
+      source: { type: "group", groupId: "group-1", userId: "owner-user" },
+      webhookEventId: "natural-production-no-match",
+    });
+
+    await handleLineWebhookEvents(
+      [event],
+      createLineWebhookTestContext({
+        processMessage,
+        groupPolicy: "open",
+        requireMention: false,
+        naturalModelCatalogLoader: catalogLoader,
+      }),
+    );
+
+    expect(catalogLoader).toHaveBeenCalledTimes(1);
+    expect(naturalModelSwitchMock).not.toHaveBeenCalled();
+    expect(replyMessageLineMock).toHaveBeenCalledWith(
+      "reply-token",
+      [
+        expect.objectContaining({
+          type: "text",
+          text: expect.not.stringContaining("openrouter/luna pro"),
+        }),
+      ],
+      expect.any(Object),
+    );
+    expect(replyMessageLineMock).toHaveBeenCalledWith(
+      "reply-token",
+      [
+        expect.objectContaining({
+          text: expect.not.stringContaining("เปลี่ยนเป็น"),
+        }),
+      ],
+      expect.any(Object),
+    );
+    expect(processMessage).not.toHaveBeenCalled();
+  });
+
+  it("switches the production phrase only to the exact authenticated catalog model", async () => {
+    enableVerifiedOwnerNaturalModelAuthorization();
+    mockMessageContextForSender("owner-user");
+    replyMessageLineMock.mockResolvedValue(undefined);
+    const processMessage = vi.fn();
+    const catalogModel = {
+      id: "openai/gpt-5.6-luna-pro",
+      name: "OpenAI: GPT-5.6 Luna Pro",
+      supportsTools: true,
+    };
+    const catalogLoader = vi.fn(async () => [catalogModel]);
+    let activeRef: string | undefined;
+    const switchModel = vi.fn(async (params: { candidate: { ref: string } }) => {
+      activeRef = params.candidate.ref;
+      return { ok: true as const, activeRef };
+    });
+    const event = createTestMessageEvent({
+      message: {
+        id: "natural-production-match",
+        type: "text",
+        text: "สลับไปใช้ luna pro",
+        quoteToken: "quote-token",
+      },
+      source: { type: "group", groupId: "group-1", userId: "owner-user" },
+      webhookEventId: "natural-production-match",
+    });
+
+    await handleLineWebhookEvents(
+      [event],
+      createLineWebhookTestContext({
+        processMessage,
+        groupPolicy: "open",
+        requireMention: false,
+        naturalModelCatalogLoader: catalogLoader,
+        naturalModelSwitch: switchModel,
+      }),
+    );
+
+    expect(catalogLoader).toHaveBeenCalledTimes(1);
+    expect(switchModel).toHaveBeenCalledWith(
+      expect.objectContaining({
+        candidate: expect.objectContaining({
+          id: catalogModel.id,
+          ref: `openrouter/${catalogModel.id}`,
+          source: "openrouter-user-catalog",
+        }),
+      }),
+    );
+    expect(activeRef).toBe(`openrouter/${catalogModel.id}`);
+    expect(replyMessageLineMock).toHaveBeenCalledWith(
+      "reply-token",
+      [
+        expect.objectContaining({
+          type: "text",
+          text: "เปลี่ยนเป็น OpenAI: GPT-5.6 Luna Pro แล้วครับ",
+        }),
+      ],
+      expect.any(Object),
+    );
+    expect(processMessage).not.toHaveBeenCalled();
+  });
+
   it.each([
     ["current model", "ตอนนี้ใช้โมเดลอะไร", "/model status"],
     ["return to default", "กลับไปโมเดล default", "/model default"],
@@ -568,11 +684,75 @@ describe("handleLineWebhookEvents", () => {
       expect.objectContaining({ commandAuthorized: true }),
     );
     expect(buildModelsProviderDataMock).not.toHaveBeenCalled();
-    expect(processMessage).toHaveBeenCalledWith(
-      expect.objectContaining({
-        ctxPayload: expect.not.objectContaining({ CommandBody: expect.anything() }),
+    expect(naturalModelSwitchMock).not.toHaveBeenCalled();
+    expect(replyMessageLineMock).not.toHaveBeenCalled();
+    expect(processMessage).not.toHaveBeenCalled();
+  });
+
+  it("contains unparsed explicit model control before ordinary AI processing", async () => {
+    enableVerifiedOwnerNaturalModelAuthorization();
+    mockMessageContextForSender("owner-user");
+    replyMessageLineMock.mockResolvedValue(undefined);
+    const processMessage = vi.fn();
+    const catalogLoader = vi.fn(async () => naturalModelCatalog());
+    const event = createTestMessageEvent({
+      message: {
+        id: "model-control-safety-gate",
+        type: "text",
+        text: "ช่วยเปลี่ยน model ให้หน่อย",
+        quoteToken: "quote-token",
+      },
+      source: { type: "group", groupId: "group-1", userId: "owner-user" },
+      webhookEventId: "model-control-safety-gate",
+    });
+
+    await handleLineWebhookEvents(
+      [event],
+      createLineWebhookTestContext({
+        processMessage,
+        groupPolicy: "open",
+        requireMention: false,
+        naturalModelCatalogLoader: catalogLoader,
       }),
     );
+
+    expect(catalogLoader).not.toHaveBeenCalled();
+    expect(naturalModelSwitchMock).not.toHaveBeenCalled();
+    expect(replyMessageLineMock).toHaveBeenCalledTimes(1);
+    expect(processMessage).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "Claude รุ่นไหนเก่ง",
+    "Luna Pro ต่างจาก Luna ยังไง",
+    "OpenRouter คืออะไร",
+    "เปรียบเทียบ Gemini กับ Claude",
+  ])("keeps model discussion on the ordinary chat path: %s", async (text) => {
+    mockMessageContextForSender("ordinary-member");
+    const processMessage = vi.fn();
+    const event = createTestMessageEvent({
+      message: {
+        id: "model-discussion",
+        type: "text",
+        text,
+        quoteToken: "quote-token",
+      },
+      source: { type: "group", groupId: "group-1", userId: "ordinary-member" },
+      webhookEventId: `model-discussion-${text}`,
+    });
+
+    await handleLineWebhookEvents(
+      [event],
+      createLineWebhookTestContext({
+        processMessage,
+        groupPolicy: "open",
+        requireMention: false,
+      }),
+    );
+
+    expect(resolveCommandAuthorizationMock).not.toHaveBeenCalled();
+    expect(naturalModelSwitchMock).not.toHaveBeenCalled();
+    expect(processMessage).toHaveBeenCalledTimes(1);
   });
 
   it("does not grant command authorization to ordinary natural-language chat", async () => {
