@@ -193,7 +193,8 @@ jobs:
               test -f /app/dist/extensions/line/index.js
               test -f /app/dist/extensions/line/openclaw.plugin.json
               test -f /app/dist/extensions/line/package.json
-              test -f /app/dist/extensions/line/outbound-media-staging.js
+              test -f /app/extensions/line/src/outbound-media-staging.ts
+              grep -q stageLineOutboundMessageImages /app/extensions/line/src/send.ts
               node --input-type=module -e "await import(\"@aws-sdk/client-s3\")"
               node --input-type=module -e "await import(\"@aws-sdk/s3-request-presigner\")"
               node --input-type=module -e "await import(\"typebox\")"
