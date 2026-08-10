@@ -137,13 +137,17 @@ describe("resolveLineOutboundMedia", () => {
     });
   });
 
-  it("validates previewImageUrl when provided", async () => {
+  it("preserves a video preview image source for canonical R2 staging", async () => {
     await expect(
       resolveLineOutboundMedia("https://example.com/video.mp4", {
         mediaKind: "video",
-        previewImageUrl: "http://example.com/preview.jpg",
+        previewImageUrl: "/tmp/video-preview.jpg",
       }),
-    ).rejects.toThrow(/must use HTTPS/i);
+    ).resolves.toEqual({
+      mediaUrl: "https://example.com/video.mp4",
+      mediaKind: "video",
+      previewImageUrl: "/tmp/video-preview.jpg",
+    });
   });
 
   it("falls back to image when no explicit LINE media options or known extension are present", async () => {
@@ -155,15 +159,17 @@ describe("resolveLineOutboundMedia", () => {
     });
   });
 
-  it("rejects local paths because LINE outbound media requires public HTTPS URLs", async () => {
-    await expect(resolveLineOutboundMedia("./assets/image.jpg")).rejects.toThrow(
-      /requires a public https url/i,
-    );
+  it("accepts a managed local image source for canonical R2 staging", async () => {
+    await expect(resolveLineOutboundMedia("/tmp/generated/image.jpg")).resolves.toEqual({
+      mediaUrl: "/tmp/generated/image.jpg",
+      mediaKind: "image",
+    });
   });
 
-  it("rejects non-HTTPS URL explicitly", async () => {
-    await expect(resolveLineOutboundMedia("http://example.com/image.jpg")).rejects.toThrow(
-      /must use HTTPS/i,
-    );
+  it("defers image source validation to canonical R2 staging", async () => {
+    await expect(resolveLineOutboundMedia("http://example.com/image.jpg")).resolves.toEqual({
+      mediaUrl: "http://example.com/image.jpg",
+      mediaKind: "image",
+    });
   });
 });
