@@ -513,11 +513,11 @@ describe("handleLineWebhookEvents", () => {
     const processMessage = vi.fn();
     const event = createTestMessageEvent({
       message: {
-          id: `natural-owner-${_label}`,
-          type: "text",
-          text,
-          quoteToken: "quote-token",
-        },
+        id: `natural-owner-${_label}`,
+        type: "text",
+        text,
+        quoteToken: "quote-token",
+      },
       source: { type: "group", groupId: "group-1", userId: "owner-user" },
       webhookEventId: `natural-owner-${_label}`,
     });
