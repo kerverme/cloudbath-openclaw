@@ -9,6 +9,7 @@ import { resolveLineAccount } from "./accounts.js";
 import { messageAction } from "./actions.js";
 import { resolveLineChannelAccessToken } from "./channel-access-token.js";
 import { validateLineMediaUrl } from "./outbound-media.js";
+import { stageLineOutboundMessageImages } from "./outbound-media-staging.js";
 import { createLineSendReceipt } from "./send-receipt.js";
 import type { LineSendResult } from "./types.js";
 
@@ -220,10 +221,11 @@ async function pushLineMessages(
     throw new Error("Message must be non-empty for LINE sends");
   }
 
+  const stagedMessages = await stageLineOutboundMessageImages(messages);
   const { account, client, chatId } = createLinePushContext(to, opts);
   const pushRequest = client.pushMessage({
     to: chatId,
-    messages,
+    messages: stagedMessages,
   });
 
   if (behavior.errorContext) {
@@ -262,11 +264,12 @@ async function replyLineMessages(
   opts: LinePushOpts,
   behavior: LineReplyBehavior = {},
 ): Promise<void> {
+  const stagedMessages = await stageLineOutboundMessageImages(messages);
   const { account, client } = createLineMessagingClient(opts);
 
   await client.replyMessage({
     replyToken,
-    messages,
+    messages: stagedMessages,
   });
 
   recordLineOutboundActivity(account.accountId);
@@ -274,7 +277,7 @@ async function replyLineMessages(
   if (opts.verbose) {
     logVerbose(
       behavior.verboseMessage?.(messages.length) ??
-        `line: replied with ${messages.length} messages`,
+        `line: replied with ${stagedMessages.length} messages`,
     );
   }
 }
@@ -289,28 +292,24 @@ export async function sendMessageLine(
 
   const mediaUrl = opts.mediaUrl?.trim();
   if (mediaUrl) {
-    await validateLineMediaUrl(mediaUrl);
     switch (opts.mediaKind) {
       case "video": {
+        await validateLineMediaUrl(mediaUrl);
         const previewImageUrl = opts.previewImageUrl?.trim();
         if (!previewImageUrl) {
           throw new Error("LINE video messages require previewImageUrl to reference an image URL");
         }
-        await validateLineMediaUrl(previewImageUrl);
         const trackingId = isLineUserChatId(chatId) ? opts.trackingId : undefined;
         messages.push(createVideoMessage(mediaUrl, previewImageUrl, trackingId));
         break;
       }
       case "audio":
+        await validateLineMediaUrl(mediaUrl);
         messages.push(createAudioMessage(mediaUrl, opts.durationMs ?? 60000));
         break;
       default:
-        // Backward compatibility: keep image as default when media kind is unspecified.
-        {
-          const previewImageUrl = opts.previewImageUrl?.trim() || mediaUrl;
-          await validateLineMediaUrl(previewImageUrl);
-          messages.push(createImageMessage(mediaUrl, previewImageUrl));
-        }
+        // Image sources are staged and verified at the final LINE send boundary.
+        messages.push(createImageMessage(mediaUrl, opts.previewImageUrl?.trim() || mediaUrl));
         break;
     }
   }
@@ -388,10 +387,6 @@ export async function pushImageMessage(
   previewImageUrl: string | undefined,
   opts: LinePushOpts,
 ): Promise<LineSendResult> {
-  await validateLineMediaUrl(originalContentUrl);
-  if (previewImageUrl) {
-    await validateLineMediaUrl(previewImageUrl);
-  }
   return pushLineMessages(to, [createImageMessage(originalContentUrl, previewImageUrl)], opts, {
     verboseMessage: (chatId) => `line: pushed image to ${chatId}`,
   });

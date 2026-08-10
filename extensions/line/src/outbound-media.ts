@@ -28,10 +28,10 @@ export async function validateLineMediaUrl(url: string): Promise<void> {
   try {
     parsed = new URL(url);
   } catch {
-    throw new Error(`LINE outbound media URL must be a valid URL: ${url}`);
+    throw new Error("LINE outbound media URL must be a valid URL");
   }
   if (parsed.protocol !== "https:") {
-    throw new Error(`LINE outbound media URL must use HTTPS: ${url}`);
+    throw new Error("LINE outbound media URL must use HTTPS");
   }
   if (url.length > 2000) {
     throw new Error(`LINE outbound media URL must be 2000 chars or less (got ${url.length})`);
@@ -71,37 +71,32 @@ export async function resolveLineOutboundMedia(
   mediaUrl: string,
   opts: ResolveLineOutboundMediaOpts = {},
 ): Promise<LineOutboundMediaResolved> {
-  const trimmedUrl = mediaUrl.trim();
-  if (isHttpsUrl(trimmedUrl)) {
-    await validateLineMediaUrl(trimmedUrl);
-    const previewImageUrl = opts.previewImageUrl?.trim();
-    if (previewImageUrl) {
-      await validateLineMediaUrl(previewImageUrl);
-    }
-    const mediaKind =
-      opts.mediaKind ??
-      (typeof opts.durationMs === "number" ? "audio" : undefined) ??
-      (opts.trackingId?.trim() ? "video" : undefined) ??
-      detectLineMediaKindFromUrl(trimmedUrl) ??
-      "image";
-    return {
-      mediaUrl: trimmedUrl,
-      mediaKind,
-      ...(previewImageUrl ? { previewImageUrl } : {}),
-      ...(typeof opts.durationMs === "number" ? { durationMs: opts.durationMs } : {}),
-      ...(opts.trackingId ? { trackingId: opts.trackingId } : {}),
-    };
+  const source = mediaUrl.trim();
+  if (!source) {
+    throw new Error("LINE outbound media source must be non-empty");
   }
 
-  try {
-    const parsed = new URL(trimmedUrl);
-    if (parsed.protocol !== "https:") {
-      throw new Error(`LINE outbound media URL must use HTTPS: ${trimmedUrl}`);
-    }
-  } catch (e) {
-    if (e instanceof Error && e.message.startsWith("LINE outbound")) {
-      throw e;
-    }
+  const sourceIsHttps = isHttpsUrl(source);
+  const mediaKind =
+    opts.mediaKind ??
+    (typeof opts.durationMs === "number" ? "audio" : undefined) ??
+    (opts.trackingId?.trim() ? "video" : undefined) ??
+    (sourceIsHttps ? detectLineMediaKindFromUrl(source) : undefined) ??
+    "image";
+  const previewImageUrl = opts.previewImageUrl?.trim();
+
+  if (mediaKind !== "image") {
+    await validateLineMediaUrl(source);
   }
-  throw new Error("LINE outbound media currently requires a public HTTPS URL");
+  if (mediaKind === "video" && !previewImageUrl) {
+    throw new Error("LINE video messages require previewImageUrl to reference an image source");
+  }
+
+  return {
+    mediaUrl: source,
+    mediaKind,
+    ...(previewImageUrl ? { previewImageUrl } : {}),
+    ...(typeof opts.durationMs === "number" ? { durationMs: opts.durationMs } : {}),
+    ...(opts.trackingId ? { trackingId: opts.trackingId } : {}),
+  };
 }

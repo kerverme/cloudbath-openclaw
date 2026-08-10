@@ -13,6 +13,7 @@ const {
   recordChannelActivityMock,
   logVerboseMock,
   resolvePinnedHostnameWithPolicyMock,
+  stageLineOutboundMessageImagesMock,
 } = vi.hoisted(() => {
   const pushMessageMockLocal = vi.fn();
   const replyMessageMockLocal = vi.fn();
@@ -32,6 +33,7 @@ const {
   const recordChannelActivityMockLocal = vi.fn();
   const logVerboseMockLocal = vi.fn();
   const resolvePinnedHostnameWithPolicyMockLocal = vi.fn();
+  const stageLineOutboundMessageImagesMockLocal = vi.fn();
   return {
     pushMessageMock: pushMessageMockLocal,
     replyMessageMock: replyMessageMockLocal,
@@ -44,6 +46,7 @@ const {
     recordChannelActivityMock: recordChannelActivityMockLocal,
     logVerboseMock: logVerboseMockLocal,
     resolvePinnedHostnameWithPolicyMock: resolvePinnedHostnameWithPolicyMockLocal,
+    stageLineOutboundMessageImagesMock: stageLineOutboundMessageImagesMockLocal,
   };
 });
 
@@ -81,7 +84,14 @@ vi.mock("openclaw/plugin-sdk/ssrf-runtime", () => ({
   resolvePinnedHostnameWithPolicy: resolvePinnedHostnameWithPolicyMock,
 }));
 
+vi.mock("./outbound-media-staging.js", () => ({
+  stageLineOutboundMessageImages: stageLineOutboundMessageImagesMock,
+}));
+
 let sendModule: typeof import("./send.js");
+
+const STAGED_IMAGE_URL =
+  "https://r2.example/outbound/line/staged.png?X-Amz-Signature=unit-test";
 
 const LINE_TEST_CFG = {
   channels: {
@@ -108,6 +118,7 @@ describe("LINE send helpers", () => {
     vi.doUnmock("openclaw/plugin-sdk/channel-activity-runtime");
     vi.doUnmock("openclaw/plugin-sdk/runtime-env");
     vi.doUnmock("openclaw/plugin-sdk/ssrf-runtime");
+    vi.doUnmock("./outbound-media-staging.js");
     vi.resetModules();
   });
 
@@ -124,6 +135,7 @@ describe("LINE send helpers", () => {
     recordChannelActivityMock.mockReset();
     logVerboseMock.mockReset();
     resolvePinnedHostnameWithPolicyMock.mockReset();
+    stageLineOutboundMessageImagesMock.mockReset();
 
     MessagingApiClientMock.mockImplementation(function () {
       return {
@@ -140,6 +152,22 @@ describe("LINE send helpers", () => {
       hostname: "example.com",
       addresses: ["93.184.216.34"],
     });
+    stageLineOutboundMessageImagesMock.mockImplementation(
+      async (messages: Array<Record<string, unknown>>) =>
+        messages.map((message) => {
+          if (message.type === "image") {
+            return {
+              ...message,
+              originalContentUrl: STAGED_IMAGE_URL,
+              previewImageUrl: STAGED_IMAGE_URL,
+            };
+          }
+          if (message.type === "video" && typeof message.previewImageUrl === "string") {
+            return { ...message, previewImageUrl: STAGED_IMAGE_URL };
+          }
+          return message;
+        }),
+    );
     pushMessageMock.mockResolvedValue({});
     replyMessageMock.mockResolvedValue({});
     showLoadingAnimationMock.mockResolvedValue({});
@@ -179,11 +207,21 @@ describe("LINE send helpers", () => {
       messages: [
         {
           type: "image",
-          originalContentUrl: "https://example.com/original.jpg",
-          previewImageUrl: "https://example.com/original.jpg",
+          originalContentUrl: STAGED_IMAGE_URL,
+          previewImageUrl: STAGED_IMAGE_URL,
         },
       ],
     });
+    expect(stageLineOutboundMessageImagesMock).toHaveBeenCalledWith([
+      {
+        type: "image",
+        originalContentUrl: "https://example.com/original.jpg",
+        previewImageUrl: "https://example.com/original.jpg",
+      },
+    ]);
+    expect(stageLineOutboundMessageImagesMock.mock.invocationCallOrder[0]).toBeLessThan(
+      pushMessageMock.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
+    );
     expect(recordChannelActivityMock).toHaveBeenCalledWith({
       channel: "line",
       accountId: "default",
@@ -241,8 +279,8 @@ describe("LINE send helpers", () => {
       messages: [
         {
           type: "image",
-          originalContentUrl: "https://example.com/media.jpg",
-          previewImageUrl: "https://example.com/media.jpg",
+          originalContentUrl: STAGED_IMAGE_URL,
+          previewImageUrl: STAGED_IMAGE_URL,
         },
         {
           type: "text",
@@ -302,7 +340,7 @@ describe("LINE send helpers", () => {
         {
           type: "video",
           originalContentUrl: "https://example.com/video.mp4",
-          previewImageUrl: "https://example.com/preview.jpg",
+          previewImageUrl: STAGED_IMAGE_URL,
           trackingId: "track-1",
         },
         {
@@ -323,9 +361,9 @@ describe("LINE send helpers", () => {
     ).rejects.toThrow(/require previewimageurl/i);
   });
 
-  it("blocks private-network media URLs before calling LINE", async () => {
-    resolvePinnedHostnameWithPolicyMock.mockRejectedValueOnce(
-      new Error("SSRF blocked private network target"),
+  it("fails closed when canonical image staging rejects the source", async () => {
+    stageLineOutboundMessageImagesMock.mockRejectedValueOnce(
+      new Error("LINE outbound image staging failed (source_fetch_failed)"),
     );
 
     await expect(
@@ -333,7 +371,7 @@ describe("LINE send helpers", () => {
         cfg: LINE_TEST_CFG,
         mediaUrl: "https://127.0.0.1/image.jpg",
       }),
-    ).rejects.toThrow(/private network/i);
+    ).rejects.toThrow("LINE outbound image staging failed (source_fetch_failed)");
 
     expect(pushMessageMock).not.toHaveBeenCalled();
   });
@@ -353,7 +391,7 @@ describe("LINE send helpers", () => {
         {
           type: "video",
           originalContentUrl: "https://example.com/video.mp4",
-          previewImageUrl: "https://example.com/preview.jpg",
+          previewImageUrl: STAGED_IMAGE_URL,
         },
         {
           type: "text",
