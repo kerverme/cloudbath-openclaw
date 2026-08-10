@@ -1,6 +1,6 @@
+import { resolveCommandAuthorization } from "openclaw/plugin-sdk/command-auth-native";
 // Resolves owner-authorized natural-language LINE model controls through the existing /model path.
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
-import { resolveCommandAuthorization } from "openclaw/plugin-sdk/command-auth-native";
 import {
   buildModelsProviderData,
   type ModelsProviderData,
@@ -9,10 +9,7 @@ import {
 const OPENROUTER_PROVIDER = "openrouter";
 const MAX_CLARIFICATION_CHOICES = 5;
 
-type CatalogLoader = (
-  cfg: OpenClawConfig,
-  agentId?: string,
-) => Promise<ModelsProviderData>;
+type CatalogLoader = (cfg: OpenClawConfig, agentId?: string) => Promise<ModelsProviderData>;
 
 export type LineNaturalModelAction =
   | { kind: "none" }
@@ -102,20 +99,11 @@ export function parseLineNaturalModelIntent(text: string): NaturalModelIntent {
     return { kind: "current" };
   }
 
-  const thaiConfirmation = trimmed.match(
-    /^ยืนยัน(?:ใช้|เปลี่ยนเป็น)?\s+(.+)$/iu,
-  );
-  const englishConfirmation = trimmed.match(
-    /^confirm\s+(?:use|switch\s+to)\s+(.+)$/iu,
-  );
-  const thai = trimmed.match(
-    /^(?:เปลี่ยน(?:กลับ)?เป็น|เปลี่ยนไป(?:ใช้)?|กลับไป(?:ใช้)?|ใช้|ลอง)\s*(.+)$/iu,
-  );
-  const english = trimmed.match(
-    /^(?:switch(?:\s+back)?\s+to|use|try)\s+(.+)$/iu,
-  );
-  const rawQuery =
-    thaiConfirmation?.[1] ?? englishConfirmation?.[1] ?? thai?.[1] ?? english?.[1];
+  const thaiConfirmation = trimmed.match(/^ยืนยัน(?:ใช้|เปลี่ยนเป็น)?\s+(.+)$/iu);
+  const englishConfirmation = trimmed.match(/^confirm\s+(?:use|switch\s+to)\s+(.+)$/iu);
+  const thai = trimmed.match(/^(?:เปลี่ยน(?:กลับ)?เป็น|เปลี่ยนไป(?:ใช้)?|กลับไป(?:ใช้)?|ใช้|ลอง)\s*(.+)$/iu);
+  const english = trimmed.match(/^(?:switch(?:\s+back)?\s+to|use|try)\s+(.+)$/iu);
+  const rawQuery = thaiConfirmation?.[1] ?? englishConfirmation?.[1] ?? thai?.[1] ?? english?.[1];
   if (!rawQuery) {
     return { kind: "none" };
   }
@@ -227,10 +215,7 @@ function formatNoMatch(intent: SwitchIntent): string {
     : "No matching OpenRouter model is available to this account.";
 }
 
-function formatAmbiguous(
-  intent: SwitchIntent,
-  candidates: OpenRouterModelCandidate[],
-): string {
+function formatAmbiguous(intent: SwitchIntent, candidates: OpenRouterModelCandidate[]): string {
   const shown = candidates.slice(0, MAX_CLARIFICATION_CHOICES);
   const lines = shown.map(
     (candidate, index) => `${index + 1}. ${candidate.name} (\`${candidate.ref}\`)`,
