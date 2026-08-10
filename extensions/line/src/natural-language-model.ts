@@ -32,6 +32,7 @@ export type OpenRouterCatalogLoader = (
 
 export type LineNaturalModelAction =
   | { kind: "none" }
+  | { kind: "blocked" }
   | { kind: "directive"; command: string }
   | {
       kind: "switch";
@@ -112,7 +113,7 @@ function hasThaiText(value: string): boolean {
 function stripTrailingPoliteness(value: string): string {
   return value
     .replace(/\s*(?:ได้ไหม|ได้หรือไม่)\s*[.!?]*$/iu, "")
-    .replace(/\s+(?:หน่อย|ที|ครับ|ค่ะ|คะ|นะ|please)\s*[.!?]*$/iu, "")
+    .replace(/\s+(?:แทน|หน่อย|ที|ครับ|ค่ะ|คะ|นะ|please)\s*[.!?]*$/iu, "")
     .replace(/[.!?]+$/u, "")
     .trim();
 }
@@ -182,7 +183,7 @@ export function parseLineNaturalModelIntent(text: string): NaturalModelIntent {
   const thaiConfirmation = trimmed.match(/^ยืนยัน(?:ใช้|เปลี่ยนเป็น)?\s+(.+)$/iu);
   const englishConfirmation = trimmed.match(/^confirm\s+(?:use|switch\s+to)\s+(.+)$/iu);
   const thai = trimmed.match(
-    /^(?:เปลี่ยน(?:กลับ)?เป็น|เปลี่ยนไป(?:ใช้)?|กลับไป(?:ใช้)?|ใช้|อยากลอง(?:เปลี่ยนเป็น|ใช้)?|ลอง(?:เปลี่ยนเป็น|ใช้)?)\s*(.+)$/iu,
+    /^(?:เปลี่ยน(?:กลับ)?เป็น|เปลี่ยนไป(?:ใช้)?|เปลี่ยน(?:โมเดล|ตัว\s*AI)\s*เป็น|สลับ(?:ไปใช้|เป็น|โมเดล\s*เป็น)|กลับ(?:ไป|มา)(?:ใช้)?|ขอ(?:เปลี่ยนเป็น|ใช้)|เอาเป็น|ใช้|อยากลอง(?:เปลี่ยนเป็น|ใช้)?|ลอง(?:เปลี่ยนเป็น|ใช้)?)\s*(.+)$/iu,
   );
   const english = trimmed.match(/^(?:switch(?:\s+back)?\s+to|use|try)\s+(.+)$/iu);
   const rawQuery = thaiConfirmation?.[1] ?? englishConfirmation?.[1] ?? thai?.[1] ?? english?.[1];
@@ -210,6 +211,33 @@ export function parseLineNaturalModelIntent(text: string): NaturalModelIntent {
     preferBase: parsed.preferBase,
     locale: hasThaiText(trimmed) ? "th" : "en",
   };
+}
+
+export function isLineNaturalModelControlLike(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed || trimmed.startsWith("/")) {
+    return false;
+  }
+  if (parseLineNaturalModelIntent(trimmed).kind !== "none") {
+    return true;
+  }
+
+  const hasExplicitControlSubject = /(?:โมเดล|model|provider|openrouter|ตัว\s*AI)/iu.test(trimmed);
+  const hasSwitchVerb =
+    /(?:สลับ|เปลี่ยน|กลับ(?:ไป|มา)|ขอ(?:ใช้|เปลี่ยน)|เอาเป็น|switch|change|return|go\s+back)/iu.test(
+      trimmed,
+    );
+  const asksCurrentModel =
+    /(?:โมเดล|model).*(?:ปัจจุบัน|ตอนนี้|current|active).*(?:อะไร|ไหน|what|which)|(?:what|which).*(?:current|active).*(?:โมเดล|model)/iu.test(
+      trimmed,
+    );
+  return asksCurrentModel || (hasExplicitControlSubject && hasSwitchVerb);
+}
+
+function formatUnparsedModelControl(text: string): string {
+  return hasThaiText(text)
+    ? "กรุณาระบุชื่อโมเดลที่ต้องการเปลี่ยนให้ชัดเจน"
+    : "Please specify the model you want to switch to.";
 }
 
 export async function loadOpenRouterUserModelCatalog(
@@ -465,7 +493,8 @@ export async function resolveAuthorizedLineNaturalModelAction(params: {
   loadCatalog?: OpenRouterCatalogLoader;
 }): Promise<LineNaturalModelAction> {
   const intent = parseLineNaturalModelIntent(params.text);
-  if (intent.kind === "none") {
+  const isModelControl = intent.kind !== "none" || isLineNaturalModelControlLike(params.text);
+  if (!isModelControl) {
     return { kind: "none" };
   }
 
@@ -474,11 +503,17 @@ export async function resolveAuthorizedLineNaturalModelAction(params: {
     cfg: params.cfg,
     commandAuthorized: true,
   });
+  if (!(authorization.senderIsOwner && authorization.isAuthorizedSender)) {
+    return { kind: "blocked" };
+  }
+  if (intent.kind === "none") {
+    return { kind: "reply", text: formatUnparsedModelControl(params.text) };
+  }
   return resolveLineNaturalLanguageModelAction({
     text: params.text,
     cfg: params.cfg,
     agentId: params.agentId,
-    ownerAuthorized: authorization.senderIsOwner && authorization.isAuthorizedSender,
+    ownerAuthorized: true,
     loadCatalog: params.loadCatalog,
   });
 }
