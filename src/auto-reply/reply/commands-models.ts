@@ -59,6 +59,7 @@ export type ModelsProviderData = {
   providers: string[];
   resolvedDefault: { provider: string; model: string };
   modelNames: Map<string, string>;
+  modelCapabilities?: Map<string, { supportsTools?: boolean }>;
   runtimeChoicesByProvider?: Map<string, ModelsRuntimeChoice[]>;
 };
 
@@ -348,9 +349,14 @@ export async function buildModelsProviderData(
   const providers = [...byProvider.keys()].toSorted();
 
   const modelNames = new Map<string, string>();
+  const modelCapabilities = new Map<string, { supportsTools?: boolean }>();
   for (const entry of [...catalog, ...visibleCatalog]) {
+    const key = `${normalizeProviderId(entry.provider)}/${entry.id}`;
     if (entry.name && entry.name !== entry.id) {
-      modelNames.set(`${normalizeProviderId(entry.provider)}/${entry.id}`, entry.name);
+      modelNames.set(key, entry.name);
+    }
+    if (entry.compat?.supportsTools !== undefined) {
+      modelCapabilities.set(key, { supportsTools: entry.compat.supportsTools });
     }
   }
 
@@ -390,7 +396,14 @@ export async function buildModelsProviderData(
     runtimeChoicesByProvider.set(provider, choices);
   }
 
-  return { byProvider, providers, resolvedDefault, modelNames, runtimeChoicesByProvider };
+  return {
+    byProvider,
+    providers,
+    resolvedDefault,
+    modelNames,
+    modelCapabilities,
+    runtimeChoicesByProvider,
+  };
 }
 
 function formatProviderLine(params: { provider: string; count: number }): string {

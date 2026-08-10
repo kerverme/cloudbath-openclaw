@@ -99,10 +99,16 @@ jobs:
             extensions/line/src/outbound-media-staging.test.ts \
             extensions/line/src/outbound-media.test.ts \
             extensions/line/src/monitor.lifecycle.test.ts \
+            extensions/line/src/natural-language-model.test.ts \
             extensions/line/src/session-route.test.ts \
             extensions/line/src/send.test.ts \
             extensions/line/src/signature.test.ts \
-            extensions/line/src/webhook-node.test.ts
+            extensions/line/src/webhook-node.test.ts \
+            src/auto-reply/reply/commands-models.test.ts
+
+      - name: Typecheck core
+        if: steps.dependencies.outcome == 'success' && !cancelled()
+        run: pnpm tsgo:core
 
       - name: Typecheck extensions
         if: steps.dependencies.outcome == 'success' && !cancelled()
@@ -117,6 +123,9 @@ jobs:
         run: |
           paths=(
             extensions/cloudbath-line-image-archive
+            extensions/line/src/bot-handlers.ts
+            extensions/line/src/natural-language-model.ts
+            extensions/line/src/natural-language-model.test.ts
             extensions/line/src/outbound-media-staging.ts
             extensions/line/src/outbound-media-staging.test.ts
             extensions/line/src/outbound-media.ts
@@ -125,6 +134,7 @@ jobs:
             extensions/line/src/send.test.ts
             scripts/cloudbath/setup-notion-image-archive.ts
             scripts/cloudbath/setup-notion-image-archive.test.ts
+            src/auto-reply/reply/commands-models.ts
           )
           if ! pnpm exec oxfmt --check --threads=1 "${paths[@]}"; then
             pnpm exec oxfmt --write --threads=1 "${paths[@]}"
@@ -139,11 +149,14 @@ jobs:
             --tsconfig config/tsconfig/oxlint.extensions.json \
             extensions/cloudbath-line-image-archive
 
-      - name: Lint LINE outbound staging
+      - name: Lint scoped LINE changes
         if: steps.dependencies.outcome == 'success' && !cancelled()
         run: |
           node scripts/run-oxlint.mjs \
             --tsconfig config/tsconfig/oxlint.extensions.json \
+            extensions/line/src/bot-handlers.ts \
+            extensions/line/src/natural-language-model.ts \
+            extensions/line/src/natural-language-model.test.ts \
             extensions/line/src/outbound-media-staging.ts \
             extensions/line/src/outbound-media-staging.test.ts \
             extensions/line/src/outbound-media.ts \
@@ -194,6 +207,8 @@ jobs:
               test -f /app/dist/extensions/line/openclaw.plugin.json
               test -f /app/dist/extensions/line/package.json
               test -f /app/extensions/line/src/outbound-media-staging.ts
+              test -f /app/extensions/line/src/natural-language-model.ts
+              grep -q resolveAuthorizedLineNaturalModelAction /app/extensions/line/src/bot-handlers.ts
               grep -q stageLineOutboundMessageImages /app/extensions/line/src/send.ts
               node --input-type=module -e "await import(\"@aws-sdk/client-s3\")"
               node --input-type=module -e "await import(\"@aws-sdk/s3-request-presigner\")"

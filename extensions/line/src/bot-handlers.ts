@@ -37,6 +37,7 @@ import {
 } from "./bot-message-context.js";
 import { downloadLineMedia } from "./download.js";
 import { resolveLineGroupConfigEntry } from "./group-keys.js";
+import { resolveAuthorizedLineNaturalModelAction } from "./natural-language-model.js";
 import { pushMessageLine, replyMessageLine } from "./send.js";
 import type { LineGroupConfig, ResolvedLineAccount } from "./types.js";
 
@@ -506,6 +507,39 @@ async function handleMessageEvent(event: MessageEvent, context: LineHandlerConte
   if (!messageContext) {
     logVerbose("line: skipping empty message");
     return;
+  }
+
+  if (message.type === "text") {
+    const naturalModelAction = await resolveAuthorizedLineNaturalModelAction({
+      text: message.text,
+      cfg,
+      agentId: messageContext.route.agentId,
+      ctx: messageContext.ctxPayload,
+    });
+    if (naturalModelAction.kind === "directive") {
+      // The existing /model directive owns validation, session persistence, and verification.
+      messageContext.ctxPayload.CommandBody = naturalModelAction.command;
+    } else if (naturalModelAction.kind === "reply") {
+      const replyToken = event.replyToken;
+      if (replyToken) {
+        try {
+          await replyMessageLine(replyToken, [{ type: "text", text: naturalModelAction.text }], {
+            cfg,
+            accountId: account.accountId,
+            channelAccessToken: account.channelAccessToken,
+          });
+          return;
+        } catch {
+          // Fall through to push when the LINE reply token is absent, expired, or already used.
+        }
+      }
+      await pushMessageLine(messageContext.ctxPayload.From, naturalModelAction.text, {
+        cfg,
+        accountId: account.accountId,
+        channelAccessToken: account.channelAccessToken,
+      });
+      return;
+    }
   }
 
   await processMessage(messageContext);

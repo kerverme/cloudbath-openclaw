@@ -34,6 +34,7 @@ vi.mock("openclaw/plugin-sdk/command-auth-native", () => ({
     commandAuthorized:
       hasControlCommand && authorizers.some((entry) => entry.allowed || !entry.configured),
   }),
+  resolveCommandAuthorization: resolveCommandAuthorizationMock,
 }));
 vi.mock("openclaw/plugin-sdk/runtime-group-policy", () => ({
   resolveAllowlistProviderRuntimeGroupPolicy: ({
@@ -121,11 +122,26 @@ vi.mock("openclaw/plugin-sdk/routing", () => ({
   resolveAgentRoute: () => ({ agentId: "default" }),
 }));
 
-const { readAllowFromStoreMock, upsertPairingRequestMock } = vi.hoisted(() => ({
+const {
+  readAllowFromStoreMock,
+  upsertPairingRequestMock,
+  resolveCommandAuthorizationMock,
+  buildModelsProviderDataMock,
+  pushMessageLineMock,
+  replyMessageLineMock,
+} = vi.hoisted(() => ({
   readAllowFromStoreMock: vi.fn(async () => [] as string[]),
   upsertPairingRequestMock: vi.fn(async (_args: unknown) => ({ code: "CODE", created: true })),
+  resolveCommandAuthorizationMock: vi.fn(),
+  buildModelsProviderDataMock: vi.fn(),
+  pushMessageLineMock: vi.fn(),
+  replyMessageLineMock: vi.fn(),
 }));
 const downloadLineMediaMock = vi.hoisted(() => vi.fn());
+
+vi.mock("openclaw/plugin-sdk/models-provider-runtime", () => ({
+  buildModelsProviderData: buildModelsProviderDataMock,
+}));
 
 vi.mock("openclaw/plugin-sdk/conversation-runtime", () => ({
   resolvePairingIdLabel: () => "lineUserId",
@@ -138,12 +154,8 @@ vi.mock("./download.js", () => ({
 }));
 
 vi.mock("./send.js", () => ({
-  pushMessageLine: async () => {
-    throw new Error("pushMessageLine should not be called from bot-handlers tests");
-  },
-  replyMessageLine: async () => {
-    throw new Error("replyMessageLine should not be called from bot-handlers tests");
-  },
+  pushMessageLine: pushMessageLineMock,
+  replyMessageLine: replyMessageLineMock,
 }));
 
 const { buildLineMessageContextMock, buildLinePostbackContextMock } = vi.hoisted(() => ({
@@ -179,6 +191,51 @@ let LineRetryableWebhookError: typeof import("./bot-handlers.js").LineRetryableW
 type LineWebhookContext = Parameters<typeof import("./bot-handlers.js").handleLineWebhookEvents>[1];
 
 const createRuntime = () => ({ log: vi.fn(), error: vi.fn(), exit: vi.fn() });
+
+const NATURAL_MODEL_REF = "openrouter/anthropic/claude-sonnet-4-6";
+
+function naturalModelCatalog() {
+  return {
+    byProvider: new Map([["openrouter", new Set(["anthropic/claude-sonnet-4-6"])]]),
+    providers: ["openrouter"],
+    resolvedDefault: { provider: "openrouter", model: "openai/gpt-5.6-luna" },
+    modelNames: new Map([[NATURAL_MODEL_REF, "Anthropic: Claude Sonnet 4.6"]]),
+    modelCapabilities: new Map([[NATURAL_MODEL_REF, { supportsTools: true }]]),
+    runtimeChoicesByProvider: new Map(),
+  };
+}
+
+function mockMessageContextForSender(senderId: string) {
+  buildLineMessageContextMock.mockImplementationOnce(async () => ({
+    ctxPayload: {
+      Surface: "line",
+      Provider: "line",
+      OriginatingChannel: "line",
+      AccountId: "default",
+      SenderId: senderId,
+      From: "line:group:group-1",
+      To: "line:group:group-1",
+      ChatType: "group",
+    },
+    replyToken: "reply-token",
+    route: { agentId: "default" },
+    isGroup: true,
+    accountId: "default",
+  }));
+}
+
+function enableVerifiedOwnerNaturalModelAuthorization() {
+  resolveCommandAuthorizationMock.mockImplementation(
+    (params: { ctx: { SenderId?: string }; commandAuthorized: boolean }) => {
+      const senderIsOwner = params.ctx.SenderId === "owner-user";
+      return {
+        senderIsOwner,
+        isAuthorizedSender: senderIsOwner && params.commandAuthorized,
+      };
+    },
+  );
+  buildModelsProviderDataMock.mockResolvedValue(naturalModelCatalog());
+}
 
 function createReplayMessageEvent(params: {
   messageId: string;
@@ -328,6 +385,7 @@ describe("handleLineWebhookEvents", () => {
     vi.doUnmock("openclaw/plugin-sdk/reply-history");
     vi.doUnmock("openclaw/plugin-sdk/routing");
     vi.doUnmock("openclaw/plugin-sdk/conversation-runtime");
+    vi.doUnmock("openclaw/plugin-sdk/models-provider-runtime");
     vi.doUnmock("./download.js");
     vi.doUnmock("./send.js");
     vi.doUnmock("./bot-message-context.js");
@@ -353,7 +411,154 @@ describe("handleLineWebhookEvents", () => {
     downloadLineMediaMock.mockImplementation(async () => {
       throw new Error("downloadLineMedia should not be called from bot-handlers tests");
     });
+    resolveCommandAuthorizationMock.mockReset();
+    resolveCommandAuthorizationMock.mockReturnValue({
+      senderIsOwner: false,
+      isAuthorizedSender: false,
+    });
+    buildModelsProviderDataMock.mockReset();
+    pushMessageLineMock.mockReset();
+    pushMessageLineMock.mockImplementation(async () => {
+      throw new Error("pushMessageLine should not be called from bot-handlers tests");
+    });
+    replyMessageLineMock.mockReset();
+    replyMessageLineMock.mockImplementation(async () => {
+      throw new Error("replyMessageLine should not be called from bot-handlers tests");
+    });
   });
+  it.each([
+    ["Thai", "เปลี่ยนเป็น Claude Sonnet", `/model ${NATURAL_MODEL_REF}`],
+    ["English", "switch to Claude Sonnet", `/model ${NATURAL_MODEL_REF}`],
+    ["current model", "ตอนนี้ใช้โมเดลอะไร", "/model status"],
+    ["return to default", "กลับไปโมเดล default", "/model default"],
+  ])(
+    "lets a verified owner reach session model control from ordinary %s text",
+    async (_label, text, expectedDirective) => {
+      enableVerifiedOwnerNaturalModelAuthorization();
+      mockMessageContextForSender("owner-user");
+      const processMessage = vi.fn();
+      const event = createTestMessageEvent({
+        message: { id: `natural-owner-${_label}`, type: "text", text },
+        source: { type: "group", groupId: "group-1", userId: "owner-user" },
+        webhookEventId: `natural-owner-${_label}`,
+      });
+
+      await handleLineWebhookEvents(
+        [event],
+        createLineWebhookTestContext({
+          processMessage,
+          groupPolicy: "open",
+          requireMention: false,
+        }),
+      );
+
+      expect(buildLineMessageContextMock).toHaveBeenCalledWith(
+        expect.objectContaining({ commandAuthorized: false }),
+      );
+      expect(resolveCommandAuthorizationMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          commandAuthorized: true,
+          ctx: expect.objectContaining({ SenderId: "owner-user" }),
+        }),
+      );
+      expect(processMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          ctxPayload: expect.objectContaining({ CommandBody: expectedDirective }),
+        }),
+      );
+    },
+  );
+
+  it("blocks the same natural model switch for a non-owner", async () => {
+    enableVerifiedOwnerNaturalModelAuthorization();
+    mockMessageContextForSender("ordinary-member");
+    const processMessage = vi.fn();
+    const text = "เปลี่ยนเป็น Claude Sonnet";
+    const event = createTestMessageEvent({
+      message: { id: "natural-non-owner", type: "text", text },
+      source: { type: "group", groupId: "group-1", userId: "ordinary-member" },
+      webhookEventId: "natural-non-owner",
+    });
+
+    await handleLineWebhookEvents(
+      [event],
+      createLineWebhookTestContext({
+        processMessage,
+        groupPolicy: "open",
+        requireMention: false,
+      }),
+    );
+
+    expect(resolveCommandAuthorizationMock).toHaveBeenCalledWith(
+      expect.objectContaining({ commandAuthorized: true }),
+    );
+    expect(buildModelsProviderDataMock).not.toHaveBeenCalled();
+    expect(processMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        ctxPayload: expect.not.objectContaining({ CommandBody: expect.anything() }),
+      }),
+    );
+  });
+
+  it("does not grant command authorization to ordinary natural-language chat", async () => {
+    enableVerifiedOwnerNaturalModelAuthorization();
+    mockMessageContextForSender("owner-user");
+    const processMessage = vi.fn();
+    const event = createTestMessageEvent({
+      message: { id: "ordinary-chat", type: "text", text: "ช่วยสรุปงานวันนี้" },
+      source: { type: "group", groupId: "group-1", userId: "owner-user" },
+      webhookEventId: "ordinary-chat",
+    });
+
+    await handleLineWebhookEvents(
+      [event],
+      createLineWebhookTestContext({
+        processMessage,
+        groupPolicy: "open",
+        requireMention: false,
+      }),
+    );
+
+    expect(buildLineMessageContextMock).toHaveBeenCalledWith(
+      expect.objectContaining({ commandAuthorized: false }),
+    );
+    expect(resolveCommandAuthorizationMock).not.toHaveBeenCalled();
+    expect(buildModelsProviderDataMock).not.toHaveBeenCalled();
+    expect(processMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it("leaves slash /model authorization on the existing ingress path", async () => {
+    enableVerifiedOwnerNaturalModelAuthorization();
+    mockMessageContextForSender("owner-user");
+    const processMessage = vi.fn();
+    const event = createTestMessageEvent({
+      message: {
+        id: "slash-model",
+        type: "text",
+        text: `/model ${NATURAL_MODEL_REF}`,
+      },
+      source: { type: "group", groupId: "group-1", userId: "owner-user" },
+      webhookEventId: "slash-model",
+    });
+
+    await handleLineWebhookEvents(
+      [event],
+      createLineWebhookTestContext({
+        processMessage,
+        groupPolicy: "open",
+        requireMention: false,
+      }),
+    );
+
+    expect(resolveCommandAuthorizationMock).not.toHaveBeenCalled();
+    expect(buildModelsProviderDataMock).not.toHaveBeenCalled();
+    expect(processMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        ctxPayload: expect.not.objectContaining({ CommandBody: expect.anything() }),
+      }),
+    );
+  });
+
   it("blocks group messages when groupPolicy is disabled", async () => {
     const processMessage = vi.fn();
     const event = {
