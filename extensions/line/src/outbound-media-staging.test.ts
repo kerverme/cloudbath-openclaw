@@ -2,7 +2,6 @@
 import { createHash } from "node:crypto";
 import { HeadObjectCommand, PutObjectCommand } from "@aws-sdk/client-s3";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-
 import {
   LineOutboundImageStagingError,
   stageLineOutboundImage,
@@ -15,8 +14,7 @@ const PNG = Buffer.concat([
   Buffer.from("canonical-line-image"),
 ]);
 const SHA256 = createHash("sha256").update(PNG).digest("hex");
-const SIGNED_URL =
-  "https://r2.example/outbound/line/test.png?X-Amz-Signature=unit-test-credential";
+const SIGNED_URL = "https://r2.example/outbound/line/test.png?X-Amz-Signature=unit-test-credential";
 const ENV = {
   R2_ACCOUNT_ID: "unit-account",
   R2_ACCESS_KEY_ID: "unit-access-key",
@@ -26,11 +24,7 @@ const ENV = {
   IMAGE_MAX_MB: "10",
 };
 
-function imageResponse(
-  status = 200,
-  contentType = "image/png",
-  body: BodyInit = PNG,
-): Response {
+function imageResponse(status = 200, contentType = "image/png", body: BodyInit = PNG): Response {
   return new Response(body, {
     status,
     headers: {
@@ -48,11 +42,13 @@ function guardedResult(response: Response) {
   } as never;
 }
 
-function createHarness(options: {
-  guardedFetch?: LineOutboundImageStagingDependencies["guardedFetch"];
-  presignedUrl?: string;
-  readLocalFile?: LineOutboundImageStagingDependencies["readLocalFile"];
-} = {}) {
+function createHarness(
+  options: {
+    guardedFetch?: LineOutboundImageStagingDependencies["guardedFetch"];
+    presignedUrl?: string;
+    readLocalFile?: LineOutboundImageStagingDependencies["readLocalFile"];
+  } = {},
+) {
   let exists = false;
   const commands: string[] = [];
   const putInputs: Array<Record<string, unknown>> = [];
@@ -229,8 +225,7 @@ describe("LINE outbound R2 image staging", () => {
 
   it("never exposes signed credentials or filesystem paths in errors or logs", async () => {
     const signedSecret = "must-never-appear";
-    const signedUrl =
-      `https://r2.example/outbound/line/test.png?X-Amz-Credential=${signedSecret}`;
+    const signedUrl = `https://r2.example/outbound/line/test.png?X-Amz-Credential=${signedSecret}`;
     const guardedFetch = vi.fn(async () =>
       guardedResult(imageResponse(403, "application/xml", Buffer.from("<Error/>"))),
     );
@@ -253,9 +248,12 @@ describe("LINE outbound R2 image staging", () => {
     const message = caught instanceof Error ? caught.message : String(caught);
     expect(message).not.toContain(signedSecret);
     expect(message).not.toContain("/tmp/private/image.png");
-    expect([log, warn, error].flatMap((spy) => spy.mock.calls).flat().join(" ")).not.toContain(
-      signedSecret,
-    );
+    expect(
+      [log, warn, error]
+        .flatMap((spy) => spy.mock.calls)
+        .flat()
+        .join(" "),
+    ).not.toContain(signedSecret);
   });
 
   it("leaves existing LINE text messages unchanged", async () => {

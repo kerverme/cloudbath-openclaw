@@ -90,8 +90,7 @@ vi.mock("./outbound-media-staging.js", () => ({
 
 let sendModule: typeof import("./send.js");
 
-const STAGED_IMAGE_URL =
-  "https://r2.example/outbound/line/staged.png?X-Amz-Signature=unit-test";
+const STAGED_IMAGE_URL = "https://r2.example/outbound/line/staged.png?X-Amz-Signature=unit-test";
 
 const LINE_TEST_CFG = {
   channels: {

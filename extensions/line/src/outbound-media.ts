@@ -88,10 +88,6 @@ export async function resolveLineOutboundMedia(
   if (mediaKind !== "image") {
     await validateLineMediaUrl(source);
   }
-  if (mediaKind === "video" && !previewImageUrl) {
-    throw new Error("LINE video messages require previewImageUrl to reference an image source");
-  }
-
   return {
     mediaUrl: source,
     mediaKind,

@@ -12,10 +12,7 @@ import {
   type HeadObjectCommandOutput,
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
-import {
-  fetchWithSsrFGuard,
-  type SsrFPolicy,
-} from "openclaw/plugin-sdk/ssrf-runtime";
+import { fetchWithSsrFGuard, type SsrFPolicy } from "openclaw/plugin-sdk/ssrf-runtime";
 
 const OUTBOUND_LINE_PREFIX = "outbound/line";
 const SIGNED_URL_EXPIRY_SECONDS = 60 * 60;
@@ -29,7 +26,9 @@ const OUTBOUND_FETCH_POLICY: SsrFPolicy = { allowPrivateNetwork: false };
 type S3Command = HeadObjectCommand | PutObjectCommand;
 type S3Like = { send(command: S3Command): Promise<unknown> };
 type GuardedFetchResult = Awaited<ReturnType<typeof fetchWithSsrFGuard>>;
-type GuardedFetchLike = (params: Parameters<typeof fetchWithSsrFGuard>[0]) => Promise<GuardedFetchResult>;
+type GuardedFetchLike = (
+  params: Parameters<typeof fetchWithSsrFGuard>[0],
+) => Promise<GuardedFetchResult>;
 type PresignLike = (
   client: S3Client,
   command: GetObjectCommand,
@@ -96,8 +95,7 @@ function resolveMaxBytes(env: NodeJS.ProcessEnv): number {
 
 function resolveR2Config(env: NodeJS.ProcessEnv) {
   const accountId = requiredEnv(env, "R2_ACCOUNT_ID");
-  const endpointRaw =
-    env.R2_ENDPOINT?.trim() || `https://${accountId}.r2.cloudflarestorage.com`;
+  const endpointRaw = env.R2_ENDPOINT?.trim() || `https://${accountId}.r2.cloudflarestorage.com`;
   let endpoint: URL;
   try {
     endpoint = new URL(endpointRaw);
@@ -304,11 +302,7 @@ async function fetchExternalImage(
     const bytes = await readResponseBytes(guarded.response, maxBytes);
     return {
       bytes,
-      descriptor: validateImageBytes(
-        bytes,
-        maxBytes,
-        guarded.response.headers.get("content-type"),
-      ),
+      descriptor: validateImageBytes(bytes, maxBytes, guarded.response.headers.get("content-type")),
     };
   } finally {
     await guarded.release();
@@ -473,15 +467,13 @@ export async function stageLineOutboundImage(
     const maxBytes = resolveMaxBytes(env);
     const config = resolveR2Config(env);
     const guardedFetch = dependencies.guardedFetch ?? fetchWithSsrFGuard;
-    const localSource =
-      source.startsWith("/") || source.startsWith("file:");
+    const localSource = source.startsWith("/") || source.startsWith("file:");
     const bytes = localSource
       ? await (dependencies.readLocalFile ?? readManagedLocalImage)(source, maxBytes)
       : (await fetchExternalImage(source, maxBytes, guardedFetch)).bytes;
     const descriptor = validateImageBytes(bytes, maxBytes);
     const sha256 = createHash("sha256").update(bytes).digest("hex");
-    const objectKey =
-      `${OUTBOUND_LINE_PREFIX}/sha256/${sha256.slice(0, 2)}/${sha256}${descriptor.extension}`;
+    const objectKey = `${OUTBOUND_LINE_PREFIX}/sha256/${sha256.slice(0, 2)}/${sha256}${descriptor.extension}`;
     const concreteClient =
       dependencies.s3Client ??
       new S3Client({
@@ -492,14 +484,7 @@ export async function stageLineOutboundImage(
           secretAccessKey: config.secretAccessKey,
         },
       });
-    await ensureR2Image(
-      concreteClient,
-      config.bucketName,
-      objectKey,
-      bytes,
-      descriptor,
-      sha256,
-    );
+    await ensureR2Image(concreteClient, config.bucketName, objectKey, bytes, descriptor, sha256);
     const presign = dependencies.presign ?? getSignedUrl;
     let url: string;
     try {
@@ -532,7 +517,7 @@ export async function stageLineOutboundImage(
     if (error instanceof LineOutboundImageStagingError) {
       throw error;
     }
-    fail("unexpected_error");
+    return fail("unexpected_error");
   }
 }
 
