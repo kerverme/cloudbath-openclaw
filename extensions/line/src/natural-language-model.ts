@@ -288,13 +288,20 @@ export async function resolveAuthorizedLineNaturalModelAction(params: {
   cfg: OpenClawConfig;
   agentId?: string;
   ctx: Parameters<typeof resolveCommandAuthorization>[0]["ctx"];
-  commandAuthorized: boolean;
   loadCatalog?: CatalogLoader;
 }): Promise<LineNaturalModelAction> {
+  const intent = parseLineNaturalModelIntent(params.text);
+  if (intent.kind === "none") {
+    return { kind: "none" };
+  }
+
+  // Natural-language model control arrives as ordinary text, so ingress does not
+  // mark it command-authorized. Elevate only this narrowly parsed model-control
+  // intent, then require the existing verified owner and sender authorization.
   const authorization = resolveCommandAuthorization({
     ctx: params.ctx,
     cfg: params.cfg,
-    commandAuthorized: params.commandAuthorized,
+    commandAuthorized: true,
   });
   return resolveLineNaturalLanguageModelAction({
     text: params.text,
