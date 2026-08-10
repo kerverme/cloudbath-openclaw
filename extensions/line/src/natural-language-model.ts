@@ -222,8 +222,7 @@ export function isLineNaturalModelControlLike(text: string): boolean {
     return true;
   }
 
-  const hasExplicitControlSubject =
-    /(?:โมเดล|model|provider|openrouter|ตัว\s*AI)/iu.test(trimmed);
+  const hasExplicitControlSubject = /(?:โมเดล|model|provider|openrouter|ตัว\s*AI)/iu.test(trimmed);
   const hasSwitchVerb =
     /(?:สลับ|เปลี่ยน|กลับ(?:ไป|มา)|ขอ(?:ใช้|เปลี่ยน)|เอาเป็น|switch|change|return|go\s+back)/iu.test(
       trimmed,
