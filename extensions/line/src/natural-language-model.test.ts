@@ -70,7 +70,6 @@ describe("LINE natural-language model switching", () => {
       text: "เปลี่ยนเป็น Luna Pro หน่อย",
       cfg: CFG,
       ctx: lineContext("owner-user"),
-      commandAuthorized: true,
       loadCatalog,
     });
 
@@ -85,7 +84,6 @@ describe("LINE natural-language model switching", () => {
       text: "switch to Gemini 3 Pro",
       cfg: CFG,
       ctx: lineContext("owner-user"),
-      commandAuthorized: true,
       loadCatalog,
     });
 
@@ -165,13 +163,25 @@ describe("LINE natural-language model switching", () => {
     expect(sessionEntry.modelOverrideSource).toBeUndefined();
   });
 
+  it("does not treat ordinary chat as model control", async () => {
+    const privateLoader = vi.fn(async () => catalog());
+    const action = await resolveAuthorizedLineNaturalModelAction({
+      text: "ช่วยสรุปงานวันนี้",
+      cfg: CFG,
+      ctx: lineContext("owner-user"),
+      loadCatalog: privateLoader,
+    });
+
+    expect(action).toEqual({ kind: "none" });
+    expect(privateLoader).not.toHaveBeenCalled();
+  });
+
   it("does not intercept or resolve catalog entries for non-owners", async () => {
     const privateLoader = vi.fn(async () => catalog());
     const action = await resolveAuthorizedLineNaturalModelAction({
       text: "เปลี่ยนเป็น Luna Pro",
       cfg: CFG,
       ctx: lineContext("ordinary-member"),
-      commandAuthorized: true,
       loadCatalog: privateLoader,
     });
 
