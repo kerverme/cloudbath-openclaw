@@ -34,6 +34,10 @@ vi.mock("openclaw/plugin-sdk/command-auth-native", () => ({
     commandAuthorized:
       hasControlCommand && authorizers.some((entry) => entry.allowed || !entry.configured),
   }),
+  resolveCommandAuthorization: () => ({
+    senderIsOwner: false,
+    isAuthorizedSender: false,
+  }),
 }));
 vi.mock("openclaw/plugin-sdk/runtime-group-policy", () => ({
   resolveAllowlistProviderRuntimeGroupPolicy: ({
