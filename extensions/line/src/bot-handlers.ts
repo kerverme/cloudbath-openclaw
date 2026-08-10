@@ -521,23 +521,24 @@ async function handleMessageEvent(event: MessageEvent, context: LineHandlerConte
       // The existing /model directive owns validation, session persistence, and verification.
       messageContext.ctxPayload.CommandBody = naturalModelAction.command;
     } else if (naturalModelAction.kind === "reply") {
-      try {
-        await replyMessageLine(
-          event.replyToken,
-          [{ type: "text", text: naturalModelAction.text }],
-          {
+      const replyToken = event.replyToken;
+      if (replyToken) {
+        try {
+          await replyMessageLine(replyToken, [{ type: "text", text: naturalModelAction.text }], {
             cfg,
             accountId: account.accountId,
             channelAccessToken: account.channelAccessToken,
-          },
-        );
-      } catch {
-        await pushMessageLine(messageContext.ctxPayload.From, naturalModelAction.text, {
-          cfg,
-          accountId: account.accountId,
-          channelAccessToken: account.channelAccessToken,
-        });
+          });
+          return;
+        } catch {
+          // Fall through to push when the LINE reply token is absent, expired, or already used.
+        }
       }
+      await pushMessageLine(messageContext.ctxPayload.From, naturalModelAction.text, {
+        cfg,
+        accountId: account.accountId,
+        channelAccessToken: account.channelAccessToken,
+      });
       return;
     }
   }
