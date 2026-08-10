@@ -648,3 +648,5 @@ function filterAuthProfileIdsByType(
     return type !== undefined && allowedTypes.has(type);
   });
 }
+
+export { resolveApiKeyForProvider } from "../agents/model-auth.js";
