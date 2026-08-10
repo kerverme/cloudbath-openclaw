@@ -551,6 +551,10 @@ async function handleMessageEvent(event: MessageEvent, context: LineHandlerConte
       ctx: messageContext.ctxPayload,
       loadCatalog: context.naturalModelCatalogLoader,
     });
+    if (naturalModelAction.kind === "blocked") {
+      // Model-control-like text must never reach the free-form agent path without owner authorization.
+      return;
+    }
     if (naturalModelAction.kind === "directive") {
       // Status/default stay on the established /model command path.
       messageContext.ctxPayload.CommandBody = naturalModelAction.command;
