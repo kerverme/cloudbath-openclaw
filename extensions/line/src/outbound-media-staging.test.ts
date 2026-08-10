@@ -256,6 +256,76 @@ describe("LINE outbound R2 image staging", () => {
     ).not.toContain(signedSecret);
   });
 
+  it("stages nested Flex, template, and quick-reply image fields", async () => {
+    const sources: string[] = [];
+    const stage = vi.fn(async (source: string) => {
+      sources.push(source);
+      return {
+        url: `https://r2.example/outbound/line/${sources.length}.png`,
+        objectKey: `outbound/line/${sources.length}.png`,
+        contentType: "image/png",
+        contentLength: PNG.byteLength,
+        sha256: SHA256,
+      };
+    });
+
+    const messages = await stageLineOutboundMessageImages(
+      [
+        {
+          type: "flex",
+          altText: "chart",
+          contents: {
+            type: "bubble",
+            hero: { type: "image", url: "https://quickchart.io/chart?c=flex" },
+          },
+          quickReply: {
+            items: [
+              {
+                type: "action",
+                imageUrl: "/tmp/quick-reply.png",
+                action: { type: "message", label: "Open", text: "Open" },
+              },
+            ],
+          },
+        },
+        {
+          type: "template",
+          altText: "template",
+          template: {
+            type: "buttons",
+            text: "Status",
+            thumbnailImageUrl: "/data/template.png",
+            actions: [],
+          },
+        },
+      ],
+      stage,
+    );
+
+    expect(sources).toEqual([
+      "https://quickchart.io/chart?c=flex",
+      "/tmp/quick-reply.png",
+      "/data/template.png",
+    ]);
+    expect(JSON.stringify(messages)).not.toContain("quickchart.io");
+    expect(JSON.stringify(messages)).not.toContain("/tmp/");
+    expect(JSON.stringify(messages)).not.toContain("/data/");
+  });
+
+  it("fails closed for imagemaps that cannot use one canonical object URL", async () => {
+    await expect(
+      stageLineOutboundMessageImages([
+        {
+          type: "imagemap",
+          baseUrl: "https://example.com/imagemap",
+          altText: "map",
+          baseSize: { width: 1040, height: 1040 },
+          actions: [],
+        },
+      ]),
+    ).rejects.toMatchObject({ code: "imagemap_not_supported" });
+  });
+
   it("leaves existing LINE text messages unchanged", async () => {
     const stage = vi.fn();
 

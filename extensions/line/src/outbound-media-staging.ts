@@ -521,6 +521,42 @@ export async function stageLineOutboundImage(
   }
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+async function stageNestedImageFields(
+  value: unknown,
+  stageOnce: (source: string) => Promise<string>,
+): Promise<unknown> {
+  if (Array.isArray(value)) {
+    return Promise.all(value.map((item) => stageNestedImageFields(item, stageOnce)));
+  }
+  if (!isRecord(value)) {
+    return value;
+  }
+  if (value.type === "imagemap" && typeof value.baseUrl === "string") {
+    fail("imagemap_not_supported");
+  }
+
+  const type = typeof value.type === "string" ? value.type : "";
+  const entries = await Promise.all(
+    Object.entries(value).map(async ([key, item]) => {
+      const isImageSource =
+        typeof item === "string" &&
+        (key === "thumbnailImageUrl" ||
+          key === "imageUrl" ||
+          key === "previewUrl" ||
+          (key === "url" && type === "image"));
+      return [
+        key,
+        isImageSource ? await stageOnce(item) : await stageNestedImageFields(item, stageOnce),
+      ] as const;
+    }),
+  );
+  return Object.fromEntries(entries);
+}
+
 export async function stageLineOutboundMessageImages<T extends OutboundMessage>(
   messages: readonly T[],
   stage: (source: string) => Promise<StagedLineImage> = stageLineOutboundImage,
@@ -548,21 +584,31 @@ export async function stageLineOutboundMessageImages<T extends OutboundMessage>(
       }
       const preview =
         typeof message.previewImageUrl === "string" ? message.previewImageUrl : original;
-      staged.push({
-        ...message,
-        originalContentUrl: await stageOnce(original),
-        previewImageUrl: await stageOnce(preview),
-      } as T);
+      staged.push(
+        (await stageNestedImageFields(
+          {
+            ...message,
+            originalContentUrl: await stageOnce(original),
+            previewImageUrl: await stageOnce(preview),
+          },
+          stageOnce,
+        )) as T,
+      );
       continue;
     }
     if (message.type === "video" && typeof message.previewImageUrl === "string") {
-      staged.push({
-        ...message,
-        previewImageUrl: await stageOnce(message.previewImageUrl),
-      } as T);
+      staged.push(
+        (await stageNestedImageFields(
+          {
+            ...message,
+            previewImageUrl: await stageOnce(message.previewImageUrl),
+          },
+          stageOnce,
+        )) as T,
+      );
       continue;
     }
-    staged.push(message);
+    staged.push((await stageNestedImageFields(message, stageOnce)) as T);
   }
   return staged;
 }
