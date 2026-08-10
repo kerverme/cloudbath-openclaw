@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   applyLineNaturalModelSwitch,
   formatLineNaturalModelSwitchResult,
+  isLineNaturalModelControlLike,
   loadOpenRouterUserModelCatalog,
   parseLineNaturalModelIntent,
   resolveAuthorizedLineNaturalModelAction,
@@ -151,6 +152,48 @@ describe("authoritative OpenRouter user catalog", () => {
 });
 
 describe("LINE natural-language model resolution", () => {
+  it.each([
+    ["สลับไปใช้ Luna Pro", "Luna Pro"],
+    ["สลับเป็น Claude", "Claude"],
+    ["สลับโมเดลเป็น Gemini", "Gemini"],
+    ["เปลี่ยนโมเดลเป็น Claude", "Claude"],
+    ["เปลี่ยนตัว AI เป็น Gemini", "Gemini"],
+    ["ขอใช้ Grok แทน", "Grok"],
+    ["เอาเป็น Claude หน่อย", "Claude"],
+    ["กลับมาใช้ Luna", "Luna"],
+    ["ใช้ Claude แทน", "Claude"],
+    ["ขอเปลี่ยนเป็น DeepSeek", "DeepSeek"],
+  ])("captures Thai model control %s", (text, query) => {
+    expect(parseLineNaturalModelIntent(text)).toMatchObject({
+      kind: "switch",
+      query,
+      locale: "th",
+    });
+    expect(isLineNaturalModelControlLike(text)).toBe(true);
+  });
+
+  it.each([
+    "Claude รุ่นไหนเก่ง",
+    "Luna Pro ต่างจาก Luna ยังไง",
+    "OpenRouter คืออะไร",
+    "เปรียบเทียบ Gemini กับ Claude",
+  ])("leaves model discussion as ordinary chat: %s", (text) => {
+    expect(parseLineNaturalModelIntent(text)).toEqual({ kind: "none" });
+    expect(isLineNaturalModelControlLike(text)).toBe(false);
+  });
+
+  it("contains malformed explicit model control instead of passing it to the agent", async () => {
+    const privateLoader = vi.fn(async () => MODELS);
+    const action = await resolveAuthorizedLineNaturalModelAction({
+      text: "ช่วยเปลี่ยน model ให้หน่อย",
+      cfg: CFG,
+      ctx: lineContext("owner-user"),
+      loadCatalog: privateLoader,
+    });
+    expect(action).toMatchObject({ kind: "reply" });
+    expect(privateLoader).not.toHaveBeenCalled();
+  });
+
   it("reproduces and closes the exact production defect", async () => {
     const action = await resolveLineNaturalLanguageModelAction({
       text: "อยากลองเปลี่ยนเป็น Luna pro ได้ไหม",
@@ -248,7 +291,7 @@ describe("LINE natural-language model resolution", () => {
       ctx: lineContext("ordinary-member"),
       loadCatalog: privateLoader,
     });
-    expect(action).toEqual({ kind: "none" });
+    expect(action).toEqual({ kind: "blocked" });
     expect(privateLoader).not.toHaveBeenCalled();
   });
 
