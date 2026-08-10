@@ -270,9 +270,7 @@ export async function loadOpenRouterUserModelCatalog(
       models.set(item.id, {
         id: item.id,
         name: typeof item.name === "string" && item.name.trim() ? item.name.trim() : item.id,
-        ...(supportedParameters
-          ? { supportsTools: supportedParameters.includes("tools") }
-          : {}),
+        ...(supportedParameters ? { supportsTools: supportedParameters.includes("tools") } : {}),
       });
     }
     return [...models.values()];
@@ -280,7 +278,7 @@ export async function loadOpenRouterUserModelCatalog(
     if (error instanceof Error && error.message.startsWith("OPENROUTER_USER_CATALOG_")) {
       throw error;
     }
-    throw new Error("OPENROUTER_USER_CATALOG_REQUEST_FAILED");
+    throw new Error("OPENROUTER_USER_CATALOG_REQUEST_FAILED", { cause: error });
   } finally {
     clearTimeout(timeout);
   }
@@ -496,7 +494,7 @@ function snapshotSessionModel(entry: SessionEntry): SessionSwitchSnapshot {
 }
 
 function restoreSessionModel(entry: SessionEntry, snapshot: SessionSwitchSnapshot): void {
-  const record = entry as SessionEntry & Record<string, unknown>;
+  const record = entry as unknown as Record<string, unknown>;
   for (const field of SESSION_SWITCH_FIELDS) {
     if (Object.hasOwn(snapshot, field)) {
       record[field] = snapshot[field];
@@ -511,9 +509,7 @@ function sessionUsesCandidate(
   entry: SessionEntry | undefined,
   candidate: OpenRouterCatalogCandidate,
 ): boolean {
-  return (
-    entry?.providerOverride === OPENROUTER_PROVIDER && entry.modelOverride === candidate.id
-  );
+  return entry?.providerOverride === OPENROUTER_PROVIDER && entry.modelOverride === candidate.id;
 }
 
 async function rollbackCandidate(params: {

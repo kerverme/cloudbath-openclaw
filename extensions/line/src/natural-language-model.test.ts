@@ -70,7 +70,7 @@ function memoryStore(initial: SessionEntry): {
   adapter: LineNaturalModelSessionStore;
   current: () => SessionEntry;
 } {
-  let entry = structuredClone(initial);
+  const entry = structuredClone(initial);
   return {
     adapter: {
       read: async () => structuredClone(entry),
@@ -144,9 +144,7 @@ describe("authoritative OpenRouter user catalog", () => {
   });
 
   it("applies the OpenClaw provider prefix exactly once to an exact catalog ID", () => {
-    expect(toOpenClawOpenRouterRef("openai/example-model")).toBe(
-      "openrouter/openai/example-model",
-    );
+    expect(toOpenClawOpenRouterRef("openai/example-model")).toBe("openrouter/openai/example-model");
     expect(toOpenClawOpenRouterRef("openrouter/openai/example-model")).toBeNull();
     expect(toOpenClawOpenRouterRef("Luna pro")).toBeNull();
   });
