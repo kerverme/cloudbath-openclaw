@@ -37,7 +37,13 @@ import {
 } from "./bot-message-context.js";
 import { downloadLineMedia } from "./download.js";
 import { resolveLineGroupConfigEntry } from "./group-keys.js";
-import { resolveAuthorizedLineNaturalModelAction } from "./natural-language-model.js";
+import {
+  applyLineNaturalModelSwitch,
+  formatLineNaturalModelSwitchResult,
+  resolveAuthorizedLineNaturalModelAction,
+  type LineNaturalModelSwitchResult,
+  type OpenRouterCatalogLoader,
+} from "./natural-language-model.js";
 import { pushMessageLine, replyMessageLine } from "./send.js";
 import type { LineGroupConfig, ResolvedLineAccount } from "./types.js";
 
@@ -73,6 +79,8 @@ interface LineHandlerContext {
   runtime: RuntimeEnv;
   mediaMaxBytes: number;
   processMessage: (ctx: LineInboundContext) => Promise<void>;
+  naturalModelCatalogLoader?: OpenRouterCatalogLoader;
+  naturalModelSwitch?: typeof applyLineNaturalModelSwitch;
   replayCache?: LineWebhookReplayCache;
   groupHistories?: Map<string, HistoryEntry[]>;
   historyLimit?: number;
@@ -438,6 +446,32 @@ function resolveEventRawText(event: MessageEvent | PostbackEvent): string {
   return "";
 }
 
+async function sendNaturalModelReply(params: {
+  event: MessageEvent;
+  context: LineHandlerContext;
+  to: string;
+  text: string;
+}): Promise<void> {
+  const replyToken = params.event.replyToken;
+  if (replyToken) {
+    try {
+      await replyMessageLine(replyToken, [{ type: "text", text: params.text }], {
+        cfg: params.context.cfg,
+        accountId: params.context.account.accountId,
+        channelAccessToken: params.context.account.channelAccessToken,
+      });
+      return;
+    } catch {
+      // Fall through to push when the LINE reply token is absent, expired, or already used.
+    }
+  }
+  await pushMessageLine(params.to, params.text, {
+    cfg: params.context.cfg,
+    accountId: params.context.account.accountId,
+    channelAccessToken: params.context.account.channelAccessToken,
+  });
+}
+
 async function handleMessageEvent(event: MessageEvent, context: LineHandlerContext): Promise<void> {
   const { cfg, account, runtime, mediaMaxBytes, processMessage } = context;
   const message = event.message;
@@ -515,28 +549,46 @@ async function handleMessageEvent(event: MessageEvent, context: LineHandlerConte
       cfg,
       agentId: messageContext.route.agentId,
       ctx: messageContext.ctxPayload,
+      loadCatalog: context.naturalModelCatalogLoader,
     });
     if (naturalModelAction.kind === "directive") {
-      // The existing /model directive owns validation, session persistence, and verification.
+      // Status/default stay on the established /model command path.
       messageContext.ctxPayload.CommandBody = naturalModelAction.command;
-    } else if (naturalModelAction.kind === "reply") {
-      const replyToken = event.replyToken;
-      if (replyToken) {
-        try {
-          await replyMessageLine(replyToken, [{ type: "text", text: naturalModelAction.text }], {
-            cfg,
-            accountId: account.accountId,
-            channelAccessToken: account.channelAccessToken,
-          });
-          return;
-        } catch {
-          // Fall through to push when the LINE reply token is absent, expired, or already used.
-        }
+    } else if (naturalModelAction.kind === "switch") {
+      const storePath = messageContext.turn.storePath;
+      const sessionKey = messageContext.route.sessionKey;
+      let result: LineNaturalModelSwitchResult = {
+        ok: false,
+        reason: "session",
+        rolledBack: false,
+      };
+      if (storePath && sessionKey) {
+        result = await (context.naturalModelSwitch ?? applyLineNaturalModelSwitch)({
+          cfg,
+          agentId: messageContext.route.agentId,
+          storePath,
+          sessionKey,
+          candidate: naturalModelAction.candidate,
+          loadCatalog: context.naturalModelCatalogLoader,
+        });
       }
-      await pushMessageLine(messageContext.ctxPayload.From, naturalModelAction.text, {
-        cfg,
-        accountId: account.accountId,
-        channelAccessToken: account.channelAccessToken,
+      await sendNaturalModelReply({
+        event,
+        context,
+        to: messageContext.ctxPayload.From,
+        text: formatLineNaturalModelSwitchResult({
+          result,
+          candidate: naturalModelAction.candidate,
+          locale: naturalModelAction.locale,
+        }),
+      });
+      return;
+    } else if (naturalModelAction.kind === "reply") {
+      await sendNaturalModelReply({
+        event,
+        context,
+        to: messageContext.ctxPayload.From,
+        text: naturalModelAction.text,
       });
       return;
     }

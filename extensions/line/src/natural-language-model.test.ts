@@ -1,55 +1,44 @@
-// Tests secure natural-language LINE model selection without provider credentials.
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
-import { applyModelOverrideToSessionEntry } from "openclaw/plugin-sdk/model-session-runtime";
-import type { ModelsProviderData } from "openclaw/plugin-sdk/models-provider-runtime";
+import type { SessionEntry } from "openclaw/plugin-sdk/model-session-runtime";
 import { describe, expect, it, vi } from "vitest";
 import {
+  applyLineNaturalModelSwitch,
+  formatLineNaturalModelSwitchResult,
+  loadOpenRouterUserModelCatalog,
   parseLineNaturalModelIntent,
   resolveAuthorizedLineNaturalModelAction,
   resolveLineNaturalLanguageModelAction,
+  toOpenClawOpenRouterRef,
+  type LineNaturalModelSessionStore,
+  type OpenRouterCatalogCandidate,
+  type OpenRouterUserModel,
 } from "./natural-language-model.js";
 
 const DEFAULT_MODEL = "openrouter/openai/gpt-5.6-luna";
 const CFG: OpenClawConfig = {
-  agents: {
-    defaults: {
-      model: { primary: DEFAULT_MODEL },
-    },
-  },
-  channels: {
-    line: {
-      allowFrom: ["*"],
-    },
-  },
-  commands: {
-    ownerAllowFrom: ["owner-user"],
-  },
+  agents: { defaults: { model: { primary: DEFAULT_MODEL } } },
+  channels: { line: { allowFrom: ["*"] } },
+  commands: { ownerAllowFrom: ["owner-user"] },
 };
 
-function catalog(): ModelsProviderData {
-  const models = [
-    ["openai/gpt-5.6-luna", "OpenAI: GPT-5.6 Luna", true],
-    ["openai/gpt-5.6-luna-pro", "OpenAI: GPT-5.6 Luna Pro", true],
-    ["anthropic/claude-sonnet-4-6", "Anthropic: Claude Sonnet 4.6", true],
-    ["anthropic/claude-sonnet-4-7", "Anthropic: Claude Sonnet 4.7", true],
-    ["google/gemini-3-pro", "Google: Gemini 3 Pro", true],
-    ["future-labs/nebulon-x", "Future Labs: Nebulon X", true],
-    ["text-labs/plain-chat", "Text Labs: Plain Chat", false],
-  ] as const;
-  const refs = models.map(([id]) => id);
-  return {
-    byProvider: new Map([["openrouter", new Set(refs)]]),
-    providers: ["openrouter"],
-    resolvedDefault: { provider: "openrouter", model: "openai/gpt-5.6-luna" },
-    modelNames: new Map(models.map(([id, name]) => [`openrouter/${id}`, name])),
-    modelCapabilities: new Map(
-      models.map(([id, , supportsTools]) => [`openrouter/${id}`, { supportsTools }]),
-    ),
-    runtimeChoicesByProvider: new Map(),
-  };
-}
+const MODELS: OpenRouterUserModel[] = [
+  { id: "openai/gpt-5.6-luna", name: "OpenAI: GPT-5.6 Luna", supportsTools: true },
+  {
+    id: "anthropic/claude-sonnet-4-6",
+    name: "Anthropic: Claude Sonnet 4.6",
+    supportsTools: true,
+  },
+  {
+    id: "anthropic/claude-sonnet-4-7",
+    name: "Anthropic: Claude Sonnet 4.7",
+    supportsTools: true,
+  },
+  { id: "google/gemini-3-pro", name: "Google: Gemini 3 Pro", supportsTools: true },
+  { id: "future-labs/nebulon-x", name: "Future Labs: Nebulon X", supportsTools: true },
+  { id: "text-labs/plain-chat", name: "Text Labs: Plain Chat", supportsTools: false },
+];
 
-const loadCatalog = vi.fn(async () => catalog());
+const loadCatalog = vi.fn(async () => MODELS);
 
 function lineContext(senderId: string) {
   return {
@@ -64,66 +53,172 @@ function lineContext(senderId: string) {
   };
 }
 
-describe("LINE natural-language model switching", () => {
-  it("lets the verified owner switch using Thai natural language", async () => {
-    const action = await resolveAuthorizedLineNaturalModelAction({
-      text: "เปลี่ยนเป็น Luna Pro หน่อย",
-      cfg: CFG,
-      ctx: lineContext("owner-user"),
-      loadCatalog,
+function candidate(id = "future-labs/nebulon-x"): OpenRouterCatalogCandidate {
+  const model = MODELS.find((entry) => entry.id === id);
+  if (!model) {
+    throw new Error("missing fixture");
+  }
+  return {
+    ...model,
+    ref: `openrouter/${model.id}`,
+    score: 200,
+    source: "openrouter-user-catalog",
+  };
+}
+
+function memoryStore(initial: SessionEntry): {
+  adapter: LineNaturalModelSessionStore;
+  current: () => SessionEntry;
+} {
+  const entry = structuredClone(initial);
+  return {
+    adapter: {
+      read: async () => structuredClone(entry),
+      update: async (_path, _key, mutate) => {
+        mutate(entry);
+        return structuredClone(entry);
+      },
+    },
+    current: () => structuredClone(entry),
+  };
+}
+
+describe("authoritative OpenRouter user catalog", () => {
+  it("loads only exact IDs from the authenticated user-visible endpoint", async () => {
+    const secret = "unit-openrouter-secret";
+    let requestUrl = "";
+    let authorization = "";
+    const models = await loadOpenRouterUserModelCatalog(CFG, undefined, {
+      resolveAuth: vi.fn(async () => ({
+        apiKey: secret,
+        source: "unit-test",
+        mode: "api-key" as const,
+      })),
+      fetchImpl: vi.fn(async (input, init) => {
+        requestUrl = String(input);
+        authorization = new Headers(init?.headers).get("Authorization") ?? "";
+        return new Response(
+          JSON.stringify({
+            data: [
+              {
+                id: "future-labs/nebulon-x",
+                name: "Future Labs: Nebulon X",
+                supported_parameters: ["tools"],
+              },
+              { id: "human phrase", name: "invalid" },
+              { id: "openrouter/fabricated/extra", name: "invalid" },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }),
     });
 
-    expect(action).toEqual({
-      kind: "directive",
-      command: "/model openrouter/openai/gpt-5.6-luna-pro",
-    });
+    expect(requestUrl).toBe("https://openrouter.ai/api/v1/models/user");
+    expect(authorization).toBe(`Bearer ${secret}`);
+    expect(models).toEqual([
+      {
+        id: "future-labs/nebulon-x",
+        name: "Future Labs: Nebulon X",
+        supportsTools: true,
+      },
+    ]);
+    expect(JSON.stringify(models)).not.toContain(secret);
   });
 
-  it("lets the verified owner switch using English natural language", async () => {
-    const action = await resolveAuthorizedLineNaturalModelAction({
-      text: "switch to Gemini 3 Pro",
-      cfg: CFG,
-      ctx: lineContext("owner-user"),
-      loadCatalog,
-    });
-
-    expect(action).toEqual({
-      kind: "directive",
-      command: "/model openrouter/google/gemini-3-pro",
-    });
+  it("returns only sanitized errors and never leaks a credential or response body", async () => {
+    const secret = "unit-openrouter-secret";
+    const responseSecret = "provider-body-secret";
+    await expect(
+      loadOpenRouterUserModelCatalog(CFG, undefined, {
+        resolveAuth: vi.fn(async () => ({
+          apiKey: secret,
+          source: "unit-test",
+          mode: "api-key" as const,
+        })),
+        fetchImpl: vi.fn(
+          async () => new Response(responseSecret, { status: 401, statusText: responseSecret }),
+        ),
+      }),
+    ).rejects.toThrow("OPENROUTER_USER_CATALOG_HTTP_401");
   });
 
-  it("resolves future catalog models without a hard-coded model list", async () => {
+  it("applies the OpenClaw provider prefix exactly once to an exact catalog ID", () => {
+    expect(toOpenClawOpenRouterRef("openai/example-model")).toBe("openrouter/openai/example-model");
+    expect(toOpenClawOpenRouterRef("openrouter/openai/example-model")).toBeNull();
+    expect(toOpenClawOpenRouterRef("Luna pro")).toBeNull();
+  });
+});
+
+describe("LINE natural-language model resolution", () => {
+  it("reproduces and closes the exact production defect", async () => {
     const action = await resolveLineNaturalLanguageModelAction({
-      text: "use Nebulon X",
+      text: "อยากลองเปลี่ยนเป็น Luna pro ได้ไหม",
+      cfg: CFG,
+      ownerAuthorized: true,
+      loadCatalog: async () => [MODELS[0]!],
+    });
+
+    expect(action.kind).toBe("reply");
+    expect(JSON.stringify(action)).not.toContain("openrouter/luna pro");
+    expect(JSON.stringify(action)).not.toContain("openrouter/openrouter/Luna pro");
+    expect(JSON.stringify(action)).not.toContain("เปลี่ยนเป็น");
+  });
+
+  it("selects only the exact ID returned by the catalog", async () => {
+    const action = await resolveLineNaturalLanguageModelAction({
+      text: "switch to Nebulon X",
       cfg: CFG,
       ownerAuthorized: true,
       loadCatalog,
     });
-
-    expect(action).toEqual({
-      kind: "directive",
-      command: "/model openrouter/future-labs/nebulon-x",
+    expect(action).toMatchObject({
+      kind: "switch",
+      candidate: {
+        id: "future-labs/nebulon-x",
+        ref: "openrouter/future-labs/nebulon-x",
+        source: "openrouter-user-catalog",
+      },
     });
   });
 
-  it("requires clarification for ambiguous model families", async () => {
+  it("never promotes human text into a model ID", async () => {
+    const action = await resolveLineNaturalLanguageModelAction({
+      text: "switch to Imaginary Human Name",
+      cfg: CFG,
+      ownerAuthorized: true,
+      loadCatalog,
+    });
+    expect(action.kind).toBe("reply");
+    expect(JSON.stringify(action)).not.toContain("openrouter/Imaginary Human Name");
+  });
+
+  it("asks for clarification when multiple catalog models are plausible", async () => {
     const action = await resolveLineNaturalLanguageModelAction({
       text: "ใช้ Claude Sonnet",
       cfg: CFG,
       ownerAuthorized: true,
       loadCatalog,
     });
-
     expect(action.kind).toBe("reply");
     if (action.kind === "reply") {
-      expect(action.text).toContain("เจอ 2 รุ่น");
-      expect(action.text).toContain("claude-sonnet-4-6");
-      expect(action.text).toContain("claude-sonnet-4-7");
+      expect(action.text).toContain("1.");
+      expect(action.text).toContain("2.");
     }
   });
 
-  it("routes current-model questions through the authoritative model status path", async () => {
+  it("keeps tool capability warnings before a switch", async () => {
+    const warning = await resolveLineNaturalLanguageModelAction({
+      text: "use Plain Chat",
+      cfg: CFG,
+      ownerAuthorized: true,
+      loadCatalog,
+    });
+    expect(warning.kind).toBe("reply");
+    expect(warning.kind === "reply" ? warning.text : "").toContain("does not support tools");
+  });
+
+  it("keeps current/default requests and slash commands on existing paths", async () => {
     await expect(
       resolveLineNaturalLanguageModelAction({
         text: "ตอนนี้ใช้โมเดลอะไร",
@@ -132,163 +227,137 @@ describe("LINE natural-language model switching", () => {
         loadCatalog,
       }),
     ).resolves.toEqual({ kind: "directive", command: "/model status" });
+    await expect(
+      resolveLineNaturalLanguageModelAction({
+        text: "switch back to default",
+        cfg: CFG,
+        ownerAuthorized: true,
+        loadCatalog,
+      }),
+    ).resolves.toEqual({ kind: "directive", command: "/model default" });
+    expect(parseLineNaturalModelIntent("/model openrouter/openai/gpt-5.6-luna")).toEqual({
+      kind: "none",
+    });
   });
 
-  it("routes return-to-default requests through the existing session reset path", async () => {
-    const action = await resolveLineNaturalLanguageModelAction({
-      text: "switch back to default",
+  it("requires verified owner and authorized sender before catalog access", async () => {
+    const privateLoader = vi.fn(async () => MODELS);
+    const action = await resolveAuthorizedLineNaturalModelAction({
+      text: "เปลี่ยนเป็น Nebulon X",
       cfg: CFG,
-      ownerAuthorized: true,
-      loadCatalog,
+      ctx: lineContext("ordinary-member"),
+      loadCatalog: privateLoader,
     });
-    expect(action).toEqual({ kind: "directive", command: "/model default" });
-
-    const sessionEntry: Parameters<typeof applyModelOverrideToSessionEntry>[0]["entry"] = {
-      sessionId: "line-session",
-      updatedAt: 1,
-      providerOverride: "openrouter",
-      modelOverride: "future-labs/nebulon-x",
-      modelOverrideSource: "user",
-    };
-    applyModelOverrideToSessionEntry({
-      entry: sessionEntry,
-      selection: {
-        provider: "openrouter",
-        model: "openai/gpt-5.6-luna",
-        isDefault: true,
-      },
-    });
-    expect(sessionEntry.providerOverride).toBeUndefined();
-    expect(sessionEntry.modelOverride).toBeUndefined();
-    expect(sessionEntry.modelOverrideSource).toBeUndefined();
+    expect(action).toEqual({ kind: "none" });
+    expect(privateLoader).not.toHaveBeenCalled();
   });
 
-  it("does not treat ordinary chat as model control", async () => {
-    const privateLoader = vi.fn(async () => catalog());
+  it("does not grant command authorization to ordinary chat", async () => {
+    const privateLoader = vi.fn(async () => MODELS);
     const action = await resolveAuthorizedLineNaturalModelAction({
       text: "ช่วยสรุปงานวันนี้",
       cfg: CFG,
       ctx: lineContext("owner-user"),
       loadCatalog: privateLoader,
     });
-
     expect(action).toEqual({ kind: "none" });
     expect(privateLoader).not.toHaveBeenCalled();
   });
+});
 
-  it("does not intercept or resolve catalog entries for non-owners", async () => {
-    const privateLoader = vi.fn(async () => catalog());
-    const action = await resolveAuthorizedLineNaturalModelAction({
-      text: "เปลี่ยนเป็น Luna Pro",
+describe("verified LINE session model transaction", () => {
+  it("persists and verifies the exact catalog candidate before reporting success", async () => {
+    const state = memoryStore({ sessionId: "line-session", updatedAt: 1 });
+    const chosen = candidate();
+    const result = await applyLineNaturalModelSwitch({
       cfg: CFG,
-      ctx: lineContext("ordinary-member"),
-      loadCatalog: privateLoader,
-    });
-
-    expect(action).toEqual({ kind: "none" });
-    expect(privateLoader).not.toHaveBeenCalled();
-  });
-
-  it("produces an existing session-scoped directive that changes only the session entry", async () => {
-    const configSnapshot = structuredClone(CFG);
-    const action = await resolveLineNaturalLanguageModelAction({
-      text: "switch to Nebulon X",
-      cfg: CFG,
-      ownerAuthorized: true,
+      storePath: "sessions.json",
+      sessionKey: "line:pilot",
+      candidate: chosen,
       loadCatalog,
-    });
-    expect(action.kind).toBe("directive");
-    if (action.kind !== "directive") {
-      return;
-    }
-
-    const selected = action.command.slice("/model ".length);
-    const [provider, ...modelParts] = selected.split("/");
-    const sessionEntry: Parameters<typeof applyModelOverrideToSessionEntry>[0]["entry"] = {
-      sessionId: "line-session",
-      updatedAt: 1,
-    };
-    applyModelOverrideToSessionEntry({
-      entry: sessionEntry,
-      selection: {
-        provider: provider ?? "",
-        model: modelParts.join("/"),
-      },
-      selectionSource: "user",
+      store: state.adapter,
     });
 
-    expect(sessionEntry).toMatchObject({
+    expect(result).toEqual({ ok: true, activeRef: chosen.ref });
+    expect(state.current()).toMatchObject({
       providerOverride: "openrouter",
       modelOverride: "future-labs/nebulon-x",
       modelOverrideSource: "user",
     });
-    expect(CFG).toEqual(configSnapshot);
+    expect(formatLineNaturalModelSwitchResult({ result, candidate: chosen, locale: "en" })).toBe(
+      "Switched to Future Labs: Nebulon X.",
+    );
+    expect(CFG.agents?.defaults?.model).toEqual({ primary: DEFAULT_MODEL });
   });
 
-  it("keeps the existing slash model command untouched", () => {
-    expect(parseLineNaturalModelIntent("/model openrouter/openai/gpt-5.6-luna")).toEqual({
-      kind: "none",
+  it("does not alter the session when authoritative preflight validation fails", async () => {
+    const state = memoryStore({
+      sessionId: "line-session",
+      updatedAt: 1,
+      providerOverride: "openrouter",
+      modelOverride: "openai/gpt-5.6-luna",
     });
-  });
-
-  it("surfaces a catalog-declared tool limitation before switching", async () => {
-    const warning = await resolveLineNaturalLanguageModelAction({
-      text: "use Plain Chat",
+    const before = state.current();
+    const result = await applyLineNaturalModelSwitch({
       cfg: CFG,
-      ownerAuthorized: true,
-      loadCatalog,
+      storePath: "sessions.json",
+      sessionKey: "line:pilot",
+      candidate: candidate(),
+      loadCatalog: async () => [],
+      store: state.adapter,
     });
-    expect(warning.kind).toBe("reply");
-    if (warning.kind === "reply") {
-      expect(warning.text).toContain("does not support tools");
-    }
-
-    await expect(
-      resolveLineNaturalLanguageModelAction({
-        text: "confirm use Plain Chat",
-        cfg: CFG,
-        ownerAuthorized: true,
-        loadCatalog,
-      }),
-    ).resolves.toEqual({
-      kind: "directive",
-      command: "/model openrouter/text-labs/plain-chat",
-    });
+    expect(result).toEqual({ ok: false, reason: "catalog", rolledBack: false });
+    expect(state.current()).toEqual(before);
   });
 
-  it("returns sanitized catalog failures and never exposes credentials", async () => {
-    const secret = "unit-openrouter-secret";
-    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    const action = await resolveLineNaturalLanguageModelAction({
-      text: "switch to Nebulon X",
+  it("rolls back to the previous override on immediate provider rejection", async () => {
+    const state = memoryStore({
+      sessionId: "line-session",
+      updatedAt: 1,
+      providerOverride: "openrouter",
+      modelOverride: "openai/gpt-5.6-luna",
+      modelOverrideSource: "user",
+    });
+    let calls = 0;
+    const result = await applyLineNaturalModelSwitch({
       cfg: CFG,
-      ownerAuthorized: true,
+      storePath: "sessions.json",
+      sessionKey: "line:pilot",
+      candidate: candidate(),
       loadCatalog: async () => {
-        throw new Error(`Authorization: Bearer ${secret}`);
+        calls += 1;
+        if (calls === 1) {
+          return MODELS;
+        }
+        throw new Error("Authorization: Bearer secret-must-not-escape");
       },
+      store: state.adapter,
     });
-
-    expect(action).toEqual({
-      kind: "reply",
-      text: "The model catalog is unavailable right now.",
+    expect(result).toEqual({ ok: false, reason: "provider", rolledBack: true });
+    expect(state.current()).toMatchObject({
+      providerOverride: "openrouter",
+      modelOverride: "openai/gpt-5.6-luna",
     });
-    expect(JSON.stringify(action)).not.toContain(secret);
-    expect([...errorSpy.mock.calls, ...warnSpy.mock.calls].flat().join(" ")).not.toContain(secret);
+    expect(JSON.stringify(result)).not.toContain("secret-must-not-escape");
   });
 
-  it("returns a clear no-match reply without changing the default", async () => {
-    const action = await resolveLineNaturalLanguageModelAction({
-      text: "switch to Model That Does Not Exist",
+  it("clears to the configured default when rejection follows a session with no override", async () => {
+    const state = memoryStore({ sessionId: "line-session", updatedAt: 1 });
+    let calls = 0;
+    const chosen = candidate();
+    const result = await applyLineNaturalModelSwitch({
       cfg: CFG,
-      ownerAuthorized: true,
-      loadCatalog,
+      storePath: "sessions.json",
+      sessionKey: "line:pilot",
+      candidate: chosen,
+      loadCatalog: async () => (++calls === 1 ? MODELS : []),
+      store: state.adapter,
     });
-
-    expect(action).toEqual({
-      kind: "reply",
-      text: "No matching OpenRouter model is available to this account.",
-    });
-    expect(CFG.agents.defaults.model.primary).toBe(DEFAULT_MODEL);
+    expect(result).toEqual({ ok: false, reason: "provider", rolledBack: true });
+    expect(state.current().providerOverride).toBeUndefined();
+    expect(state.current().modelOverride).toBeUndefined();
+    expect(
+      formatLineNaturalModelSwitchResult({ result, candidate: chosen, locale: "th" }),
+    ).not.toContain("เปลี่ยนเป็น");
   });
 });

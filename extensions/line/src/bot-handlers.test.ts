@@ -162,7 +162,8 @@ const { buildLineMessageContextMock, buildLinePostbackContextMock } = vi.hoisted
   buildLineMessageContextMock: vi.fn(async () => ({
     ctxPayload: { From: "line:group:group-1" },
     replyToken: "reply-token",
-    route: { agentId: "default" },
+    route: { agentId: "default", sessionKey: "line:group:group-1" },
+    turn: { storePath: "sessions.json", record: {} },
     isGroup: true,
     accountId: "default",
   })),
@@ -195,15 +196,19 @@ const createRuntime = () => ({ log: vi.fn(), error: vi.fn(), exit: vi.fn() });
 const NATURAL_MODEL_REF = "openrouter/anthropic/claude-sonnet-4-6";
 
 function naturalModelCatalog() {
-  return {
-    byProvider: new Map([["openrouter", new Set(["anthropic/claude-sonnet-4-6"])]]),
-    providers: ["openrouter"],
-    resolvedDefault: { provider: "openrouter", model: "openai/gpt-5.6-luna" },
-    modelNames: new Map([[NATURAL_MODEL_REF, "Anthropic: Claude Sonnet 4.6"]]),
-    modelCapabilities: new Map([[NATURAL_MODEL_REF, { supportsTools: true }]]),
-    runtimeChoicesByProvider: new Map(),
-  };
+  return [
+    {
+      id: "anthropic/claude-sonnet-4-6",
+      name: "Anthropic: Claude Sonnet 4.6",
+      supportsTools: true,
+    },
+  ];
 }
+
+const naturalModelSwitchMock = vi.fn(async () => ({
+  ok: true as const,
+  activeRef: NATURAL_MODEL_REF,
+}));
 
 function mockMessageContextForSender(senderId: string) {
   buildLineMessageContextMock.mockImplementationOnce(async () => ({
@@ -218,7 +223,14 @@ function mockMessageContextForSender(senderId: string) {
       ChatType: "group",
     },
     replyToken: "reply-token",
-    route: { agentId: "default" },
+    route: {
+      agentId: "default",
+      sessionKey: "line:group:group-1",
+    },
+    turn: {
+      storePath: "sessions.json",
+      record: {},
+    },
     isGroup: true,
     accountId: "default",
   }));
@@ -315,6 +327,8 @@ function createLineWebhookTestContext(params: {
     runtime: createRuntime(),
     mediaMaxBytes: 1,
     processMessage: params.processMessage,
+    naturalModelCatalogLoader: async () => naturalModelCatalog(),
+    naturalModelSwitch: naturalModelSwitchMock,
     ...(params.groupHistories ? { groupHistories: params.groupHistories } : {}),
     ...(params.replayCache ? { replayCache: params.replayCache } : {}),
   };
@@ -397,7 +411,8 @@ describe("handleLineWebhookEvents", () => {
     buildLineMessageContextMock.mockImplementation(async () => ({
       ctxPayload: { From: "line:group:group-1" },
       replyToken: "reply-token",
-      route: { agentId: "default" },
+      route: { agentId: "default", sessionKey: "line:group:group-1" },
+      turn: { storePath: "sessions.json", record: {} },
       isGroup: true,
       accountId: "default",
     }));
@@ -417,6 +432,11 @@ describe("handleLineWebhookEvents", () => {
       isAuthorizedSender: false,
     });
     buildModelsProviderDataMock.mockReset();
+    naturalModelSwitchMock.mockReset();
+    naturalModelSwitchMock.mockResolvedValue({
+      ok: true,
+      activeRef: NATURAL_MODEL_REF,
+    });
     pushMessageLineMock.mockReset();
     pushMessageLineMock.mockImplementation(async () => {
       throw new Error("pushMessageLine should not be called from bot-handlers tests");
@@ -427,18 +447,22 @@ describe("handleLineWebhookEvents", () => {
     });
   });
   it.each([
-    ["Thai", "เปลี่ยนเป็น Claude Sonnet", `/model ${NATURAL_MODEL_REF}`],
-    ["English", "switch to Claude Sonnet", `/model ${NATURAL_MODEL_REF}`],
-    ["current model", "ตอนนี้ใช้โมเดลอะไร", "/model status"],
-    ["return to default", "กลับไปโมเดล default", "/model default"],
+    ["Thai", "เปลี่ยนเป็น Claude Sonnet"],
+    ["English", "switch to Claude Sonnet"],
   ])(
-    "lets a verified owner reach session model control from ordinary %s text",
-    async (_label, text, expectedDirective) => {
+    "lets a verified owner complete a transactional session switch from ordinary %s text",
+    async (_label, text) => {
       enableVerifiedOwnerNaturalModelAuthorization();
       mockMessageContextForSender("owner-user");
+      replyMessageLineMock.mockResolvedValue(undefined);
       const processMessage = vi.fn();
       const event = createTestMessageEvent({
-        message: { id: `natural-owner-${_label}`, type: "text", text },
+        message: {
+          id: `natural-owner-${_label}`,
+          type: "text",
+          text,
+          quoteToken: "quote-token",
+        },
         source: { type: "group", groupId: "group-1", userId: "owner-user" },
         webhookEventId: `natural-owner-${_label}`,
       });
@@ -461,13 +485,59 @@ describe("handleLineWebhookEvents", () => {
           ctx: expect.objectContaining({ SenderId: "owner-user" }),
         }),
       );
-      expect(processMessage).toHaveBeenCalledWith(
+      expect(naturalModelSwitchMock).toHaveBeenCalledWith(
         expect.objectContaining({
-          ctxPayload: expect.objectContaining({ CommandBody: expectedDirective }),
+          storePath: "sessions.json",
+          sessionKey: "line:group:group-1",
+          candidate: expect.objectContaining({
+            id: "anthropic/claude-sonnet-4-6",
+            ref: NATURAL_MODEL_REF,
+          }),
         }),
       );
+      expect(replyMessageLineMock).toHaveBeenCalledWith(
+        "reply-token",
+        [expect.objectContaining({ type: "text" })],
+        expect.any(Object),
+      );
+      expect(processMessage).not.toHaveBeenCalled();
     },
   );
+
+  it.each([
+    ["current model", "ตอนนี้ใช้โมเดลอะไร", "/model status"],
+    ["return to default", "กลับไปโมเดล default", "/model default"],
+  ])("keeps %s on the existing directive path", async (_label, text, expectedDirective) => {
+    enableVerifiedOwnerNaturalModelAuthorization();
+    mockMessageContextForSender("owner-user");
+    const processMessage = vi.fn();
+    const event = createTestMessageEvent({
+      message: {
+        id: `natural-owner-${_label}`,
+        type: "text",
+        text,
+        quoteToken: "quote-token",
+      },
+      source: { type: "group", groupId: "group-1", userId: "owner-user" },
+      webhookEventId: `natural-owner-${_label}`,
+    });
+
+    await handleLineWebhookEvents(
+      [event],
+      createLineWebhookTestContext({
+        processMessage,
+        groupPolicy: "open",
+        requireMention: false,
+      }),
+    );
+
+    expect(processMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        ctxPayload: expect.objectContaining({ CommandBody: expectedDirective }),
+      }),
+    );
+    expect(naturalModelSwitchMock).not.toHaveBeenCalled();
+  });
 
   it("blocks the same natural model switch for a non-owner", async () => {
     enableVerifiedOwnerNaturalModelAuthorization();
@@ -475,7 +545,12 @@ describe("handleLineWebhookEvents", () => {
     const processMessage = vi.fn();
     const text = "เปลี่ยนเป็น Claude Sonnet";
     const event = createTestMessageEvent({
-      message: { id: "natural-non-owner", type: "text", text },
+      message: {
+        id: "natural-non-owner",
+        type: "text",
+        text,
+        quoteToken: "quote-token",
+      },
       source: { type: "group", groupId: "group-1", userId: "ordinary-member" },
       webhookEventId: "natural-non-owner",
     });
@@ -505,7 +580,12 @@ describe("handleLineWebhookEvents", () => {
     mockMessageContextForSender("owner-user");
     const processMessage = vi.fn();
     const event = createTestMessageEvent({
-      message: { id: "ordinary-chat", type: "text", text: "ช่วยสรุปงานวันนี้" },
+      message: {
+        id: "ordinary-chat",
+        type: "text",
+        text: "ช่วยสรุปงานวันนี้",
+        quoteToken: "quote-token",
+      },
       source: { type: "group", groupId: "group-1", userId: "owner-user" },
       webhookEventId: "ordinary-chat",
     });
@@ -536,6 +616,7 @@ describe("handleLineWebhookEvents", () => {
         id: "slash-model",
         type: "text",
         text: `/model ${NATURAL_MODEL_REF}`,
+        quoteToken: "quote-token",
       },
       source: { type: "group", groupId: "group-1", userId: "owner-user" },
       webhookEventId: "slash-model",
