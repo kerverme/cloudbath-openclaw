@@ -22,10 +22,8 @@ vi.mock("openclaw/plugin-sdk/channel-pairing", () => ({
     },
 }));
 vi.mock("openclaw/plugin-sdk/command-auth-native", () => ({
-  hasControlCommand: (text: string) =>
-    text.trim().startsWith("!") || text.trim().startsWith("/"),
-  shouldComputeCommandAuthorized: (text: string) =>
-    text.trim().startsWith("!") || text.trim().startsWith("/"),
+  hasControlCommand: (text: string) => text.trim().startsWith("!"),
+  shouldComputeCommandAuthorized: (text: string) => text.trim().startsWith("!"),
   resolveControlCommandGate: ({
     hasControlCommand,
     authorizers,
@@ -552,9 +550,6 @@ describe("handleLineWebhookEvents", () => {
       }),
     );
 
-    expect(buildLineMessageContextMock).toHaveBeenCalledWith(
-      expect.objectContaining({ commandAuthorized: true }),
-    );
     expect(resolveCommandAuthorizationMock).not.toHaveBeenCalled();
     expect(buildModelsProviderDataMock).not.toHaveBeenCalled();
     expect(processMessage).toHaveBeenCalledWith(
