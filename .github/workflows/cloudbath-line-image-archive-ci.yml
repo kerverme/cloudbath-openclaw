@@ -47,6 +47,15 @@ jobs:
           use-actions-cache: "true"
           save-actions-cache: "true"
 
+      - name: Check official LINE shrinkwrap
+        if: steps.dependencies.outcome == 'success' && !cancelled()
+        run: |
+          if ! node scripts/generate-npm-shrinkwrap.mjs --check --package-dir extensions/line; then
+            node scripts/generate-npm-shrinkwrap.mjs --package-dir extensions/line
+            git --no-pager diff -- extensions/line/npm-shrinkwrap.json
+            exit 1
+          fi
+
       - name: Run focused Vitest suite
         if: steps.dependencies.outcome == 'success' && !cancelled()
         run: |
@@ -125,6 +134,7 @@ jobs:
           paths=(
             extensions/cloudbath-line-image-archive
             extensions/line/src/bot-handlers.ts
+            extensions/line/src/bot-handlers.test.ts
             extensions/line/src/model-catalog-tool.ts
             extensions/line/src/model-catalog-tool.test.ts
             src/agents/tools/session-status-tool.ts
@@ -159,6 +169,7 @@ jobs:
           node scripts/run-oxlint.mjs \
             --tsconfig config/tsconfig/oxlint.extensions.json \
             extensions/line/src/bot-handlers.ts \
+            extensions/line/src/bot-handlers.test.ts \
             extensions/line/src/model-catalog-tool.ts \
             extensions/line/src/model-catalog-tool.test.ts \
             src/agents/tools/session-status-tool.ts \
