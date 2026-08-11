@@ -313,7 +313,6 @@ describe("LINE natural-language model resolution", () => {
   });
 });
 
-
 describe("session-scoped pending LINE model selection", () => {
   const lunaCandidates: OpenRouterCatalogCandidate[] = [
     {
