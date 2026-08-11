@@ -125,7 +125,7 @@ export async function loadOpenRouterAccountModels(params: {
         ...(supportedParameters ? { supportsTools: supportedParameters.includes("tools") } : {}),
       });
     }
-    return [...models.values()].sort((left, right) => left.name.localeCompare(right.name));
+    return [...models.values()].toSorted((left, right) => left.name.localeCompare(right.name));
   } catch (error) {
     if (error instanceof Error && error.message.startsWith("OPENROUTER_ACCOUNT_CATALOG_")) {
       throw error;
