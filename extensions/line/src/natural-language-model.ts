@@ -94,7 +94,8 @@ export type LinePendingModelSelection = {
 export type LinePendingModelSelectionReply =
   | { kind: "none" }
   | { kind: "cancel" }
-  | { kind: "selection"; index: number };
+  | { kind: "selection"; index: number }
+  | { kind: "selection-query"; query: string };
 
 const SESSION_SWITCH_FIELDS = [
   "providerOverride",
@@ -134,16 +135,36 @@ function hasThaiText(value: string): boolean {
   return /[\u0e00-\u0e7f]/u.test(value);
 }
 
+function normalizeControlText(value: string): string {
+  return value
+    .normalize("NFKC")
+    .replace(/[“”"']/gu, "")
+    .replace(/[，,;:!?！？。、]+/gu, " ")
+    .replace(/\s+/gu, " ")
+    .trim();
+}
+
+function stripLeadingPoliteness(value: string): string {
+  return value
+    .replace(
+      /^(?:(?:ช่วย|ขอรบกวน|รบกวน|please|could\s+you|can\s+you|would\s+you)\s*)+/iu,
+      "",
+    )
+    .trim();
+}
+
 function stripTrailingPoliteness(value: string): string {
   return value
-    .replace(/\s*(?:ได้ไหม|ได้หรือไม่)\s*[.!?]*$/iu, "")
-    .replace(/\s+(?:แทน|หน่อย|ที|ครับ|ค่ะ|คะ|นะ|please)\s*[.!?]*$/iu, "")
-    .replace(/[.!?]+$/u, "")
+    .replace(/\s*(?:ได้ไหม|ได้มั้ย|ได้หรือไม่)\s*$/iu, "")
+    .replace(/\s+(?:(?:แทน|หน่อย|ที|ครับ|ค่ะ|คะ|นะ|please)\s*)+$/iu, "")
     .trim();
 }
 
 function stripModelNoun(value: string): string {
-  return value.replace(/^(?:โมเดล|model)\s+/iu, "").trim();
+  return value
+    .replace(/^(?:โมเดล|ตัว\s*AI|model)\s+/iu, "")
+    .replace(/\s+(?:โมเดล|model)$/iu, "")
+    .trim();
 }
 
 function normalizeSearchText(value: string): string {
@@ -173,7 +194,7 @@ function parseSwitchQuery(raw: string): {
   confirmed: boolean;
   preferBase: boolean;
 } {
-  let query = stripTrailingPoliteness(stripModelNoun(raw));
+  let query = stripTrailingPoliteness(stripModelNoun(normalizeControlText(raw)));
   let confirmed = false;
   const confirmation = query.match(
     /^(?:ยืนยัน(?:ใช้|เปลี่ยนเป็น)?|confirm(?:\s+(?:use|switch\s+to))?)\s+(.+)$/iu,
@@ -190,27 +211,66 @@ function parseSwitchQuery(raw: string): {
   return { query, confirmed, preferBase };
 }
 
-export function parseLineNaturalModelIntent(text: string): NaturalModelIntent {
-  const trimmed = text.trim();
-  if (!trimmed || trimmed.startsWith("/")) {
-    return { kind: "none" };
+function isModelDiscussion(text: string): boolean {
+  const normalized = normalizeControlText(text);
+  return (
+    /(?:ดีไหม|ดีหรือเปล่า|น่าใช้ไหม|เป็นยังไง|ต่างกัน(?:ยังไง|อย่างไร)?|เปรียบเทียบ|รุ่นไหนเก่ง|what\s+do\s+you\s+think|how\s+(?:is|does|do).*(?:compare|different)|which\s+.*\s+better)/iu.test(
+      normalized,
+    ) ||
+    /^(?:ถ้า|if\s).*(?:ใช้|use).*(?:ดีไหม|ดีหรือเปล่า|would|should|better)/iu.test(normalized)
+  );
+}
+
+function extractSwitchQuery(text: string): string | null {
+  const change = text.match(
+    /^(?:(?:อยาก\s*)?ลอง\s*|อยาก\s*|ขอ\s*)?(?:เปลี่ยน|สลับ)(?:กลับ)?\s*(?:(?:โมเดล|ตัว\s*AI)\s*)?(?:ให้\s*)?(?:(?:ไป|มา)\s*)?(?:(?:ใช้|เป็น|to)\s*)?(?:(?:ได้ไหม|ได้มั้ย|ได้หรือไม่)\s*)?(?:(?:เป็น|to)\s*)?(.+)$/iu,
+  );
+  if (change?.[1]) {
+    return change[1];
   }
 
+  const englishChange = text.match(
+    /^(?:switch|change)\s*(?:(?:the\s+)?model\s*)?(?:back\s*)?(?:to|เป็น)\s+(.+)$/iu,
+  );
+  if (englishChange?.[1]) {
+    return englishChange[1];
+  }
+
+  const direct = text.match(
+    /^(?:ขอ\s*ใช้|ลอง\s*ใช้|ใช้|เอา\s*เป็น|กลับ(?:ไป|มา)(?:ใช้)?|use|try(?:\s+using)?)\s+(.+)$/iu,
+  );
+  if (direct?.[1]) {
+    return direct[1];
+  }
+
+  const reversed = text.match(
+    /^(.+?)\s+(?:เปลี่ยน|สลับ|switch|change)(?:\s*(?:หน่อย|ที|please))?$/iu,
+  );
+  return reversed?.[1] ?? null;
+}
+
+export function parseLineNaturalModelIntent(text: string): NaturalModelIntent {
+  const original = text.trim();
+  if (!original || original.startsWith("/")) {
+    return { kind: "none" };
+  }
+  const normalized = stripLeadingPoliteness(normalizeControlText(original));
+
   if (
-    /^(?:ตอนนี้(?:กำลัง)?ใช้โมเดลอะไร|ใช้โมเดลอะไรอยู่|what(?:'s| is) (?:the )?(?:current |active )?model|what model are you using)\??$/iu.test(
-      trimmed,
+    /^(?:ตอนนี้(?:กำลัง)?ใช้(?:โมเดล|ตัว)?อะไร|ใช้โมเดลอะไรอยู่|ตอนนี้ใช้ตัวไหน|โมเดล(?:ปัจจุบัน|ตอนนี้)(?:คือ|เป็น)?อะไร|what(?:'s| is) (?:the )?(?:current |active )?model|what model are you using|which model (?:is active|are you using))$/iu.test(
+      normalized,
     )
   ) {
     return { kind: "current" };
   }
+  if (isModelDiscussion(normalized)) {
+    return { kind: "none" };
+  }
 
-  const thaiConfirmation = trimmed.match(/^ยืนยัน(?:ใช้|เปลี่ยนเป็น)?\s+(.+)$/iu);
-  const englishConfirmation = trimmed.match(/^confirm\s+(?:use|switch\s+to)\s+(.+)$/iu);
-  const thai = trimmed.match(
-    /^(?:เปลี่ยน(?:กลับ)?เป็น|เปลี่ยนไป(?:ใช้)?|เปลี่ยน(?:โมเดล|ตัว\s*AI)\s*เป็น|สลับ(?:ไปใช้|เป็น|โมเดล\s*เป็น)|กลับ(?:ไป|มา)(?:ใช้)?|ขอ(?:เปลี่ยนเป็น|ใช้)|เอาเป็น|ใช้|อยากลอง(?:เปลี่ยนเป็น|ใช้)?|ลอง(?:เปลี่ยนเป็น|ใช้)?)\s*(.+)$/iu,
-  );
-  const english = trimmed.match(/^(?:switch(?:\s+back)?\s+to|use|try)\s+(.+)$/iu);
-  const rawQuery = thaiConfirmation?.[1] ?? englishConfirmation?.[1] ?? thai?.[1] ?? english?.[1];
+  const thaiConfirmation = normalized.match(/^ยืนยัน(?:ใช้|เปลี่ยนเป็น)?\s+(.+)$/iu);
+  const englishConfirmation = normalized.match(/^confirm\s+(?:use|switch\s+to)\s+(.+)$/iu);
+  const rawQuery =
+    thaiConfirmation?.[1] ?? englishConfirmation?.[1] ?? extractSwitchQuery(normalized);
   if (!rawQuery) {
     return { kind: "none" };
   }
@@ -221,7 +281,8 @@ export function parseLineNaturalModelIntent(text: string): NaturalModelIntent {
   if (
     normalizedQuery === "default" ||
     normalizedQuery === "ค่าเริ่มต้น" ||
-    normalizedQuery === "ค่าปริยาย"
+    normalizedQuery === "ค่าปริยาย" ||
+    normalizedQuery === "โมเดลเดิม"
   ) {
     return { kind: "default" };
   }
@@ -233,7 +294,7 @@ export function parseLineNaturalModelIntent(text: string): NaturalModelIntent {
     query: parsed.query,
     confirmed: parsed.confirmed,
     preferBase: parsed.preferBase,
-    locale: hasThaiText(trimmed) ? "th" : "en",
+    locale: hasThaiText(original) ? "th" : "en",
   };
 }
 
@@ -258,8 +319,10 @@ export function isLineNaturalModelControlLike(text: string): boolean {
   return asksCurrentModel || (hasExplicitControlSubject && hasSwitchVerb);
 }
 
-export function parseLinePendingModelSelectionReply(text: string): LinePendingModelSelectionReply {
-  const normalized = text.trim().toLocaleLowerCase("en-US").replace(/\s+/gu, " ");
+export function parseLinePendingModelSelectionReply(
+  text: string,
+): LinePendingModelSelectionReply {
+  const normalized = normalizeControlText(text).toLocaleLowerCase("en-US");
   if (!normalized) {
     return { kind: "none" };
   }
@@ -267,26 +330,45 @@ export function parseLinePendingModelSelectionReply(text: string): LinePendingMo
     return { kind: "cancel" };
   }
 
-  const numeric = normalized.match(
-    /^(?:(?:เลือก|เอา|ใช้)(?:\s*(?:รุ่น|ตัว|อัน))?\s*|(?:รุ่น|ตัว|อัน)(?:ที่)?\s*|(?:option|choose|use)\s*)?(\d+)$/iu,
-  );
-  if (numeric?.[1]) {
-    return { kind: "selection", index: Number.parseInt(numeric[1], 10) - 1 };
+  const hasSelectionVerb = /^(?:เลือก|เอา|ใช้|choose|use|take)/iu.test(normalized);
+  let selector = normalized
+    .replace(/^(?:เลือก|เอา|ใช้|choose|use|take)\s*/iu, "")
+    .replace(/^(?:ตัว|อัน|ข้อ|รุ่น|option)\s*(?:ที่)?\s*/iu, "")
+    .replace(/^the\s+/iu, "")
+    .replace(/\s+one$/iu, "")
+    .trim();
+
+  if (/^\d+$/u.test(selector)) {
+    return { kind: "selection", index: Number.parseInt(selector, 10) - 1 };
+  }
+
+  const ordinalIndexes = new Map<string, number>([
+    ["แรก", 0],
+    ["หนึ่ง", 0],
+    ["first", 0],
+    ["สอง", 1],
+    ["second", 1],
+    ["สาม", 2],
+    ["third", 2],
+    ["สี่", 3],
+    ["fourth", 3],
+    ["ห้า", 4],
+    ["fifth", 4],
+  ]);
+  const ordinalIndex = ordinalIndexes.get(selector);
+  if (ordinalIndex !== undefined) {
+    return { kind: "selection", index: ordinalIndex };
   }
 
   if (
-    /^(?:ตัวแรก|อันแรก|เอาตัวแรก|เลือกตัวแรก|first|the first one|choose the first one)$/iu.test(
-      normalized,
-    )
+    hasSelectionVerb &&
+    selector &&
+    !/(?:ดีไหม|ต่างกัน|which|what|how|\?)$/iu.test(selector)
   ) {
-    return { kind: "selection", index: 0 };
-  }
-  if (
-    /^(?:ตัว(?:ที่)?\s*สอง|อัน(?:ที่)?\s*สอง|เอาตัวสอง|เลือกตัวสอง|second|the second one|choose the second one)$/iu.test(
-      normalized,
-    )
-  ) {
-    return { kind: "selection", index: 1 };
+    selector = stripTrailingPoliteness(selector);
+    if (selector) {
+      return { kind: "selection-query", query: selector };
+    }
   }
   return { kind: "none" };
 }
@@ -539,40 +621,136 @@ export async function loadOpenRouterUserModelCatalog(
   }
 }
 
+type SemanticQueryVariant = {
+  query: string;
+  penalty: number;
+};
+
+const MODEL_QUERY_HINTS: Readonly<Record<string, readonly string[][]>> = {
+  chatgpt: [["openai", "gpt"], ["openai"]],
+  gpt: [["openai", "gpt"]],
+  bard: [["google", "gemini"]],
+  gemini: [["google", "gemini"]],
+  claude: [["anthropic", "claude"]],
+  grok: [["x", "ai", "grok"]],
+  deepseek: [["deepseek"]],
+};
+
+function listSemanticQueryVariants(value: string): SemanticQueryVariant[] {
+  const normalized = normalizeSearchText(value)
+    .replace(/\bchat\s+gpt\b/gu, "chatgpt")
+    .replace(/\bopen\s+ai\b/gu, "openai")
+    .replace(/\bdeep\s+seek\b/gu, "deepseek");
+  if (!normalized) {
+    return [];
+  }
+
+  const variants = new Map<string, number>([[normalized, 0]]);
+  const tokens = normalized.split(" ");
+  tokens.forEach((token, index) => {
+    for (const hint of MODEL_QUERY_HINTS[token] ?? []) {
+      const hinted = [...tokens.slice(0, index), ...hint, ...tokens.slice(index + 1)].join(" ");
+      const currentPenalty = variants.get(hinted);
+      if (currentPenalty === undefined || currentPenalty > 8) {
+        variants.set(hinted, 8);
+      }
+    }
+  });
+  return [...variants].map(([query, penalty]) => ({ query, penalty }));
+}
+
+function isMildTokenTypo(left: string, right: string): boolean {
+  if (left === right) {
+    return true;
+  }
+  if (left.length < 4 || right.length < 4 || Math.abs(left.length - right.length) > 1) {
+    return false;
+  }
+
+  let edits = 0;
+  let leftIndex = 0;
+  let rightIndex = 0;
+  while (leftIndex < left.length && rightIndex < right.length) {
+    if (left[leftIndex] === right[rightIndex]) {
+      leftIndex += 1;
+      rightIndex += 1;
+      continue;
+    }
+    edits += 1;
+    if (edits > 1) {
+      return false;
+    }
+    if (left.length > right.length) {
+      leftIndex += 1;
+    } else if (right.length > left.length) {
+      rightIndex += 1;
+    } else {
+      leftIndex += 1;
+      rightIndex += 1;
+    }
+  }
+  return edits + Number(leftIndex < left.length || rightIndex < right.length) <= 1;
+}
+
+function scoreQueryVariant(params: {
+  id: string;
+  name: string;
+  variant: SemanticQueryVariant;
+  preferBase: boolean;
+}): number {
+  const query = params.variant.query;
+  const id = normalizeSearchText(params.id);
+  const leafId = normalizeSearchText(params.id.split("/").at(-1) ?? params.id);
+  const name = normalizeSearchText(params.name);
+  if (query === id || query === leafId || query === name) {
+    return 200 - params.variant.penalty;
+  }
+
+  const queryTokens = query.split(" ");
+  const searchableTokens = [...new Set([id, name].join(" ").split(" "))];
+  let fuzzyMatches = 0;
+  for (const token of queryTokens) {
+    if (searchableTokens.includes(token)) {
+      continue;
+    }
+    if (searchableTokens.some((candidateToken) => isMildTokenTypo(token, candidateToken))) {
+      fuzzyMatches += 1;
+      continue;
+    }
+    return 0;
+  }
+
+  const extraTokens = Math.max(0, searchableTokens.length - queryTokens.length);
+  let score =
+    100 - Math.min(extraTokens, 30) - params.variant.penalty - fuzzyMatches * 15;
+  if (name.includes(query) || id.includes(query)) {
+    score += 20;
+  }
+  if (params.preferBase) {
+    const editionTokens = new Set(["pro", "max", "mini", "flash", "preview", "turbo"]);
+    const hasEdition = searchableTokens.some((token) => editionTokens.has(token));
+    score += hasEdition ? -40 : 20;
+  }
+  return score;
+}
+
 function scoreCandidate(params: {
   id: string;
   name: string;
   query: string;
   preferBase: boolean;
 }): number {
-  const query = normalizeSearchText(params.query);
-  const id = normalizeSearchText(params.id);
-  const leafId = normalizeSearchText(params.id.split("/").at(-1) ?? params.id);
-  const name = normalizeSearchText(params.name);
-  if (!query) {
-    return 0;
-  }
-  if (query === id || query === leafId || query === name) {
-    return 200;
-  }
-
-  const queryTokens = query.split(" ");
-  const searchable = new Set(`${id} ${name}`.split(" "));
-  if (!queryTokens.every((token) => searchable.has(token))) {
-    return 0;
-  }
-
-  const extraTokens = Math.max(0, searchable.size - queryTokens.length);
-  let score = 100 - Math.min(extraTokens, 30);
-  if (name.includes(query) || id.includes(query)) {
-    score += 20;
-  }
-  if (params.preferBase) {
-    const editionTokens = new Set(["pro", "max", "mini", "flash", "preview", "turbo"]);
-    const hasEdition = [...searchable].some((token) => editionTokens.has(token));
-    score += hasEdition ? -40 : 20;
-  }
-  return score;
+  return Math.max(
+    0,
+    ...listSemanticQueryVariants(params.query).map((variant) =>
+      scoreQueryVariant({
+        id: params.id,
+        name: params.name,
+        variant,
+        preferBase: params.preferBase,
+      }),
+    ),
+  );
 }
 
 function listOpenRouterCandidates(
@@ -787,6 +965,32 @@ export async function resolveAuthorizedLineNaturalModelAction(params: {
           return {
             kind: "reply",
             text: formatInvalidPendingSelection(pending.locale, pending.candidates.length),
+          };
+        }
+        return {
+          kind: "switch",
+          candidate,
+          locale: pending.locale,
+          pendingSelectionCreatedAt: pending.createdAt,
+        };
+      }
+      if (selectionReply.kind === "selection-query") {
+        const selectionIntent: SwitchIntent = {
+          kind: "switch",
+          query: selectionReply.query,
+          confirmed: false,
+          preferBase: false,
+          locale: pending.locale,
+        };
+        const matching = listOpenRouterCandidates(pending.candidates, selectionIntent);
+        const candidate = resolveUniqueCandidate(matching);
+        if (!candidate) {
+          return {
+            kind: "reply",
+            text:
+              matching.length > 0
+                ? formatAmbiguous(selectionIntent, matching)
+                : formatInvalidPendingSelection(pending.locale, pending.candidates.length),
           };
         }
         return {
