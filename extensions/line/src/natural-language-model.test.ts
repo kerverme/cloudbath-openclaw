@@ -30,6 +30,11 @@ const CFG: OpenClawConfig = {
 const MODELS: OpenRouterUserModel[] = [
   { id: "openai/gpt-5.6-luna", name: "OpenAI: GPT-5.6 Luna", supportsTools: true },
   {
+    id: "openai/gpt-5.6-luna-pro",
+    name: "OpenAI: GPT-5.6 Luna Pro",
+    supportsTools: true,
+  },
+  {
     id: "anthropic/claude-sonnet-4-6",
     name: "Anthropic: Claude Sonnet 4.6",
     supportsTools: true,
@@ -41,6 +46,8 @@ const MODELS: OpenRouterUserModel[] = [
   },
   { id: "google/gemini-3-pro", name: "Google: Gemini 3 Pro", supportsTools: true },
   { id: "future-labs/nebulon-x", name: "Future Labs: Nebulon X", supportsTools: true },
+  { id: "x-ai/grok-4", name: "xAI: Grok 4", supportsTools: true },
+  { id: "deepseek/deepseek-v3", name: "DeepSeek: DeepSeek V3", supportsTools: true },
   { id: "text-labs/plain-chat", name: "Text Labs: Plain Chat", supportsTools: false },
 ];
 
@@ -178,10 +185,91 @@ describe("LINE natural-language model resolution", () => {
   });
 
   it.each([
+    ["สลับโมเดลได้ไหม เป็น Luna Pro", "Luna Pro", "th"],
+    ["ช่วยเปลี่ยนโมเดลให้เป็น Luna Pro หน่อยครับ", "Luna Pro", "th"],
+    ["ขอใช้ luna pro ค่ะ", "luna pro", "th"],
+    ["ลองเปลี่ยนไป luna", "luna", "th"],
+    ["change model to luna", "luna", "en"],
+    ["could you switch the model to Luna Pro, please?", "Luna Pro", "en"],
+    ["switch เป็น GPT", "GPT", "th"],
+    ["Luna Pro สลับ", "Luna Pro", "th"],
+  ])("generalizes conversational model control %s", (text, query, locale) => {
+    expect(parseLineNaturalModelIntent(text)).toMatchObject({
+      kind: "switch",
+      query,
+      locale,
+    });
+  });
+
+  it.each([
+    ["switch to chatgpt", "openai/gpt-5.6-luna"],
+    ["เปลี่ยนเป็น bard", "google/gemini-3-pro"],
+    ["ลองใช้ Claude", "anthropic/claude-sonnet-4-6"],
+    ["switch to Grok", "x-ai/grok-4"],
+    ["ขอใช้ DeepSeek", "deepseek/deepseek-v3"],
+  ])("uses provider and brand synonyms only as catalog matching hints: %s", async (text, id) => {
+    const expected = MODELS.find((model) => model.id === id);
+    expect(expected).toBeDefined();
+    const action = await resolveLineNaturalLanguageModelAction({
+      text,
+      cfg: CFG,
+      ownerAuthorized: true,
+      loadCatalog: async () => [expected!],
+    });
+    expect(action).toMatchObject({
+      kind: "switch",
+      candidate: {
+        id,
+        ref: `openrouter/${id}`,
+        source: "openrouter-user-catalog",
+      },
+    });
+  });
+
+  it("tolerates one mild model-name typo but still selects a catalog ID", async () => {
+    const lunaPro = MODELS.find((model) => model.id === "openai/gpt-5.6-luna-pro")!;
+    const action = await resolveLineNaturalLanguageModelAction({
+      text: "ช่วยเปลี่ยนเป็น Lunna Pro หน่อยครับ",
+      cfg: CFG,
+      ownerAuthorized: true,
+      loadCatalog: async () => [lunaPro],
+    });
+    expect(action).toMatchObject({
+      kind: "switch",
+      candidate: {
+        id: "openai/gpt-5.6-luna-pro",
+        ref: "openrouter/openai/gpt-5.6-luna-pro",
+      },
+    });
+  });
+
+  it("keeps a shorthand family request ambiguous when the catalog has multiple matches", async () => {
+    const action = await resolveLineNaturalLanguageModelAction({
+      text: "switch to GPT",
+      cfg: CFG,
+      ownerAuthorized: true,
+      loadCatalog: async () =>
+        MODELS.filter((model) => model.id.startsWith("openai/gpt-5.6-luna")),
+    });
+    expect(action).toMatchObject({
+      kind: "reply",
+      pendingSelection: {
+        candidates: expect.arrayContaining([
+          expect.objectContaining({ id: "openai/gpt-5.6-luna" }),
+          expect.objectContaining({ id: "openai/gpt-5.6-luna-pro" }),
+        ]),
+      },
+    });
+  });
+
+  it.each([
     "Claude รุ่นไหนเก่ง",
     "Luna Pro ต่างจาก Luna ยังไง",
     "OpenRouter คืออะไร",
     "เปรียบเทียบ Gemini กับ Claude",
+    "luna pro ดีไหม",
+    "ถ้าใช้ luna จะดีไหม",
+    "what do you think about luna pro?",
   ])("leaves model discussion as ordinary chat: %s", (text) => {
     expect(parseLineNaturalModelIntent(text)).toEqual({ kind: "none" });
     expect(isLineNaturalModelControlLike(text)).toBe(false);
@@ -359,8 +447,28 @@ describe("session-scoped pending LINE model selection", () => {
     ["second", 1],
     ["option 2", 1],
     ["choose the second one", 1],
+    ["3", 2],
+    ["ตัวที่หนึ่ง", 0],
+    ["เอาตัวที่สอง", 1],
+    ["อันที่สาม", 2],
+    ["ข้อสอง", 1],
+    ["third", 2],
+    ["the third one", 2],
+    ["fourth", 3],
+    ["fifth", 4],
   ])("parses pending selection reply %s", (text, index) => {
     expect(parseLinePendingModelSelectionReply(text)).toEqual({ kind: "selection", index });
+  });
+
+  it.each([
+    ["เอาตัว pro", "pro"],
+    ["choose Claude", "claude"],
+    ["use the batch", "batch"],
+  ])("parses natural contextual selection %s", (text, query) => {
+    expect(parseLinePendingModelSelectionReply(text)).toEqual({
+      kind: "selection-query",
+      query,
+    });
   });
 
   it.each(["ยกเลิก", "ไม่เอาแล้ว", "cancel", "never mind"])(
@@ -409,6 +517,96 @@ describe("session-scoped pending LINE model selection", () => {
     });
     expect(catalogLoader).toHaveBeenCalledTimes(1);
     expect(JSON.stringify(second)).not.toContain("openrouter/รุ่น 1");
+  });
+
+  it("resolves a natural contextual choice only from stored catalog candidates", async () => {
+    const state = memoryStore({ sessionId: "line-session", updatedAt: 1 });
+    const contextualCandidates: OpenRouterCatalogCandidate[] = [
+      {
+        id: "openai/gpt-5.6-luna",
+        name: "OpenAI: GPT-5.6 Luna",
+        ref: "openrouter/openai/gpt-5.6-luna",
+        score: 100,
+        source: "openrouter-user-catalog",
+        supportsTools: true,
+      },
+      {
+        id: "openai/gpt-5.6-luna-pro",
+        name: "OpenAI: GPT-5.6 Luna Pro",
+        ref: "openrouter/openai/gpt-5.6-luna-pro",
+        score: 100,
+        source: "openrouter-user-catalog",
+        supportsTools: true,
+      },
+      {
+        id: "google/gemini-3-pro",
+        name: "Google: Gemini 3 Pro",
+        ref: "openrouter/google/gemini-3-pro",
+        score: 100,
+        source: "openrouter-user-catalog",
+        supportsTools: true,
+      },
+    ];
+    await saveLinePendingModelSelection({
+      storePath: "sessions.json",
+      sessionKey: "line:pilot",
+      ownerSenderId: "owner-user",
+      candidates: contextualCandidates,
+      locale: "th",
+      store: state.adapter,
+      now: 1_000,
+    });
+    const catalogLoader = vi.fn(async () => MODELS);
+
+    const action = await resolveAuthorizedLineNaturalModelAction({
+      text: "เอาตัว luna pro",
+      cfg: CFG,
+      ctx: lineContext("owner-user"),
+      loadCatalog: catalogLoader,
+      storePath: "sessions.json",
+      sessionKey: "line:pilot",
+      store: state.adapter,
+      now: 2_000,
+    });
+
+    expect(action).toMatchObject({
+      kind: "switch",
+      candidate: {
+        id: "openai/gpt-5.6-luna-pro",
+        ref: "openrouter/openai/gpt-5.6-luna-pro",
+        source: "openrouter-user-catalog",
+      },
+      pendingSelectionCreatedAt: 1_000,
+    });
+    expect(catalogLoader).not.toHaveBeenCalled();
+  });
+
+  it("blocks a non-owner contextual choice without catalog access", async () => {
+    const state = memoryStore({ sessionId: "line-session", updatedAt: 1 });
+    await saveLinePendingModelSelection({
+      storePath: "sessions.json",
+      sessionKey: "line:pilot",
+      ownerSenderId: "owner-user",
+      candidates: lunaCandidates,
+      locale: "th",
+      store: state.adapter,
+      now: 1_000,
+    });
+    const catalogLoader = vi.fn(async () => MODELS);
+
+    const action = await resolveAuthorizedLineNaturalModelAction({
+      text: "เอาตัว pro",
+      cfg: CFG,
+      ctx: lineContext("ordinary-member"),
+      loadCatalog: catalogLoader,
+      storePath: "sessions.json",
+      sessionKey: "line:pilot",
+      store: state.adapter,
+      now: 2_000,
+    });
+
+    expect(action).toEqual({ kind: "blocked" });
+    expect(catalogLoader).not.toHaveBeenCalled();
   });
 
   it("clears pending selection on cancellation without switching", async () => {
