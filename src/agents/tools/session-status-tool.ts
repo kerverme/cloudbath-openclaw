@@ -403,6 +403,8 @@ export function createSessionStatusTool(opts?: {
   sandboxed?: boolean;
   activeModelProvider?: string;
   activeModelId?: string;
+  /** Whether this trusted inbound context may mutate the session model. */
+  modelMutationAuthorized?: boolean;
   /** Active live-run route, kept separate from the persisted/origin delivery route. */
   activeDeliveryContext?: DeliveryContext;
 }): AnyAgentTool {
@@ -414,6 +416,10 @@ export function createSessionStatusTool(opts?: {
     parameters: SessionStatusToolSchema,
     execute: async (_toolCallId, args) => {
       const params = args as Record<string, unknown>;
+      const modelRaw = readStringParam(params, "model");
+      if (typeof modelRaw === "string" && opts?.modelMutationAuthorized === false) {
+        throw new Error("Session model changes require an authorized owner.");
+      }
       const changesSince = readNonNegativeIntegerParam(params, "changesSince");
       const cfg = opts?.config ?? getRuntimeConfig();
       const { mainKey, alias, effectiveRequesterKey } = resolveSandboxedSessionToolContext({
@@ -696,7 +702,6 @@ export function createSessionStatusTool(opts?: {
       }
 
       const configured = resolveDefaultModelForAgent({ cfg, agentId });
-      const modelRaw = readStringParam(params, "model");
       let changedModel = false;
       if (typeof modelRaw === "string") {
         const selection = await resolveModelOverride({
