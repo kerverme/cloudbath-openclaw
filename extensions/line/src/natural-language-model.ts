@@ -258,7 +258,6 @@ export function isLineNaturalModelControlLike(text: string): boolean {
   return asksCurrentModel || (hasExplicitControlSubject && hasSwitchVerb);
 }
 
-
 export function parseLinePendingModelSelectionReply(text: string): LinePendingModelSelectionReply {
   const normalized = text.trim().toLocaleLowerCase("en-US").replace(/\s+/gu, " ");
   if (!normalized) {
@@ -269,13 +268,17 @@ export function parseLinePendingModelSelectionReply(text: string): LinePendingMo
   }
 
   const numeric = normalized.match(
-    /^(?:(?:เลือก|เอา|ใช้)(?:\s*(?:รุ่น|ตัว|อัน))?|(?:รุ่น|ตัว|อัน)(?:ที่)?|option|choose|use)\s*)?(\d+)$/iu,
+    /^(?:(?:เลือก|เอา|ใช้)(?:\s*(?:รุ่น|ตัว|อัน))?\s*|(?:รุ่น|ตัว|อัน)(?:ที่)?\s*|(?:option|choose|use)\s*)?(\d+)$/iu,
   );
   if (numeric?.[1]) {
     return { kind: "selection", index: Number.parseInt(numeric[1], 10) - 1 };
   }
 
-  if (/^(?:ตัวแรก|อันแรก|เอาตัวแรก|เลือกตัวแรก|first|the first one|choose the first one)$/iu.test(normalized)) {
+  if (
+    /^(?:ตัวแรก|อันแรก|เอาตัวแรก|เลือกตัวแรก|first|the first one|choose the first one)$/iu.test(
+      normalized,
+    )
+  ) {
     return { kind: "selection", index: 0 };
   }
   if (
@@ -313,9 +316,7 @@ function parsePendingCandidate(value: unknown): OpenRouterCatalogCandidate | nul
     ref,
     score,
     source: "openrouter-user-catalog",
-    ...(candidate.supportsTools === undefined
-      ? {}
-      : { supportsTools: candidate.supportsTools }),
+    ...(candidate.supportsTools === undefined ? {} : { supportsTools: candidate.supportsTools }),
   };
 }
 
@@ -418,10 +419,7 @@ export async function clearLinePendingModelSelection(params: {
   const updated = await store.update(params.storePath, params.sessionKey, (entry) => {
     const record = entry as unknown as Record<string, unknown>;
     const pending = parsePendingSelection(record[LINE_PENDING_MODEL_SELECTION_FIELD]);
-    if (
-      params.expectedCreatedAt === undefined ||
-      pending?.createdAt === params.expectedCreatedAt
-    ) {
+    if (params.expectedCreatedAt === undefined || pending?.createdAt === params.expectedCreatedAt) {
       delete record[LINE_PENDING_MODEL_SELECTION_FIELD];
       entry.updatedAt = Date.now();
     }
@@ -439,10 +437,7 @@ function formatPendingSelectionExpired(locale: "en" | "th"): string {
     : "Those model choices expired. Please request the model switch again.";
 }
 
-function formatInvalidPendingSelection(
-  locale: "en" | "th",
-  candidateCount: number,
-): string {
+function formatInvalidPendingSelection(locale: "en" | "th", candidateCount: number): string {
   return locale === "th"
     ? `กรุณาเลือกหมายเลข 1 ถึง ${candidateCount}`
     : `Please choose a number from 1 to ${candidateCount}.`;
@@ -768,8 +763,7 @@ export async function resolveAuthorizedLineNaturalModelAction(params: {
 
   if (pending) {
     const freshIntent = parseLineNaturalModelIntent(params.text);
-    const freshControl =
-      freshIntent.kind !== "none" || isLineNaturalModelControlLike(params.text);
+    const freshControl = freshIntent.kind !== "none" || isLineNaturalModelControlLike(params.text);
     if (selectionReply.kind !== "none" || freshControl) {
       const authorization = resolveOwnerAuthorization(params);
       if (
