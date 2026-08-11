@@ -36,7 +36,9 @@ function ownerTool(fetchImpl = vi.fn(async () => catalogResponse())) {
   });
 }
 
-function readJsonResult(\n  result: Awaited<ReturnType<NonNullable<ReturnType<typeof ownerTool>>["execute"]>>,\n) {
+function readJsonResult(
+  result: Awaited<ReturnType<NonNullable<ReturnType<typeof ownerTool>>["execute"]>>,
+) {
   const first = result.content[0];
   if (!first || first.type !== "text") {
     throw new Error("missing JSON tool result");
