@@ -136,9 +136,7 @@ describe("LINE OpenRouter account catalog adapter", () => {
 describe("OpenRouter account catalog transport", () => {
   it("uses the authenticated account endpoint and never returns raw authorization data", async () => {
     const fetchImpl = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
-      expect(init?.headers).toEqual(
-        expect.objectContaining({ Authorization: `Bearer ${SECRET}` }),
-      );
+      expect(init?.headers).toEqual(expect.objectContaining({ Authorization: `Bearer ${SECRET}` }));
       return catalogResponse();
     });
     const models = await loadOpenRouterAccountModels({ apiKey: SECRET, fetchImpl });
