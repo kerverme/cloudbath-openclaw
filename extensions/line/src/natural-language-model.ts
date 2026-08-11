@@ -153,7 +153,7 @@ function stripLeadingPoliteness(value: string): string {
 function stripTrailingPoliteness(value: string): string {
   return value
     .replace(/\s*(?:ได้ไหม|ได้มั้ย|ได้หรือไม่)\s*$/iu, "")
-    .replace(/\s+(?:(?:แทน|หน่อย|ที|ครับ|ค่ะ|คะ|นะ|please)\s*)+$/iu, "")
+    .replace(/(?:^|\s+)(?:(?:แทน|หน่อย|ที|ครับ|ค่ะ|คะ|นะ|please)\s*)+$/iu, "")
     .trim();
 }
 
