@@ -146,10 +146,7 @@ function normalizeControlText(value: string): string {
 
 function stripLeadingPoliteness(value: string): string {
   return value
-    .replace(
-      /^(?:(?:ช่วย|ขอรบกวน|รบกวน|please|could\s+you|can\s+you|would\s+you)\s*)+/iu,
-      "",
-    )
+    .replace(/^(?:(?:ช่วย|ขอรบกวน|รบกวน|please|could\s+you|can\s+you|would\s+you)\s*)+/iu, "")
     .trim();
 }
 
@@ -216,14 +213,13 @@ function isModelDiscussion(text: string): boolean {
   return (
     /(?:ดีไหม|ดีหรือเปล่า|น่าใช้ไหม|เป็นยังไง|ต่างกัน(?:ยังไง|อย่างไร)?|เปรียบเทียบ|รุ่นไหนเก่ง|what\s+do\s+you\s+think|how\s+(?:is|does|do).*(?:compare|different)|which\s+.*\s+better)/iu.test(
       normalized,
-    ) ||
-    /^(?:ถ้า|if\s).*(?:ใช้|use).*(?:ดีไหม|ดีหรือเปล่า|would|should|better)/iu.test(normalized)
+    ) || /^(?:ถ้า|if\s).*(?:ใช้|use).*(?:ดีไหม|ดีหรือเปล่า|would|should|better)/iu.test(normalized)
   );
 }
 
 function extractSwitchQuery(text: string): string | null {
   const change = text.match(
-    /^(?:(?:อยาก\s*)?ลอง\s*|อยาก\s*|ขอ\s*)?(?:เปลี่ยน|สลับ)(?:กลับ)?\s*(?:(?:โมเดล|ตัว\s*AI)\s*)?(?:ให้\s*)?(?:(?:ไป|มา)\s*)?(?:(?:ใช้|เป็น|to)\s*)?(?:(?:ได้ไหม|ได้มั้ย|ได้หรือไม่)\s*)?(?:(?:เป็น|to)\s*)?(.+)$/iu,
+    /^(?:(?:อยาก\s*)?ลอง\s*|อยาก\s*|ขอ\s*)?(?:เปลี่ยน|สลับ)(?:กลับ)?\s*(?:(?:โมเดล|ตัว\s*AI|model)\s*)?(?:ให้\s*)?(?:(?:ไป|มา)\s*)?(?:(?:ใช้|เป็น|to)\s*)?(?:(?:ได้ไหม|ได้มั้ย|ได้หรือไม่)\s*)?(?:(?:เป็น|to)\s*)?(.+)$/iu,
   );
   if (change?.[1]) {
     return change[1];
@@ -237,15 +233,13 @@ function extractSwitchQuery(text: string): string | null {
   }
 
   const direct = text.match(
-    /^(?:ขอ\s*ใช้|ลอง\s*ใช้|ใช้|เอา\s*เป็น|กลับ(?:ไป|มา)(?:ใช้)?|use|try(?:\s+using)?)\s+(.+)$/iu,
+    /^(?:(?:ขอ\s*ใช้|ลอง\s*ใช้|ใช้|เอา\s*เป็น|กลับ(?:ไป|มา)(?:ใช้)?)\s*|(?:use|try(?:\s+using)?)\s+)(.+)$/iu,
   );
   if (direct?.[1]) {
     return direct[1];
   }
 
-  const reversed = text.match(
-    /^(.+?)\s+(?:เปลี่ยน|สลับ|switch|change)(?:\s*(?:หน่อย|ที|please))?$/iu,
-  );
+  const reversed = text.match(/^(.+?)\s+(?:เปลี่ยน|สลับ|switch|change)(?:\s*(?:หน่อย|ที|please))?$/iu);
   return reversed?.[1] ?? null;
 }
 
@@ -319,9 +313,7 @@ export function isLineNaturalModelControlLike(text: string): boolean {
   return asksCurrentModel || (hasExplicitControlSubject && hasSwitchVerb);
 }
 
-export function parseLinePendingModelSelectionReply(
-  text: string,
-): LinePendingModelSelectionReply {
+export function parseLinePendingModelSelectionReply(text: string): LinePendingModelSelectionReply {
   const normalized = normalizeControlText(text).toLocaleLowerCase("en-US");
   if (!normalized) {
     return { kind: "none" };
@@ -360,11 +352,7 @@ export function parseLinePendingModelSelectionReply(
     return { kind: "selection", index: ordinalIndex };
   }
 
-  if (
-    hasSelectionVerb &&
-    selector &&
-    !/(?:ดีไหม|ต่างกัน|which|what|how|\?)$/iu.test(selector)
-  ) {
+  if (hasSelectionVerb && selector && !/(?:ดีไหม|ต่างกัน|which|what|how|\?)$/iu.test(selector)) {
     selector = stripTrailingPoliteness(selector);
     if (selector) {
       return { kind: "selection-query", query: selector };
@@ -721,8 +709,7 @@ function scoreQueryVariant(params: {
   }
 
   const extraTokens = Math.max(0, searchableTokens.length - queryTokens.length);
-  let score =
-    100 - Math.min(extraTokens, 30) - params.variant.penalty - fuzzyMatches * 15;
+  let score = 100 - Math.min(extraTokens, 30) - params.variant.penalty - fuzzyMatches * 15;
   if (name.includes(query) || id.includes(query)) {
     score += 20;
   }
