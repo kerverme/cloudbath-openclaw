@@ -643,7 +643,6 @@ describe("handleLineWebhookEvents", () => {
     expect(processMessage).not.toHaveBeenCalled();
   });
 
-
   it("resolves the production follow-up from pending catalog state without a second fuzzy search", async () => {
     enableVerifiedOwnerNaturalModelAuthorization();
     mockMessageContextForSender("owner-user");
