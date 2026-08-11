@@ -5,6 +5,10 @@ import {
   type OpenClawPluginApi,
 } from "openclaw/plugin-sdk/channel-entry-contract";
 import { createLazyRuntimeModule } from "openclaw/plugin-sdk/lazy-runtime";
+import {
+  createLineModelCatalogTool,
+  LINE_MODEL_CATALOG_TOOL_NAME,
+} from "./src/model-catalog-tool.js";
 
 type RegisteredLineCardCommand = OpenClawPluginCommandDefinition;
 
@@ -39,6 +43,19 @@ export default defineBundledChannelEntry({
     exportName: "setLineRuntime",
   },
   registerFull(api) {
+    api.registerTool(
+      (ctx) =>
+        createLineModelCatalogTool({
+          messageChannel: ctx.messageChannel,
+          senderIsOwner: ctx.senderIsOwner,
+          resolveApiKey: ctx.resolveApiKeyForProvider,
+        }),
+      {
+        names: [LINE_MODEL_CATALOG_TOOL_NAME],
+        optional: true,
+      },
+    );
+
     const loadLineCardCommand = createLineCardCommandLoader(api);
     api.registerCommand({
       name: "card",

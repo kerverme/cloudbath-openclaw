@@ -6,13 +6,28 @@
   "activation": {
     "onStartup": false
   },
-  "channels": ["line"],
+  "channels": [
+    "line"
+  ],
   "channelEnvVars": {
-    "line": ["LINE_CHANNEL_ACCESS_TOKEN", "LINE_CHANNEL_SECRET"]
+    "line": [
+      "LINE_CHANNEL_ACCESS_TOKEN",
+      "LINE_CHANNEL_SECRET"
+    ]
   },
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
     "properties": {}
+  },
+  "contracts": {
+    "tools": [
+      "openrouter_account_models"
+    ]
+  },
+  "toolMetadata": {
+    "openrouter_account_models": {
+      "optional": true
+    }
   }
 }

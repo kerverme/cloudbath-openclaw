@@ -620,6 +620,8 @@ export function createOpenClawTools(
       sandboxed: options?.sandboxed,
       activeModelProvider: options?.modelProvider,
       activeModelId: options?.modelId,
+      modelMutationAuthorized:
+        options?.agentChannel === "line" ? options.senderIsOwner === true : true,
       activeDeliveryContext: {
         channel: options?.agentChannel,
         to: options?.currentChannelId ?? options?.agentTo,

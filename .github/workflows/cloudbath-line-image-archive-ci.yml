@@ -47,6 +47,15 @@ jobs:
           use-actions-cache: "true"
           save-actions-cache: "true"
 
+      - name: Check official LINE shrinkwrap
+        if: steps.dependencies.outcome == 'success' && !cancelled()
+        run: |
+          if ! node scripts/generate-npm-shrinkwrap.mjs --check --package-dir extensions/line; then
+            node scripts/generate-npm-shrinkwrap.mjs --package-dir extensions/line
+            git --no-pager diff -- extensions/line/npm-shrinkwrap.json
+            exit 1
+          fi
+
       - name: Run focused Vitest suite
         if: steps.dependencies.outcome == 'success' && !cancelled()
         run: |
@@ -99,7 +108,8 @@ jobs:
             extensions/line/src/outbound-media-staging.test.ts \
             extensions/line/src/outbound-media.test.ts \
             extensions/line/src/monitor.lifecycle.test.ts \
-            extensions/line/src/natural-language-model.test.ts \
+            extensions/line/src/model-catalog-tool.test.ts \
+            src/agents/tools/session-status-tool.line-owner-auth.test.ts \
             extensions/line/src/session-route.test.ts \
             extensions/line/src/send.test.ts \
             extensions/line/src/signature.test.ts \
@@ -124,8 +134,12 @@ jobs:
           paths=(
             extensions/cloudbath-line-image-archive
             extensions/line/src/bot-handlers.ts
-            extensions/line/src/natural-language-model.ts
-            extensions/line/src/natural-language-model.test.ts
+            extensions/line/src/bot-handlers.test.ts
+            extensions/line/src/model-catalog-tool.ts
+            extensions/line/src/model-catalog-tool.test.ts
+            src/agents/tools/session-status-tool.ts
+            src/agents/tools/session-status-tool.line-owner-auth.test.ts
+            src/agents/openclaw-tools.ts
             extensions/line/src/outbound-media-staging.ts
             extensions/line/src/outbound-media-staging.test.ts
             extensions/line/src/outbound-media.ts
@@ -155,8 +169,12 @@ jobs:
           node scripts/run-oxlint.mjs \
             --tsconfig config/tsconfig/oxlint.extensions.json \
             extensions/line/src/bot-handlers.ts \
-            extensions/line/src/natural-language-model.ts \
-            extensions/line/src/natural-language-model.test.ts \
+            extensions/line/src/bot-handlers.test.ts \
+            extensions/line/src/model-catalog-tool.ts \
+            extensions/line/src/model-catalog-tool.test.ts \
+            src/agents/tools/session-status-tool.ts \
+            src/agents/tools/session-status-tool.line-owner-auth.test.ts \
+            src/agents/openclaw-tools.ts \
             extensions/line/src/outbound-media-staging.ts \
             extensions/line/src/outbound-media-staging.test.ts \
             extensions/line/src/outbound-media.ts \
@@ -207,8 +225,11 @@ jobs:
               test -f /app/dist/extensions/line/openclaw.plugin.json
               test -f /app/dist/extensions/line/package.json
               test -f /app/extensions/line/src/outbound-media-staging.ts
-              test -f /app/extensions/line/src/natural-language-model.ts
-              grep -q resolveAuthorizedLineNaturalModelAction /app/extensions/line/src/bot-handlers.ts
+              test -f /app/extensions/line/src/model-catalog-tool.ts
+              test ! -f /app/extensions/line/src/natural-language-model.ts
+              grep -q openrouter_account_models /app/extensions/line/src/model-catalog-tool.ts
+              ! grep -q resolveAuthorizedLineNaturalModelAction /app/extensions/line/src/bot-handlers.ts
+              grep -R -q "Session model changes require an authorized owner" /app/dist
               grep -q stageLineOutboundMessageImages /app/extensions/line/src/send.ts
               node --input-type=module -e "await import(\"@aws-sdk/client-s3\")"
               node --input-type=module -e "await import(\"@aws-sdk/s3-request-presigner\")"
