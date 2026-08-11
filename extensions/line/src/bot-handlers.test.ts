@@ -401,38 +401,41 @@ describe("handleLineWebhookEvents", () => {
     ["Grok switch", "เปลี่ยนเป็น Grok"],
     ["unseen catalog family", "ใช้ Nebulon X"],
     ["model discussion", "Claude กับ Gemini ต่างกันยังไง"],
-  ])("routes %s through the normal main-agent path without pre-agent rewriting", async (_label, text) => {
-    mockMessageContextForSender("owner-user");
-    const processMessage = vi.fn();
-    const event = createTestMessageEvent({
-      message: { id: `main-agent-${_label}`, type: "text", text, quoteToken: "quote-token" },
-      source: { type: "group", groupId: "group-1", userId: "owner-user" },
-      webhookEventId: `main-agent-${_label}`,
-    });
+  ])(
+    "routes %s through the normal main-agent path without pre-agent rewriting",
+    async (_label, text) => {
+      mockMessageContextForSender("owner-user");
+      const processMessage = vi.fn();
+      const event = createTestMessageEvent({
+        message: { id: `main-agent-${_label}`, type: "text", text, quoteToken: "quote-token" },
+        source: { type: "group", groupId: "group-1", userId: "owner-user" },
+        webhookEventId: `main-agent-${_label}`,
+      });
 
-    await handleLineWebhookEvents(
-      [event],
-      createLineWebhookTestContext({
-        processMessage,
-        groupPolicy: "open",
-        requireMention: false,
-      }),
-    );
+      await handleLineWebhookEvents(
+        [event],
+        createLineWebhookTestContext({
+          processMessage,
+          groupPolicy: "open",
+          requireMention: false,
+        }),
+      );
 
-    expect(buildLineMessageContextMock).toHaveBeenCalledWith(
-      expect.objectContaining({
-        event: expect.objectContaining({ message: expect.objectContaining({ text }) }),
-        commandAuthorized: false,
-      }),
-    );
-    expect(processMessage).toHaveBeenCalledTimes(1);
-    expect(processMessage).toHaveBeenCalledWith(
-      expect.objectContaining({
-        ctxPayload: expect.not.objectContaining({ CommandBody: expect.anything() }),
-      }),
-    );
-    expect(replyMessageLineMock).not.toHaveBeenCalled();
-  });
+      expect(buildLineMessageContextMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          event: expect.objectContaining({ message: expect.objectContaining({ text }) }),
+          commandAuthorized: false,
+        }),
+      );
+      expect(processMessage).toHaveBeenCalledTimes(1);
+      expect(processMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          ctxPayload: expect.not.objectContaining({ CommandBody: expect.anything() }),
+        }),
+      );
+      expect(replyMessageLineMock).not.toHaveBeenCalled();
+    },
+  );
 
   it("leaves slash /model authorization on the existing ingress path", async () => {
     mockMessageContextForSender("owner-user");
