@@ -218,7 +218,7 @@ jobs:
               test ! -f /app/extensions/line/src/natural-language-model.ts
               grep -q openrouter_account_models /app/extensions/line/src/model-catalog-tool.ts
               ! grep -q resolveAuthorizedLineNaturalModelAction /app/extensions/line/src/bot-handlers.ts
-              grep -q "modelMutationAuthorized" /app/dist/agents/tools/session-status-tool.js
+              grep -R -q "Session model changes require an authorized owner" /app/dist
               grep -q stageLineOutboundMessageImages /app/extensions/line/src/send.ts
               node --input-type=module -e "await import(\"@aws-sdk/client-s3\")"
               node --input-type=module -e "await import(\"@aws-sdk/s3-request-presigner\")"
