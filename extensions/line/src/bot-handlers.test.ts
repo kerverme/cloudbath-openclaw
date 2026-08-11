@@ -1,7 +1,9 @@
 // Line tests cover bot handlers plugin behavior.
 import type { webhook } from "@line/bot-sdk";
+import type { SessionEntry } from "openclaw/plugin-sdk/model-session-runtime";
 import type { HistoryEntry } from "openclaw/plugin-sdk/reply-history";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import type { LineNaturalModelSessionStore } from "./natural-language-model.js";
 import type { LineAccountConfig } from "./types.js";
 
 type MessageEvent = webhook.MessageEvent;
@@ -210,6 +212,23 @@ const naturalModelSwitchMock = vi.fn(async () => ({
   activeRef: NATURAL_MODEL_REF,
 }));
 
+function createNaturalModelSessionStore(): {
+  adapter: LineNaturalModelSessionStore;
+  current: () => SessionEntry;
+} {
+  const entry: SessionEntry = { sessionId: "line-session", updatedAt: 1 };
+  return {
+    adapter: {
+      read: async () => structuredClone(entry),
+      update: async (_path, _key, mutate) => {
+        mutate(entry);
+        return structuredClone(entry);
+      },
+    },
+    current: () => structuredClone(entry),
+  };
+}
+
 function mockMessageContextForSender(senderId: string) {
   buildLineMessageContextMock.mockImplementationOnce(async () => ({
     ctxPayload: {
@@ -300,6 +319,7 @@ function createLineWebhookTestContext(params: {
   accessGroups?: Record<string, { type: "message.senders"; members: Record<string, string[]> }>;
   naturalModelCatalogLoader?: LineWebhookContext["naturalModelCatalogLoader"];
   naturalModelSwitch?: LineWebhookContext["naturalModelSwitch"];
+  naturalModelSessionStore?: LineWebhookContext["naturalModelSessionStore"];
 }): Parameters<typeof handleLineWebhookEvents>[1] {
   const allowFrom = params.allowFrom ?? (params.dmPolicy === "open" ? ["*"] : undefined);
   const lineConfig = {
@@ -332,6 +352,9 @@ function createLineWebhookTestContext(params: {
     naturalModelCatalogLoader:
       params.naturalModelCatalogLoader ?? (async () => naturalModelCatalog()),
     naturalModelSwitch: params.naturalModelSwitch ?? naturalModelSwitchMock,
+    ...(params.naturalModelSessionStore
+      ? { naturalModelSessionStore: params.naturalModelSessionStore }
+      : {}),
     ...(params.groupHistories ? { groupHistories: params.groupHistories } : {}),
     ...(params.replayCache ? { replayCache: params.replayCache } : {}),
   };
@@ -618,6 +641,225 @@ describe("handleLineWebhookEvents", () => {
       expect.any(Object),
     );
     expect(processMessage).not.toHaveBeenCalled();
+  });
+
+
+  it("resolves the production follow-up from pending catalog state without a second fuzzy search", async () => {
+    enableVerifiedOwnerNaturalModelAuthorization();
+    mockMessageContextForSender("owner-user");
+    mockMessageContextForSender("owner-user");
+    replyMessageLineMock.mockResolvedValue(undefined);
+    const processMessage = vi.fn();
+    const catalogLoader = vi.fn(async () => [
+      {
+        id: "openai/gpt-5.6-luna-pro",
+        name: "OpenAI: GPT-5.6 Luna Pro",
+        supportsTools: true,
+      },
+      {
+        id: "openai/gpt-5.6-luna-pro:batch",
+        name: "OpenAI: GPT-5.6 Luna Pro (batch)",
+        supportsTools: true,
+      },
+    ]);
+    const sessionStore = createNaturalModelSessionStore();
+    let activeRef: string | undefined;
+    const switchModel = vi.fn(async (params: { candidate: { ref: string } }) => {
+      activeRef = params.candidate.ref;
+      return { ok: true as const, activeRef };
+    });
+    const context = createLineWebhookTestContext({
+      processMessage,
+      groupPolicy: "open",
+      requireMention: false,
+      naturalModelCatalogLoader: catalogLoader,
+      naturalModelSwitch: switchModel,
+      naturalModelSessionStore: sessionStore.adapter,
+    });
+
+    await handleLineWebhookEvents(
+      [
+        createTestMessageEvent({
+          message: {
+            id: "pending-production-request",
+            type: "text",
+            text: "สลับไปใช้ luna pro",
+            quoteToken: "quote-token",
+          },
+          source: { type: "group", groupId: "group-1", userId: "owner-user" },
+          webhookEventId: "pending-production-request",
+        }),
+      ],
+      context,
+    );
+    await handleLineWebhookEvents(
+      [
+        createTestMessageEvent({
+          message: {
+            id: "pending-production-choice",
+            type: "text",
+            text: "ใช้รุ่น 1",
+            quoteToken: "quote-token",
+          },
+          source: { type: "group", groupId: "group-1", userId: "owner-user" },
+          webhookEventId: "pending-production-choice",
+        }),
+      ],
+      context,
+    );
+
+    expect(catalogLoader).toHaveBeenCalledTimes(1);
+    expect(switchModel).toHaveBeenCalledTimes(1);
+    expect(switchModel).toHaveBeenCalledWith(
+      expect.objectContaining({
+        candidate: expect.objectContaining({
+          id: "openai/gpt-5.6-luna-pro",
+          ref: "openrouter/openai/gpt-5.6-luna-pro",
+          source: "openrouter-user-catalog",
+        }),
+      }),
+    );
+    expect(activeRef).toBe("openrouter/openai/gpt-5.6-luna-pro");
+    expect(replyMessageLineMock).toHaveBeenLastCalledWith(
+      "reply-token",
+      [
+        expect.objectContaining({
+          type: "text",
+          text: "เปลี่ยนเป็น OpenAI: GPT-5.6 Luna Pro แล้วครับ",
+        }),
+      ],
+      expect.any(Object),
+    );
+    expect(processMessage).not.toHaveBeenCalled();
+    expect(
+      (sessionStore.current() as unknown as Record<string, unknown>).linePendingModelSelection,
+    ).toBeUndefined();
+  });
+
+  it("does not let another group member answer the owner's pending choice", async () => {
+    enableVerifiedOwnerNaturalModelAuthorization();
+    mockMessageContextForSender("owner-user");
+    mockMessageContextForSender("ordinary-member");
+    replyMessageLineMock.mockResolvedValue(undefined);
+    const processMessage = vi.fn();
+    const catalogLoader = vi.fn(async () => [
+      {
+        id: "openai/gpt-5.6-luna-pro",
+        name: "OpenAI: GPT-5.6 Luna Pro",
+        supportsTools: true,
+      },
+      {
+        id: "openai/gpt-5.6-luna-pro:batch",
+        name: "OpenAI: GPT-5.6 Luna Pro (batch)",
+        supportsTools: true,
+      },
+    ]);
+    const sessionStore = createNaturalModelSessionStore();
+    const context = createLineWebhookTestContext({
+      processMessage,
+      groupPolicy: "open",
+      requireMention: false,
+      naturalModelCatalogLoader: catalogLoader,
+      naturalModelSessionStore: sessionStore.adapter,
+    });
+
+    await handleLineWebhookEvents(
+      [
+        createTestMessageEvent({
+          message: {
+            id: "pending-owner-request",
+            type: "text",
+            text: "สลับไปใช้ luna pro",
+            quoteToken: "quote-token",
+          },
+          source: { type: "group", groupId: "group-1", userId: "owner-user" },
+          webhookEventId: "pending-owner-request",
+        }),
+      ],
+      context,
+    );
+    await handleLineWebhookEvents(
+      [
+        createTestMessageEvent({
+          message: { id: "pending-hijack", type: "text", text: "1", quoteToken: "quote-token" },
+          source: { type: "group", groupId: "group-1", userId: "ordinary-member" },
+          webhookEventId: "pending-hijack",
+        }),
+      ],
+      context,
+    );
+
+    expect(catalogLoader).toHaveBeenCalledTimes(1);
+    expect(naturalModelSwitchMock).not.toHaveBeenCalled();
+    expect(processMessage).not.toHaveBeenCalled();
+    expect(
+      (sessionStore.current() as unknown as Record<string, unknown>).linePendingModelSelection,
+    ).toMatchObject({ ownerSenderId: "owner-user" });
+  });
+
+  it("keeps unrelated model discussion on ordinary chat while a choice is pending", async () => {
+    enableVerifiedOwnerNaturalModelAuthorization();
+    mockMessageContextForSender("owner-user");
+    mockMessageContextForSender("owner-user");
+    replyMessageLineMock.mockResolvedValue(undefined);
+    const processMessage = vi.fn();
+    const catalogLoader = vi.fn(async () => [
+      {
+        id: "openai/gpt-5.6-luna-pro",
+        name: "OpenAI: GPT-5.6 Luna Pro",
+        supportsTools: true,
+      },
+      {
+        id: "openai/gpt-5.6-luna-pro:batch",
+        name: "OpenAI: GPT-5.6 Luna Pro (batch)",
+        supportsTools: true,
+      },
+    ]);
+    const sessionStore = createNaturalModelSessionStore();
+    const context = createLineWebhookTestContext({
+      processMessage,
+      groupPolicy: "open",
+      requireMention: false,
+      naturalModelCatalogLoader: catalogLoader,
+      naturalModelSessionStore: sessionStore.adapter,
+    });
+
+    await handleLineWebhookEvents(
+      [
+        createTestMessageEvent({
+          message: {
+            id: "pending-discussion-request",
+            type: "text",
+            text: "สลับไปใช้ luna pro",
+            quoteToken: "quote-token",
+          },
+          source: { type: "group", groupId: "group-1", userId: "owner-user" },
+          webhookEventId: "pending-discussion-request",
+        }),
+      ],
+      context,
+    );
+    await handleLineWebhookEvents(
+      [
+        createTestMessageEvent({
+          message: {
+            id: "pending-discussion",
+            type: "text",
+            text: "Luna Pro ต่างจาก Luna ยังไง",
+            quoteToken: "quote-token",
+          },
+          source: { type: "group", groupId: "group-1", userId: "owner-user" },
+          webhookEventId: "pending-discussion",
+        }),
+      ],
+      context,
+    );
+
+    expect(naturalModelSwitchMock).not.toHaveBeenCalled();
+    expect(processMessage).toHaveBeenCalledTimes(1);
+    expect(
+      (sessionStore.current() as unknown as Record<string, unknown>).linePendingModelSelection,
+    ).toMatchObject({ ownerSenderId: "owner-user" });
   });
 
   it.each([
