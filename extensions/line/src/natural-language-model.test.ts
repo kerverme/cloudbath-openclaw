@@ -248,8 +248,7 @@ describe("LINE natural-language model resolution", () => {
       text: "switch to GPT",
       cfg: CFG,
       ownerAuthorized: true,
-      loadCatalog: async () =>
-        MODELS.filter((model) => model.id.startsWith("openai/gpt-5.6-luna")),
+      loadCatalog: async () => MODELS.filter((model) => model.id.startsWith("openai/gpt-5.6-luna")),
     });
     expect(action).toMatchObject({
       kind: "reply",
