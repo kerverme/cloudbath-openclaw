@@ -12,6 +12,8 @@ const OPENROUTER_PROVIDER = "openrouter";
 const OPENROUTER_USER_MODELS_URL = "https://openrouter.ai/api/v1/models/user";
 const OPENROUTER_CATALOG_TIMEOUT_MS = 10_000;
 const MAX_CLARIFICATION_CHOICES = 5;
+export const LINE_PENDING_MODEL_SELECTION_TTL_MS = 5 * 60 * 1000;
+const LINE_PENDING_MODEL_SELECTION_FIELD = "linePendingModelSelection";
 
 export type OpenRouterUserModel = {
   id: string;
@@ -38,8 +40,16 @@ export type LineNaturalModelAction =
       kind: "switch";
       candidate: OpenRouterCatalogCandidate;
       locale: "en" | "th";
+      pendingSelectionCreatedAt?: number;
     }
-  | { kind: "reply"; text: string };
+  | {
+      kind: "reply";
+      text: string;
+      pendingSelection?: {
+        candidates: OpenRouterCatalogCandidate[];
+        locale: "en" | "th";
+      };
+    };
 
 export type LineNaturalModelSwitchResult =
   | { ok: true; activeRef: string }
@@ -71,6 +81,20 @@ export type LineNaturalModelSessionStore = {
     mutate: (entry: SessionEntry) => void,
   ) => Promise<SessionEntry | undefined>;
 };
+
+export type LinePendingModelSelection = {
+  version: 1;
+  ownerSenderId: string;
+  locale: "en" | "th";
+  candidates: OpenRouterCatalogCandidate[];
+  createdAt: number;
+  expiresAt: number;
+};
+
+export type LinePendingModelSelectionReply =
+  | { kind: "none" }
+  | { kind: "cancel" }
+  | { kind: "selection"; index: number };
 
 const SESSION_SWITCH_FIELDS = [
   "providerOverride",
@@ -232,6 +256,209 @@ export function isLineNaturalModelControlLike(text: string): boolean {
       trimmed,
     );
   return asksCurrentModel || (hasExplicitControlSubject && hasSwitchVerb);
+}
+
+export function parseLinePendingModelSelectionReply(text: string): LinePendingModelSelectionReply {
+  const normalized = text.trim().toLocaleLowerCase("en-US").replace(/\s+/gu, " ");
+  if (!normalized) {
+    return { kind: "none" };
+  }
+  if (/^(?:ยกเลิก|ไม่เอาแล้ว|cancel|never mind)$/iu.test(normalized)) {
+    return { kind: "cancel" };
+  }
+
+  const numeric = normalized.match(
+    /^(?:(?:เลือก|เอา|ใช้)(?:\s*(?:รุ่น|ตัว|อัน))?\s*|(?:รุ่น|ตัว|อัน)(?:ที่)?\s*|(?:option|choose|use)\s*)?(\d+)$/iu,
+  );
+  if (numeric?.[1]) {
+    return { kind: "selection", index: Number.parseInt(numeric[1], 10) - 1 };
+  }
+
+  if (
+    /^(?:ตัวแรก|อันแรก|เอาตัวแรก|เลือกตัวแรก|first|the first one|choose the first one)$/iu.test(
+      normalized,
+    )
+  ) {
+    return { kind: "selection", index: 0 };
+  }
+  if (
+    /^(?:ตัว(?:ที่)?\s*สอง|อัน(?:ที่)?\s*สอง|เอาตัวสอง|เลือกตัวสอง|second|the second one|choose the second one)$/iu.test(
+      normalized,
+    )
+  ) {
+    return { kind: "selection", index: 1 };
+  }
+  return { kind: "none" };
+}
+
+function parsePendingCandidate(value: unknown): OpenRouterCatalogCandidate | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const candidate = value as Partial<OpenRouterCatalogCandidate>;
+  const id = typeof candidate.id === "string" ? candidate.id : "";
+  const name = typeof candidate.name === "string" ? candidate.name : "";
+  const score = typeof candidate.score === "number" ? candidate.score : Number.NaN;
+  const ref = toOpenClawOpenRouterRef(id);
+  if (
+    !ref ||
+    candidate.ref !== ref ||
+    candidate.source !== "openrouter-user-catalog" ||
+    !name.trim() ||
+    !Number.isFinite(score) ||
+    (candidate.supportsTools !== undefined && typeof candidate.supportsTools !== "boolean")
+  ) {
+    return null;
+  }
+  return {
+    id,
+    name,
+    ref,
+    score,
+    source: "openrouter-user-catalog",
+    ...(candidate.supportsTools === undefined ? {} : { supportsTools: candidate.supportsTools }),
+  };
+}
+
+function parsePendingSelection(value: unknown): LinePendingModelSelection | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const pending = value as Partial<LinePendingModelSelection>;
+  if (
+    pending.version !== 1 ||
+    typeof pending.ownerSenderId !== "string" ||
+    !pending.ownerSenderId.trim() ||
+    (pending.locale !== "en" && pending.locale !== "th") ||
+    typeof pending.createdAt !== "number" ||
+    !Number.isFinite(pending.createdAt) ||
+    typeof pending.expiresAt !== "number" ||
+    !Number.isFinite(pending.expiresAt) ||
+    !Array.isArray(pending.candidates) ||
+    pending.candidates.length === 0 ||
+    pending.candidates.length > MAX_CLARIFICATION_CHOICES
+  ) {
+    return null;
+  }
+  const candidates = pending.candidates.map(parsePendingCandidate);
+  if (candidates.some((candidate) => candidate === null)) {
+    return null;
+  }
+  return {
+    version: 1,
+    ownerSenderId: pending.ownerSenderId,
+    locale: pending.locale,
+    candidates: candidates as OpenRouterCatalogCandidate[],
+    createdAt: pending.createdAt,
+    expiresAt: pending.expiresAt,
+  };
+}
+
+function getPendingSelection(entry: SessionEntry | undefined): LinePendingModelSelection | null {
+  if (!entry) {
+    return null;
+  }
+  const record = entry as unknown as Record<string, unknown>;
+  return parsePendingSelection(record[LINE_PENDING_MODEL_SELECTION_FIELD]);
+}
+
+export async function readLinePendingModelSelection(params: {
+  storePath: string;
+  sessionKey: string;
+  store?: LineNaturalModelSessionStore;
+}): Promise<LinePendingModelSelection | null> {
+  const store = params.store ?? defaultSessionStore;
+  return getPendingSelection(await store.read(params.storePath, params.sessionKey));
+}
+
+export async function saveLinePendingModelSelection(params: {
+  storePath: string;
+  sessionKey: string;
+  ownerSenderId: string;
+  candidates: OpenRouterCatalogCandidate[];
+  locale: "en" | "th";
+  store?: LineNaturalModelSessionStore;
+  now?: number;
+  ttlMs?: number;
+}): Promise<LinePendingModelSelection | null> {
+  const candidates = params.candidates
+    .slice(0, MAX_CLARIFICATION_CHOICES)
+    .map(parsePendingCandidate);
+  if (
+    !params.ownerSenderId.trim() ||
+    candidates.length === 0 ||
+    candidates.some((candidate) => candidate === null)
+  ) {
+    return null;
+  }
+  const createdAt = params.now ?? Date.now();
+  const pending: LinePendingModelSelection = {
+    version: 1,
+    ownerSenderId: params.ownerSenderId,
+    locale: params.locale,
+    candidates: candidates as OpenRouterCatalogCandidate[],
+    createdAt,
+    expiresAt: createdAt + (params.ttlMs ?? LINE_PENDING_MODEL_SELECTION_TTL_MS),
+  };
+  const store = params.store ?? defaultSessionStore;
+  const updated = await store.update(params.storePath, params.sessionKey, (entry) => {
+    const record = entry as unknown as Record<string, unknown>;
+    record[LINE_PENDING_MODEL_SELECTION_FIELD] = structuredClone(pending);
+    entry.updatedAt = Date.now();
+  });
+  return getPendingSelection(updated);
+}
+
+export async function clearLinePendingModelSelection(params: {
+  storePath: string;
+  sessionKey: string;
+  store?: LineNaturalModelSessionStore;
+  expectedCreatedAt?: number;
+}): Promise<boolean> {
+  const store = params.store ?? defaultSessionStore;
+  const updated = await store.update(params.storePath, params.sessionKey, (entry) => {
+    const record = entry as unknown as Record<string, unknown>;
+    const pending = parsePendingSelection(record[LINE_PENDING_MODEL_SELECTION_FIELD]);
+    if (params.expectedCreatedAt === undefined || pending?.createdAt === params.expectedCreatedAt) {
+      delete record[LINE_PENDING_MODEL_SELECTION_FIELD];
+      entry.updatedAt = Date.now();
+    }
+  });
+  return getPendingSelection(updated) === null;
+}
+
+function formatPendingSelectionCancelled(locale: "en" | "th"): string {
+  return locale === "th" ? "ยกเลิกการเลือกโมเดลแล้วครับ" : "Model selection cancelled.";
+}
+
+function formatPendingSelectionExpired(locale: "en" | "th"): string {
+  return locale === "th"
+    ? "ตัวเลือกโมเดลหมดอายุแล้ว กรุณาขอเปลี่ยนโมเดลอีกครั้ง"
+    : "Those model choices expired. Please request the model switch again.";
+}
+
+function formatInvalidPendingSelection(locale: "en" | "th", candidateCount: number): string {
+  return locale === "th"
+    ? `กรุณาเลือกหมายเลข 1 ถึง ${candidateCount}`
+    : `Please choose a number from 1 to ${candidateCount}.`;
+}
+
+function resolveOwnerAuthorization(params: {
+  ctx: Parameters<typeof resolveCommandAuthorization>[0]["ctx"];
+  cfg: OpenClawConfig;
+}): { senderIsOwner: boolean; isAuthorizedSender: boolean } {
+  return resolveCommandAuthorization({
+    ctx: params.ctx,
+    cfg: params.cfg,
+    commandAuthorized: true,
+  });
+}
+
+function resolveContextSenderId(
+  ctx: Parameters<typeof resolveCommandAuthorization>[0]["ctx"],
+): string {
+  const senderId = (ctx as { SenderId?: unknown }).SenderId;
+  return typeof senderId === "string" ? senderId.trim() : "";
 }
 
 function formatUnparsedModelControl(text: string): string {
@@ -477,7 +704,12 @@ export async function resolveLineNaturalLanguageModelAction(params: {
   }
   const selected = resolveUniqueCandidate(candidates);
   if (!selected) {
-    return { kind: "reply", text: formatAmbiguous(intent, candidates) };
+    const shown = candidates.slice(0, MAX_CLARIFICATION_CHOICES);
+    return {
+      kind: "reply",
+      text: formatAmbiguous(intent, candidates),
+      pendingSelection: { candidates: shown, locale: intent.locale },
+    };
   }
   if (selected.supportsTools === false && !intent.confirmed) {
     return { kind: "reply", text: formatCapabilityWarning(intent, selected) };
@@ -491,31 +723,140 @@ export async function resolveAuthorizedLineNaturalModelAction(params: {
   agentId?: string;
   ctx: Parameters<typeof resolveCommandAuthorization>[0]["ctx"];
   loadCatalog?: OpenRouterCatalogLoader;
+  storePath?: string;
+  sessionKey?: string;
+  store?: LineNaturalModelSessionStore;
+  now?: number;
 }): Promise<LineNaturalModelAction> {
+  const now = params.now ?? Date.now();
+  const senderId = resolveContextSenderId(params.ctx);
+  const selectionReply = parseLinePendingModelSelectionReply(params.text);
+  let pending =
+    params.storePath && params.sessionKey
+      ? await readLinePendingModelSelection({
+          storePath: params.storePath,
+          sessionKey: params.sessionKey,
+          store: params.store,
+        })
+      : null;
+
+  if (pending && pending.expiresAt <= now) {
+    await clearLinePendingModelSelection({
+      storePath: params.storePath!,
+      sessionKey: params.sessionKey!,
+      store: params.store,
+      expectedCreatedAt: pending.createdAt,
+    });
+    if (selectionReply.kind !== "none") {
+      const authorization = resolveOwnerAuthorization(params);
+      if (
+        authorization.senderIsOwner &&
+        authorization.isAuthorizedSender &&
+        senderId === pending.ownerSenderId
+      ) {
+        return { kind: "reply", text: formatPendingSelectionExpired(pending.locale) };
+      }
+      return { kind: "blocked" };
+    }
+    pending = null;
+  }
+
+  if (pending) {
+    const freshIntent = parseLineNaturalModelIntent(params.text);
+    const freshControl = freshIntent.kind !== "none" || isLineNaturalModelControlLike(params.text);
+    if (selectionReply.kind !== "none" || freshControl) {
+      const authorization = resolveOwnerAuthorization(params);
+      if (
+        !(authorization.senderIsOwner && authorization.isAuthorizedSender) ||
+        senderId !== pending.ownerSenderId
+      ) {
+        return { kind: "blocked" };
+      }
+      if (selectionReply.kind === "cancel") {
+        await clearLinePendingModelSelection({
+          storePath: params.storePath!,
+          sessionKey: params.sessionKey!,
+          store: params.store,
+          expectedCreatedAt: pending.createdAt,
+        });
+        return { kind: "reply", text: formatPendingSelectionCancelled(pending.locale) };
+      }
+      if (selectionReply.kind === "selection") {
+        const candidate = pending.candidates[selectionReply.index];
+        if (!candidate) {
+          return {
+            kind: "reply",
+            text: formatInvalidPendingSelection(pending.locale, pending.candidates.length),
+          };
+        }
+        return {
+          kind: "switch",
+          candidate,
+          locale: pending.locale,
+          pendingSelectionCreatedAt: pending.createdAt,
+        };
+      }
+
+      // A new explicit model-control request supersedes the prior candidate list.
+      await clearLinePendingModelSelection({
+        storePath: params.storePath!,
+        sessionKey: params.sessionKey!,
+        store: params.store,
+        expectedCreatedAt: pending.createdAt,
+      });
+    } else {
+      // Unrelated conversation remains ordinary chat; keep the bounded choice available.
+      return { kind: "none" };
+    }
+  }
+
   const intent = parseLineNaturalModelIntent(params.text);
   const isModelControl = intent.kind !== "none" || isLineNaturalModelControlLike(params.text);
   if (!isModelControl) {
     return { kind: "none" };
   }
 
-  const authorization = resolveCommandAuthorization({
-    ctx: params.ctx,
-    cfg: params.cfg,
-    commandAuthorized: true,
-  });
+  const authorization = resolveOwnerAuthorization(params);
   if (!(authorization.senderIsOwner && authorization.isAuthorizedSender)) {
     return { kind: "blocked" };
   }
   if (intent.kind === "none") {
     return { kind: "reply", text: formatUnparsedModelControl(params.text) };
   }
-  return resolveLineNaturalLanguageModelAction({
+  const action = await resolveLineNaturalLanguageModelAction({
     text: params.text,
     cfg: params.cfg,
     agentId: params.agentId,
     ownerAuthorized: true,
     loadCatalog: params.loadCatalog,
   });
+  if (
+    action.kind === "reply" &&
+    action.pendingSelection &&
+    params.storePath &&
+    params.sessionKey &&
+    senderId
+  ) {
+    const saved = await saveLinePendingModelSelection({
+      storePath: params.storePath,
+      sessionKey: params.sessionKey,
+      ownerSenderId: senderId,
+      candidates: action.pendingSelection.candidates,
+      locale: action.pendingSelection.locale,
+      store: params.store,
+      now,
+    });
+    if (!saved) {
+      return {
+        kind: "reply",
+        text:
+          action.pendingSelection.locale === "th"
+            ? "ไม่สามารถบันทึกตัวเลือกโมเดลได้ในตอนนี้"
+            : "The model choices could not be saved right now.",
+      };
+    }
+  }
+  return action;
 }
 
 function snapshotSessionModel(entry: SessionEntry): SessionSwitchSnapshot {

@@ -39,8 +39,10 @@ import { downloadLineMedia } from "./download.js";
 import { resolveLineGroupConfigEntry } from "./group-keys.js";
 import {
   applyLineNaturalModelSwitch,
+  clearLinePendingModelSelection,
   formatLineNaturalModelSwitchResult,
   resolveAuthorizedLineNaturalModelAction,
+  type LineNaturalModelSessionStore,
   type LineNaturalModelSwitchResult,
   type OpenRouterCatalogLoader,
 } from "./natural-language-model.js";
@@ -81,6 +83,7 @@ interface LineHandlerContext {
   processMessage: (ctx: LineInboundContext) => Promise<void>;
   naturalModelCatalogLoader?: OpenRouterCatalogLoader;
   naturalModelSwitch?: typeof applyLineNaturalModelSwitch;
+  naturalModelSessionStore?: LineNaturalModelSessionStore;
   replayCache?: LineWebhookReplayCache;
   groupHistories?: Map<string, HistoryEntry[]>;
   historyLimit?: number;
@@ -550,6 +553,9 @@ async function handleMessageEvent(event: MessageEvent, context: LineHandlerConte
       agentId: messageContext.route.agentId,
       ctx: messageContext.ctxPayload,
       loadCatalog: context.naturalModelCatalogLoader,
+      storePath: messageContext.turn.storePath,
+      sessionKey: messageContext.route.sessionKey,
+      store: context.naturalModelSessionStore,
     });
     if (naturalModelAction.kind === "blocked") {
       // Model-control-like text must never reach the free-form agent path without owner authorization.
@@ -574,6 +580,20 @@ async function handleMessageEvent(event: MessageEvent, context: LineHandlerConte
           sessionKey,
           candidate: naturalModelAction.candidate,
           loadCatalog: context.naturalModelCatalogLoader,
+          store: context.naturalModelSessionStore,
+        });
+      }
+      if (
+        result.ok &&
+        naturalModelAction.pendingSelectionCreatedAt !== undefined &&
+        storePath &&
+        sessionKey
+      ) {
+        await clearLinePendingModelSelection({
+          storePath,
+          sessionKey,
+          store: context.naturalModelSessionStore,
+          expectedCreatedAt: naturalModelAction.pendingSelectionCreatedAt,
         });
       }
       await sendNaturalModelReply({

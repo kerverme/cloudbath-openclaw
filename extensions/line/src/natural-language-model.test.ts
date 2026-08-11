@@ -3,12 +3,17 @@ import type { SessionEntry } from "openclaw/plugin-sdk/model-session-runtime";
 import { describe, expect, it, vi } from "vitest";
 import {
   applyLineNaturalModelSwitch,
+  clearLinePendingModelSelection,
   formatLineNaturalModelSwitchResult,
   isLineNaturalModelControlLike,
+  LINE_PENDING_MODEL_SELECTION_TTL_MS,
   loadOpenRouterUserModelCatalog,
   parseLineNaturalModelIntent,
+  parseLinePendingModelSelectionReply,
+  readLinePendingModelSelection,
   resolveAuthorizedLineNaturalModelAction,
   resolveLineNaturalLanguageModelAction,
+  saveLinePendingModelSelection,
   toOpenClawOpenRouterRef,
   type LineNaturalModelSessionStore,
   type OpenRouterCatalogCandidate,
@@ -305,6 +310,328 @@ describe("LINE natural-language model resolution", () => {
     });
     expect(action).toEqual({ kind: "none" });
     expect(privateLoader).not.toHaveBeenCalled();
+  });
+});
+
+describe("session-scoped pending LINE model selection", () => {
+  const lunaCandidates: OpenRouterCatalogCandidate[] = [
+    {
+      id: "openai/gpt-5.6-luna-pro",
+      name: "OpenAI: GPT-5.6 Luna Pro",
+      ref: "openrouter/openai/gpt-5.6-luna-pro",
+      score: 190,
+      source: "openrouter-user-catalog",
+      supportsTools: true,
+    },
+    {
+      id: "openai/gpt-5.6-luna-pro:batch",
+      name: "OpenAI: GPT-5.6 Luna Pro (batch)",
+      ref: "openrouter/openai/gpt-5.6-luna-pro:batch",
+      score: 190,
+      source: "openrouter-user-catalog",
+      supportsTools: true,
+    },
+  ];
+
+  it.each([
+    ["1", 0],
+    ["เลือก 1", 0],
+    ["เอา 1", 0],
+    ["ใช้ 1", 0],
+    ["ใช้รุ่น 1", 0],
+    ["รุ่น 1", 0],
+    ["ตัว 1", 0],
+    ["ตัวแรก", 0],
+    ["อันแรก", 0],
+    ["เอาตัวแรก", 0],
+    ["เลือกตัวแรก", 0],
+    ["2", 1],
+    ["เลือก 2", 1],
+    ["ใช้รุ่น 2", 1],
+    ["ตัวที่ 2", 1],
+    ["อันที่สอง", 1],
+    ["เอาตัวสอง", 1],
+    ["option 1", 0],
+    ["choose 1", 0],
+    ["use 1", 0],
+    ["first", 0],
+    ["the first one", 0],
+    ["second", 1],
+    ["option 2", 1],
+    ["choose the second one", 1],
+  ])("parses pending selection reply %s", (text, index) => {
+    expect(parseLinePendingModelSelectionReply(text)).toEqual({ kind: "selection", index });
+  });
+
+  it.each(["ยกเลิก", "ไม่เอาแล้ว", "cancel", "never mind"])(
+    "parses pending cancellation %s",
+    (text) => {
+      expect(parseLinePendingModelSelectionReply(text)).toEqual({ kind: "cancel" });
+    },
+  );
+
+  it("resolves the exact production conversation from stored catalog candidates", async () => {
+    const state = memoryStore({ sessionId: "line-session", updatedAt: 1 });
+    const catalogLoader = vi.fn(async () =>
+      lunaCandidates.map(({ id, name, supportsTools }) => ({ id, name, supportsTools })),
+    );
+
+    const first = await resolveAuthorizedLineNaturalModelAction({
+      text: "สลับไปใช้ luna pro",
+      cfg: CFG,
+      ctx: lineContext("owner-user"),
+      loadCatalog: catalogLoader,
+      storePath: "sessions.json",
+      sessionKey: "line:pilot",
+      store: state.adapter,
+      now: 1_000,
+    });
+    expect(first).toMatchObject({ kind: "reply", pendingSelection: { locale: "th" } });
+
+    const second = await resolveAuthorizedLineNaturalModelAction({
+      text: "ใช้รุ่น 1",
+      cfg: CFG,
+      ctx: lineContext("owner-user"),
+      loadCatalog: catalogLoader,
+      storePath: "sessions.json",
+      sessionKey: "line:pilot",
+      store: state.adapter,
+      now: 2_000,
+    });
+    expect(second).toMatchObject({
+      kind: "switch",
+      candidate: {
+        id: "openai/gpt-5.6-luna-pro",
+        ref: "openrouter/openai/gpt-5.6-luna-pro",
+        source: "openrouter-user-catalog",
+      },
+      pendingSelectionCreatedAt: 1_000,
+    });
+    expect(catalogLoader).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(second)).not.toContain("openrouter/รุ่น 1");
+  });
+
+  it("clears pending selection on cancellation without switching", async () => {
+    const state = memoryStore({ sessionId: "line-session", updatedAt: 1 });
+    await saveLinePendingModelSelection({
+      storePath: "sessions.json",
+      sessionKey: "line:pilot",
+      ownerSenderId: "owner-user",
+      candidates: lunaCandidates,
+      locale: "th",
+      store: state.adapter,
+      now: 1_000,
+    });
+
+    const action = await resolveAuthorizedLineNaturalModelAction({
+      text: "ไม่เอาแล้ว",
+      cfg: CFG,
+      ctx: lineContext("owner-user"),
+      storePath: "sessions.json",
+      sessionKey: "line:pilot",
+      store: state.adapter,
+      now: 2_000,
+    });
+    expect(action).toMatchObject({ kind: "reply" });
+    await expect(
+      readLinePendingModelSelection({
+        storePath: "sessions.json",
+        sessionKey: "line:pilot",
+        store: state.adapter,
+      }),
+    ).resolves.toBeNull();
+  });
+
+  it("expires stale choices and never searches for the numeric reply", async () => {
+    const state = memoryStore({ sessionId: "line-session", updatedAt: 1 });
+    const catalogLoader = vi.fn(async () => MODELS);
+    await saveLinePendingModelSelection({
+      storePath: "sessions.json",
+      sessionKey: "line:pilot",
+      ownerSenderId: "owner-user",
+      candidates: lunaCandidates,
+      locale: "th",
+      store: state.adapter,
+      now: 1_000,
+      ttlMs: 100,
+    });
+
+    const action = await resolveAuthorizedLineNaturalModelAction({
+      text: "ใช้รุ่น 1",
+      cfg: CFG,
+      ctx: lineContext("owner-user"),
+      loadCatalog: catalogLoader,
+      storePath: "sessions.json",
+      sessionKey: "line:pilot",
+      store: state.adapter,
+      now: 1_101,
+    });
+    expect(action).toMatchObject({ kind: "reply" });
+    expect(catalogLoader).not.toHaveBeenCalled();
+    await expect(
+      readLinePendingModelSelection({
+        storePath: "sessions.json",
+        sessionKey: "line:pilot",
+        store: state.adapter,
+      }),
+    ).resolves.toBeNull();
+  });
+
+  it("blocks a non-owner from hijacking an owner's pending choice", async () => {
+    const state = memoryStore({ sessionId: "line-session", updatedAt: 1 });
+    await saveLinePendingModelSelection({
+      storePath: "sessions.json",
+      sessionKey: "line:pilot",
+      ownerSenderId: "owner-user",
+      candidates: lunaCandidates,
+      locale: "th",
+      store: state.adapter,
+      now: 1_000,
+    });
+
+    const action = await resolveAuthorizedLineNaturalModelAction({
+      text: "1",
+      cfg: CFG,
+      ctx: lineContext("ordinary-member"),
+      storePath: "sessions.json",
+      sessionKey: "line:pilot",
+      store: state.adapter,
+      now: 2_000,
+    });
+    expect(action).toEqual({ kind: "blocked" });
+    await expect(
+      readLinePendingModelSelection({
+        storePath: "sessions.json",
+        sessionKey: "line:pilot",
+        store: state.adapter,
+      }),
+    ).resolves.toMatchObject({ ownerSenderId: "owner-user" });
+  });
+
+  it("keeps unrelated model discussion as ordinary chat without consuming the pending choice", async () => {
+    const state = memoryStore({ sessionId: "line-session", updatedAt: 1 });
+    await saveLinePendingModelSelection({
+      storePath: "sessions.json",
+      sessionKey: "line:pilot",
+      ownerSenderId: "owner-user",
+      candidates: lunaCandidates,
+      locale: "th",
+      store: state.adapter,
+      now: 1_000,
+    });
+
+    const action = await resolveAuthorizedLineNaturalModelAction({
+      text: "Luna Pro ต่างจาก Luna ยังไง",
+      cfg: CFG,
+      ctx: lineContext("owner-user"),
+      storePath: "sessions.json",
+      sessionKey: "line:pilot",
+      store: state.adapter,
+      now: 2_000,
+    });
+    expect(action).toEqual({ kind: "none" });
+    await expect(
+      readLinePendingModelSelection({
+        storePath: "sessions.json",
+        sessionKey: "line:pilot",
+        store: state.adapter,
+      }),
+    ).resolves.toMatchObject({ createdAt: 1_000 });
+  });
+
+  it("keeps an invalid selection number bounded to the stored candidate list", async () => {
+    const state = memoryStore({ sessionId: "line-session", updatedAt: 1 });
+    const catalogLoader = vi.fn(async () => MODELS);
+    await saveLinePendingModelSelection({
+      storePath: "sessions.json",
+      sessionKey: "line:pilot",
+      ownerSenderId: "owner-user",
+      candidates: lunaCandidates,
+      locale: "en",
+      store: state.adapter,
+      now: 1_000,
+    });
+
+    const action = await resolveAuthorizedLineNaturalModelAction({
+      text: "option 9",
+      cfg: CFG,
+      ctx: lineContext("owner-user"),
+      loadCatalog: catalogLoader,
+      storePath: "sessions.json",
+      sessionKey: "line:pilot",
+      store: state.adapter,
+      now: 2_000,
+    });
+    expect(action).toMatchObject({ kind: "reply" });
+    expect(catalogLoader).not.toHaveBeenCalled();
+    await expect(
+      readLinePendingModelSelection({
+        storePath: "sessions.json",
+        sessionKey: "line:pilot",
+        store: state.adapter,
+      }),
+    ).resolves.toMatchObject({ candidates: expect.arrayContaining(lunaCandidates) });
+  });
+
+  it("supersedes a pending choice with a new explicit model request", async () => {
+    const state = memoryStore({ sessionId: "line-session", updatedAt: 1 });
+    await saveLinePendingModelSelection({
+      storePath: "sessions.json",
+      sessionKey: "line:pilot",
+      ownerSenderId: "owner-user",
+      candidates: lunaCandidates,
+      locale: "en",
+      store: state.adapter,
+      now: 1_000,
+    });
+
+    const action = await resolveAuthorizedLineNaturalModelAction({
+      text: "switch to Nebulon X",
+      cfg: CFG,
+      ctx: lineContext("owner-user"),
+      loadCatalog,
+      storePath: "sessions.json",
+      sessionKey: "line:pilot",
+      store: state.adapter,
+      now: 2_000,
+    });
+    expect(action).toMatchObject({
+      kind: "switch",
+      candidate: { id: "future-labs/nebulon-x" },
+    });
+    await expect(
+      readLinePendingModelSelection({
+        storePath: "sessions.json",
+        sessionKey: "line:pilot",
+        store: state.adapter,
+      }),
+    ).resolves.toBeNull();
+  });
+
+  it("stores only validated catalog-shaped candidates with a conservative expiry", async () => {
+    const state = memoryStore({ sessionId: "line-session", updatedAt: 1 });
+    const saved = await saveLinePendingModelSelection({
+      storePath: "sessions.json",
+      sessionKey: "line:pilot",
+      ownerSenderId: "owner-user",
+      candidates: lunaCandidates,
+      locale: "en",
+      store: state.adapter,
+      now: 1_000,
+    });
+    expect(saved).toMatchObject({
+      createdAt: 1_000,
+      expiresAt: 1_000 + LINE_PENDING_MODEL_SELECTION_TTL_MS,
+      candidates: lunaCandidates,
+    });
+
+    const cleared = await clearLinePendingModelSelection({
+      storePath: "sessions.json",
+      sessionKey: "line:pilot",
+      store: state.adapter,
+      expectedCreatedAt: 1_000,
+    });
+    expect(cleared).toBe(true);
   });
 });
 
