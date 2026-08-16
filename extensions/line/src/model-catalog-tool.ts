@@ -170,6 +170,19 @@ function pendingPageResult(pending: LinePendingModelSelection) {
   };
 }
 
+function statelessPageResult(candidates: PendingModelCandidate[], offset: number, limit: number) {
+  const safeOffset = offset < candidates.length ? offset : 0;
+  const models = candidatePage(candidates, safeOffset, limit);
+  return {
+    displayedCount: models.length,
+    displayedFrom: models.length > 0 ? safeOffset + 1 : 0,
+    displayedTo: safeOffset + models.length,
+    previousOffset: safeOffset > 0 ? Math.max(0, safeOffset - limit) : null,
+    nextOffset: safeOffset + models.length < candidates.length ? safeOffset + models.length : null,
+    models,
+  };
+}
+
 async function readScopedPendingSelection(params: {
   pendingStore?: PluginStateKeyedStore<LinePendingModelSelection>;
   pendingKey: string | null;
@@ -278,7 +291,7 @@ export function createLineModelCatalogTool(params: CreateLineModelCatalogToolPar
     name: LINE_MODEL_CATALOG_TOOL_NAME,
     label: "OpenRouter Account Models",
     description:
-      "OWNER-ONLY OpenRouter catalog and pending-choice adapter for LINE model control. Semantically interpret the owner's wording yourself. For a new switch request call action=search with literal model-family terms. A single match is safe to pass to native session_status(model=...); multiple matches are stored for this exact LINE session and owner and returned as numbered, paginated choices. For a numeric reply call action=select only when the conversation has an active picker; no_pending means treat the number as ordinary chat. Use action=page with the returned offset for more choices and action=cancel for cancellation. Selection re-fetches the authenticated catalog before returning a canonical modelRef. Never construct a model ID from user text. After session_status changes the model, call session_status again and confirm only when authoritative session state matches, then call action=complete. Do not complete after a failed or unverified switch. This tool never changes session model state.",
+      "OWNER-ONLY OpenRouter catalog and pending-choice adapter for LINE model control. Semantically interpret the owner's wording yourself. Do not treat model comparisons, opinions, or ordinary discussion as a switch request. For a new clear switch request call action=search with literal model-family terms. A single match is safe to pass to native session_status(model=...); multiple matches are stored for this exact LINE session and owner and returned as numbered, paginated choices. For a numeric reply call action=select only when the conversation has an active picker; no_pending means treat the number as ordinary chat. Use action=page with the returned offset for more choices and action=cancel for cancellation. Selection re-fetches the authenticated catalog before returning a canonical modelRef. Never construct a model ID from user text. After session_status changes the model, call session_status again and confirm only when authoritative session state matches, then call action=complete. Do not complete after a failed or unverified switch. This tool never changes session model state.",
     parameters: CatalogQuerySchema,
     execute: async (_toolCallId: string, rawParams: unknown, signal?: AbortSignal) => {
       const input =
@@ -474,7 +487,7 @@ export function createLineModelCatalogTool(params: CreateLineModelCatalogToolPar
           totalCatalogModels: models.length,
           totalMatches: matching.length,
           maximumSafePendingCandidates: MAX_PENDING_CANDIDATES,
-          models: candidatePage(matching, offset, limit),
+          ...statelessPageResult(matching, offset, limit),
         });
       }
 

@@ -397,6 +397,44 @@ describe("LINE OpenRouter account catalog adapter", () => {
     ]);
   });
 
+  it("reports deterministic stateless pages when a match set is too large to persist", async () => {
+    const tool = ownerTool({
+      fetchImpl: vi.fn(async () => catalogResponse(deepSeekCatalog(251))),
+    });
+    const first = readJsonResult(
+      await tool!.execute("catalog", { action: "search", query: "DeepSeek", limit: 20 }),
+    );
+    expect(first).toMatchObject({
+      resolution: "refine_query",
+      pendingSelection: false,
+      totalMatches: 251,
+      maximumSafePendingCandidates: 250,
+      displayedCount: 20,
+      displayedFrom: 1,
+      displayedTo: 20,
+      previousOffset: null,
+      nextOffset: 20,
+    });
+
+    const next = readJsonResult(
+      await tool!.execute("catalog", {
+        action: "search",
+        query: "DeepSeek",
+        offset: 20,
+        limit: 20,
+      }),
+    );
+    expect(next).toMatchObject({
+      resolution: "refine_query",
+      totalMatches: 251,
+      displayedCount: 20,
+      displayedFrom: 21,
+      displayedTo: 40,
+      previousOffset: 0,
+      nextOffset: 40,
+    });
+  });
+
   it("never exposes the credential in sanitized provider errors", async () => {
     const fetchImpl = vi.fn(async () => new Response("denied", { status: 403 }));
     const tool = ownerTool({ fetchImpl });
