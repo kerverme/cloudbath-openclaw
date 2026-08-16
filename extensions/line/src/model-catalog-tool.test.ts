@@ -1,6 +1,7 @@
 import type { PluginStateKeyedStore } from "openclaw/plugin-sdk/plugin-state-runtime";
 import { describe, expect, it, vi } from "vitest";
 import {
+  createLineModelSwitchGuard,
   createLineModelCatalogTool,
   type LinePendingModelSelection,
   LINE_MODEL_CATALOG_TOOL_NAME,
@@ -16,10 +17,13 @@ type CatalogFixture = {
   supported_parameters?: string[];
 };
 
-function catalogResponse(data: CatalogFixture[] = defaultCatalog()) {
+function catalogResponse(data: CatalogFixture[] = defaultCatalog(), next?: string) {
   return new Response(JSON.stringify({ data }), {
     status: 200,
-    headers: { "content-type": "application/json" },
+    headers: {
+      "content-type": "application/json",
+      ...(next ? { link: `<${next}>; rel="next"` } : {}),
+    },
   });
 }
 
@@ -113,6 +117,7 @@ function ownerTool(overrides: Partial<ToolParams> = {}) {
     sessionId: "session-a",
     pendingStore: createMemoryPendingStore(),
     resolveApiKey: async () => SECRET,
+    applySessionModel: vi.fn(async () => true),
     fetchImpl: vi.fn(async () => catalogResponse()),
     ...overrides,
   });
@@ -156,19 +161,24 @@ describe("LINE OpenRouter account catalog adapter", () => {
   });
 
   it("returns only canonical account-catalog IDs and applies openrouter once", async () => {
-    const tool = ownerTool();
+    const applySessionModel = vi.fn(async () => true);
+    const tool = ownerTool({ applySessionModel });
     expect(tool).not.toBeNull();
     const data = readJsonResult(
-      await tool!.execute("catalog", { action: "search", query: "luna pro" }),
+      await tool!.execute("catalog", {
+        action: "search",
+        query: "OpenAI: GPT-5.6 Luna Pro",
+      }),
     );
 
     expect(data).toMatchObject({
       source: "openrouter-user-account",
       authoritativeForCandidateIds: true,
-      currentModelAuthoritativeSource: "session_status",
-      resolution: "exact",
+      resolution: "switched",
+      match: "exact",
       pendingSelection: false,
       totalMatches: 1,
+      sessionModelVerified: true,
     });
     expect(readModels(data)).toEqual([
       expect.objectContaining({
@@ -177,7 +187,39 @@ describe("LINE OpenRouter account catalog adapter", () => {
         supportsTools: true,
       }),
     ]);
+    expect(applySessionModel).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "openai/gpt-5.6-luna-pro" }),
+    );
     expect(JSON.stringify(data)).not.toContain("openrouter/openrouter/");
+  });
+
+  it("prioritizes one exact catalog match over many partial matches", async () => {
+    const applySessionModel = vi.fn(async () => true);
+    const tool = ownerTool({
+      applySessionModel,
+      fetchImpl: vi.fn(async () =>
+        catalogResponse([
+          { id: "openai/luna-pro", name: "Luna Pro" },
+          { id: "openai/luna-pro-free", name: "Luna Pro Free" },
+          { id: "future-labs/luna-pro-preview", name: "Luna Pro Preview" },
+        ]),
+      ),
+    });
+
+    const data = readJsonResult(
+      await tool!.execute("catalog", { action: "search", query: "Luna Pro" }),
+    );
+
+    expect(data).toMatchObject({
+      resolution: "switched",
+      match: "exact",
+      totalMatches: 3,
+      sessionModelVerified: true,
+    });
+    expect(applySessionModel).toHaveBeenCalledOnce();
+    expect(applySessionModel).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "openai/luna-pro" }),
+    );
   });
 
   it.each([
@@ -218,10 +260,11 @@ describe("LINE OpenRouter account catalog adapter", () => {
     ).toBe(true);
   });
 
-  it("revalidates a numbered choice and clears it only after the verified switch completes", async () => {
+  it("revalidates and applies a numbered choice before clearing pending state", async () => {
     const fetchImpl = vi.fn(async () => catalogResponse(deepSeekCatalog(3)));
     const pendingStore = createMemoryPendingStore();
-    const tool = ownerTool({ fetchImpl, pendingStore });
+    const applySessionModel = vi.fn(async () => true);
+    const tool = ownerTool({ fetchImpl, pendingStore, applySessionModel });
     await tool!.execute("catalog", { action: "search", query: "DeepSeek" });
 
     const selected = readJsonResult(
@@ -230,39 +273,39 @@ describe("LINE OpenRouter account catalog adapter", () => {
 
     expect(fetchImpl).toHaveBeenCalledTimes(2);
     expect(selected).toMatchObject({
-      resolution: "selected",
-      pendingSelection: true,
-      pendingCompletionAfterVerifiedSwitch: true,
+      resolution: "switched",
+      pendingSelection: false,
       freshCatalogValidated: true,
+      sessionModelVerified: true,
       model: {
         id: "deepseek/deepseek-v4-02",
         ref: "openrouter/deepseek/deepseek-v4-02",
       },
     });
-    expect(await pendingStore.entries()).toHaveLength(1);
-
-    const completed = readJsonResult(await tool!.execute("catalog", { action: "complete" }));
-    expect(completed).toEqual({ resolution: "completed", pendingSelection: false });
+    expect(applySessionModel).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "deepseek/deepseek-v4-02" }),
+    );
     expect(await pendingStore.entries()).toHaveLength(0);
   });
 
-  it("keeps a freshly validated choice pending when the native switch is not completed", async () => {
+  it("keeps a freshly validated choice pending when the session switch fails verification", async () => {
     const pendingStore = createMemoryPendingStore();
     const tool = ownerTool({
       pendingStore,
       fetchImpl: vi.fn(async () => catalogResponse(deepSeekCatalog(3))),
+      applySessionModel: vi.fn(async () => false),
     });
     await tool!.execute("catalog", { action: "search", query: "DeepSeek" });
-    await tool!.execute("catalog", { action: "select", selection: 2 });
+    const result = readJsonResult(
+      await tool!.execute("catalog", { action: "select", selection: 2 }),
+    );
 
-    expect(await pendingStore.entries()).toHaveLength(1);
-    expect(
-      readJsonResult(await tool!.execute("catalog", { action: "page", offset: 0 })),
-    ).toMatchObject({ resolution: "choices", pendingSelection: true });
-    expect(readJsonResult(await tool!.execute("catalog", { action: "complete" }))).toEqual({
-      resolution: "completion_not_ready",
+    expect(result).toMatchObject({
+      resolution: "switch_failed",
       pendingSelection: true,
+      sessionModelVerified: false,
     });
+    expect(await pendingStore.entries()).toHaveLength(1);
   });
 
   it("keeps an invalid numbered selection pending without fabricating a model", async () => {
@@ -319,7 +362,8 @@ describe("LINE OpenRouter account catalog adapter", () => {
       .fn()
       .mockResolvedValueOnce(catalogResponse(deepSeekCatalog(3)))
       .mockResolvedValueOnce(catalogResponse(deepSeekCatalog(1)));
-    const tool = ownerTool({ fetchImpl });
+    const applySessionModel = vi.fn(async () => true);
+    const tool = ownerTool({ fetchImpl, applySessionModel });
     await tool!.execute("catalog", { action: "search", query: "DeepSeek" });
 
     const data = readJsonResult(await tool!.execute("catalog", { action: "select", selection: 2 }));
@@ -331,6 +375,22 @@ describe("LINE OpenRouter account catalog adapter", () => {
       freshCatalogValidated: true,
     });
     expect(data).not.toHaveProperty("model");
+    expect(applySessionModel).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when fresh catalog revalidation fails", async () => {
+    const applySessionModel = vi.fn(async () => true);
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(catalogResponse(deepSeekCatalog(3)))
+      .mockResolvedValueOnce(new Response("unavailable", { status: 503 }));
+    const tool = ownerTool({ fetchImpl, applySessionModel });
+    await tool!.execute("catalog", { action: "search", query: "DeepSeek" });
+
+    await expect(tool!.execute("catalog", { action: "select", selection: 2 })).rejects.toThrow(
+      "OPENROUTER_ACCOUNT_CATALOG_HTTP_503",
+    );
+    expect(applySessionModel).not.toHaveBeenCalled();
   });
 
   it("expires pending choices after ten minutes", async () => {
@@ -397,9 +457,9 @@ describe("LINE OpenRouter account catalog adapter", () => {
     ]);
   });
 
-  it("reports deterministic stateless pages when a match set is too large to persist", async () => {
+  it("reports every deterministic stateless page when a match set is too large to persist", async () => {
     const tool = ownerTool({
-      fetchImpl: vi.fn(async () => catalogResponse(deepSeekCatalog(251))),
+      fetchImpl: vi.fn(async () => catalogResponse(deepSeekCatalog(301))),
     });
     const first = readJsonResult(
       await tool!.execute("catalog", { action: "search", query: "DeepSeek", limit: 20 }),
@@ -407,7 +467,7 @@ describe("LINE OpenRouter account catalog adapter", () => {
     expect(first).toMatchObject({
       resolution: "refine_query",
       pendingSelection: false,
-      totalMatches: 251,
+      totalMatches: 301,
       maximumSafePendingCandidates: 250,
       displayedCount: 20,
       displayedFrom: 1,
@@ -420,24 +480,25 @@ describe("LINE OpenRouter account catalog adapter", () => {
       await tool!.execute("catalog", {
         action: "search",
         query: "DeepSeek",
-        offset: 20,
+        offset: 260,
         limit: 20,
       }),
     );
     expect(next).toMatchObject({
       resolution: "refine_query",
-      totalMatches: 251,
+      totalMatches: 301,
       displayedCount: 20,
-      displayedFrom: 21,
-      displayedTo: 40,
-      previousOffset: 0,
-      nextOffset: 40,
+      displayedFrom: 261,
+      displayedTo: 280,
+      previousOffset: 240,
+      nextOffset: 280,
     });
   });
 
   it("never exposes the credential in sanitized provider errors", async () => {
     const fetchImpl = vi.fn(async () => new Response("denied", { status: 403 }));
-    const tool = ownerTool({ fetchImpl });
+    const applySessionModel = vi.fn(async () => true);
+    const tool = ownerTool({ fetchImpl, applySessionModel });
     let message = "";
     try {
       await tool!.execute("catalog", { action: "search" });
@@ -446,6 +507,7 @@ describe("LINE OpenRouter account catalog adapter", () => {
     }
     expect(message).toBe("OPENROUTER_ACCOUNT_CATALOG_HTTP_403");
     expect(message).not.toContain(SECRET);
+    expect(applySessionModel).not.toHaveBeenCalled();
   });
 
   it("fails safely when authenticated OpenRouter access is unavailable", async () => {
@@ -456,7 +518,8 @@ describe("LINE OpenRouter account catalog adapter", () => {
   });
 
   it("does not turn human wording into a model ID", async () => {
-    const tool = ownerTool();
+    const applySessionModel = vi.fn(async () => true);
+    const tool = ownerTool({ applySessionModel });
     const data = readJsonResult(
       await tool!.execute("catalog", {
         action: "search",
@@ -464,6 +527,7 @@ describe("LINE OpenRouter account catalog adapter", () => {
       }),
     );
     expect(data).toMatchObject({ resolution: "no_match", totalMatches: 0, models: [] });
+    expect(applySessionModel).not.toHaveBeenCalled();
   });
 });
 
@@ -481,5 +545,131 @@ describe("OpenRouter account catalog transport", () => {
       }),
     );
     expect(JSON.stringify(models)).not.toContain(SECRET);
+  });
+
+  it("follows every catalog page and deduplicates canonical model IDs", async () => {
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      const value = url instanceof Request ? url.url : url.toString();
+      if (value.includes("cursor=page-2")) {
+        return catalogResponse([
+          { id: "openai/luna", name: "Luna duplicate" },
+          { id: "future-labs/later-model", name: "Later Model" },
+        ]);
+      }
+      return catalogResponse(
+        [
+          { id: "openai/luna", name: "Luna" },
+          { id: "anthropic/claude", name: "Claude" },
+        ],
+        "?cursor=page-2",
+      );
+    });
+
+    const models = await loadOpenRouterAccountModels({ apiKey: SECRET, fetchImpl });
+
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(models.map((model) => model.id).toSorted()).toEqual([
+      "anthropic/claude",
+      "future-labs/later-model",
+      "openai/luna",
+    ]);
+  });
+
+  it("fails closed when catalog pagination loops", async () => {
+    const fetchImpl = vi.fn(async () =>
+      catalogResponse(
+        [{ id: "openai/luna", name: "Luna" }],
+        "https://openrouter.ai/api/v1/models/user",
+      ),
+    );
+
+    await expect(loadOpenRouterAccountModels({ apiKey: SECRET, fetchImpl })).rejects.toThrow(
+      "OPENROUTER_ACCOUNT_CATALOG_PAGINATION_LOOP",
+    );
+    expect(fetchImpl).toHaveBeenCalledOnce();
+  });
+
+  it("fails closed at the finite catalog pagination limit", async () => {
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      const currentUrl = new URL(url instanceof Request ? url.url : url.toString());
+      const page = Number(currentUrl.searchParams.get("page") ?? "0");
+      return catalogResponse(
+        [{ id: `future-labs/model-${page}`, name: `Model ${page}` }],
+        `?page=${page + 1}`,
+      );
+    });
+
+    await expect(loadOpenRouterAccountModels({ apiKey: SECRET, fetchImpl })).rejects.toThrow(
+      "OPENROUTER_ACCOUNT_CATALOG_PAGINATION_LIMIT",
+    );
+    expect(fetchImpl).toHaveBeenCalledTimes(50);
+  });
+
+  it("finds and switches an exact model that exists only on a later catalog page", async () => {
+    const applySessionModel = vi.fn(async () => true);
+    const fetchImpl = vi.fn(async (url: string | URL | Request) =>
+      (url instanceof Request ? url.url : url.toString()).includes("cursor=page-2")
+        ? catalogResponse([{ id: "future-labs/later-model", name: "Later Model" }])
+        : catalogResponse([{ id: "openai/luna", name: "Luna" }], "?cursor=page-2"),
+    );
+    const tool = ownerTool({ fetchImpl, applySessionModel });
+
+    const data = readJsonResult(
+      await tool!.execute("catalog", { action: "search", query: "Later Model" }),
+    );
+
+    expect(data).toMatchObject({
+      resolution: "switched",
+      match: "exact",
+      sessionModelVerified: true,
+    });
+    expect(applySessionModel).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "future-labs/later-model" }),
+    );
+  });
+});
+
+describe("LINE session model switch guard", () => {
+  it("blocks an AI-facing session model mutation during a LINE run", () => {
+    const guard = createLineModelSwitchGuard();
+    const ctx = { channel: "line", runId: "run-1", sessionId: "session-1" };
+    guard.beforeAgentRun({}, ctx);
+
+    expect(
+      guard.beforeToolCall(
+        { toolName: "session_status", params: { model: "openrouter/raw-user-text" } },
+        ctx,
+      ),
+    ).toMatchObject({ block: true });
+  });
+
+  it("keeps read-only session status and non-LINE model mutation unchanged", () => {
+    const guard = createLineModelSwitchGuard();
+    const lineCtx = { channel: "line", runId: "run-1" };
+    guard.beforeAgentRun({}, lineCtx);
+
+    expect(
+      guard.beforeToolCall({ toolName: "session_status", params: {} }, lineCtx),
+    ).toBeUndefined();
+    expect(
+      guard.beforeToolCall(
+        { toolName: "session_status", params: { model: "openrouter/valid/model" } },
+        { channel: "telegram", runId: "run-2" },
+      ),
+    ).toBeUndefined();
+  });
+
+  it("removes the guard when the LINE run ends", () => {
+    const guard = createLineModelSwitchGuard();
+    const ctx = { channel: "line", runId: "run-1" };
+    guard.beforeAgentRun({}, ctx);
+    guard.agentEnd({}, ctx);
+
+    expect(
+      guard.beforeToolCall(
+        { toolName: "session_status", params: { model: "openrouter/raw-user-text" } },
+        ctx,
+      ),
+    ).toBeUndefined();
   });
 });
