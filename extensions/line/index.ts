@@ -7,7 +7,11 @@ import {
 import { createLazyRuntimeModule } from "openclaw/plugin-sdk/lazy-runtime";
 import {
   createLineModelCatalogTool,
+  type LinePendingModelSelection,
   LINE_MODEL_CATALOG_TOOL_NAME,
+  LINE_MODEL_SELECTION_MAX_ENTRIES,
+  LINE_MODEL_SELECTION_NAMESPACE,
+  LINE_MODEL_SELECTION_TTL_MS,
 } from "./src/model-catalog-tool.js";
 
 type RegisteredLineCardCommand = OpenClawPluginCommandDefinition;
@@ -43,11 +47,19 @@ export default defineBundledChannelEntry({
     exportName: "setLineRuntime",
   },
   registerFull(api) {
+    const pendingModelSelectionStore = api.runtime.state.openKeyedStore<LinePendingModelSelection>({
+      namespace: LINE_MODEL_SELECTION_NAMESPACE,
+      maxEntries: LINE_MODEL_SELECTION_MAX_ENTRIES,
+      defaultTtlMs: LINE_MODEL_SELECTION_TTL_MS,
+    });
     api.registerTool(
       (ctx) =>
         createLineModelCatalogTool({
           messageChannel: ctx.messageChannel,
           senderIsOwner: ctx.senderIsOwner,
+          requesterSenderId: ctx.requesterSenderId,
+          sessionId: ctx.sessionId,
+          pendingStore: pendingModelSelectionStore,
           resolveApiKey: ctx.resolveApiKeyForProvider,
         }),
       {
