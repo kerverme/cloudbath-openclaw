@@ -222,6 +222,29 @@ describe("LINE OpenRouter account catalog adapter", () => {
     );
   });
 
+  it("does not switch a sole partial match without an exact catalog match", async () => {
+    const applySessionModel = vi.fn(async () => true);
+    const tool = ownerTool({
+      applySessionModel,
+      fetchImpl: vi.fn(async () =>
+        catalogResponse([{ id: "openai/luna-pro", name: "OpenAI Luna Pro" }]),
+      ),
+    });
+
+    const data = readJsonResult(
+      await tool!.execute("catalog", { action: "search", query: "Luna" }),
+    );
+
+    expect(data).toMatchObject({
+      resolution: "clarification_required",
+      pendingSelection: false,
+      totalMatches: 1,
+    });
+    expect(readModels(data)).toEqual([{ name: "OpenAI Luna Pro" }]);
+    expect(applySessionModel).not.toHaveBeenCalled();
+    expect(JSON.stringify(data)).not.toContain("openai/luna-pro");
+  });
+
   it.each([
     ["Claude", "anthropic/claude-opus-4"],
     ["Gemini", "google/gemini-flash"],

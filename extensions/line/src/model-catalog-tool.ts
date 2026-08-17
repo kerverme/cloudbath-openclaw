@@ -77,7 +77,7 @@ const CatalogQuerySchema = Type.Object(
         ],
         {
           description:
-            "search switches a unique exact catalog match or creates a numbered candidate selection; select freshly validates and switches a numbered pending choice; page changes the displayed candidate page; cancel clears it.",
+            "search switches only a unique exact catalog match or creates a numbered candidate selection when multiple matches remain; select freshly validates and switches a numbered pending choice; page changes the displayed candidate page; cancel clears it.",
         },
       ),
     ),
@@ -408,7 +408,7 @@ export function createLineModelCatalogTool(params: CreateLineModelCatalogToolPar
     name: LINE_MODEL_CATALOG_TOOL_NAME,
     label: "OpenRouter Account Models",
     description:
-      "OWNER-ONLY OpenRouter catalog and session model picker for LINE. Semantically interpret the owner's wording yourself, but do not treat model comparisons, opinions, or ordinary discussion as a switch request. For a new clear switch request call action=search with literal model-family terms. A unique exact or sole legitimate catalog match is switched directly; multiple matches are stored for this exact LINE session and owner and returned as numbered, paginated choices. For a numeric reply call action=select only when the conversation has an active picker; no_pending means treat the number as ordinary chat. Use action=page with the returned offset for more choices and action=cancel for cancellation. This tool re-fetches the authenticated catalog before a numbered switch and is the only AI-facing LINE model mutation path. Never construct or pass a model ID yourself.",
+      "OWNER-ONLY OpenRouter catalog and session model picker for LINE. Semantically interpret the owner's wording yourself, but do not treat model comparisons, opinions, or ordinary discussion as a switch request. For a new clear switch request call action=search with literal model-family terms. Only a unique exact catalog match is switched directly; multiple matches are stored for this exact LINE session and owner and returned as numbered, paginated choices. A sole partial match requires clarification and cannot switch. For a numeric reply call action=select only when the conversation has an active picker; no_pending means treat the number as ordinary chat. Use action=page with the returned offset for more choices and action=cancel for cancellation. This tool re-fetches the authenticated catalog before a numbered switch and is the only AI-facing LINE model mutation path. Never construct or pass a model ID yourself.",
     parameters: CatalogQuerySchema,
     execute: async (_toolCallId: string, rawParams: unknown, signal?: AbortSignal) => {
       const input =
@@ -552,8 +552,8 @@ export function createLineModelCatalogTool(params: CreateLineModelCatalogToolPar
         });
       }
 
-      const directMatch = exactMatches.length === 1 ? exactMatches[0] : matching.at(0);
-      if ((exactMatches.length === 1 || matching.length === 1) && directMatch) {
+      const directMatch = exactMatches.length === 1 ? exactMatches[0] : undefined;
+      if (directMatch) {
         const switched = await applyVerifiedCatalogModel(directMatch);
         if (!switched) {
           return jsonResult({
@@ -568,12 +568,30 @@ export function createLineModelCatalogTool(params: CreateLineModelCatalogToolPar
           source: "openrouter-user-account",
           authoritativeForCandidateIds: true,
           resolution: "switched",
-          match: exactMatches.length === 1 ? "exact" : "unique",
+          match: "exact",
           pendingSelection: false,
           totalCatalogModels: models.length,
           totalMatches: matching.length,
           sessionModelVerified: true,
           models: [directMatch],
+        });
+      }
+
+      if (matching.length === 1) {
+        const soleMatch = matching[0];
+        return jsonResult({
+          source: "openrouter-user-account",
+          authoritativeForCandidateIds: true,
+          currentModelAuthoritativeSource: "session_status",
+          resolution: "clarification_required",
+          pendingSelection: false,
+          totalCatalogModels: models.length,
+          totalMatches: 1,
+          models: [
+            soleMatch.supportsTools === undefined
+              ? { name: soleMatch.name }
+              : { name: soleMatch.name, supportsTools: soleMatch.supportsTools },
+          ],
         });
       }
 
