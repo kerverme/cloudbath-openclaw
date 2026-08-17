@@ -401,6 +401,7 @@ describe("handleLineWebhookEvents", () => {
     ["Grok switch", "เปลี่ยนเป็น Grok"],
     ["unseen catalog family", "ใช้ Nebulon X"],
     ["model discussion", "Claude กับ Gemini ต่างกันยังไง"],
+    ["ordinary number without pending selection", "2"],
   ])(
     "routes %s through the normal main-agent path without pre-agent rewriting",
     async (_label, text) => {

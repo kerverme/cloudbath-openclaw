@@ -5,9 +5,16 @@ import {
   type OpenClawPluginApi,
 } from "openclaw/plugin-sdk/channel-entry-contract";
 import { createLazyRuntimeModule } from "openclaw/plugin-sdk/lazy-runtime";
+import { applyModelOverrideToSessionEntry } from "openclaw/plugin-sdk/model-session-runtime";
+import { patchSessionEntry } from "openclaw/plugin-sdk/session-store-runtime";
 import {
   createLineModelCatalogTool,
+  type LinePendingModelSelection,
   LINE_MODEL_CATALOG_TOOL_NAME,
+  LINE_MODEL_SELECTION_MAX_ENTRIES,
+  LINE_MODEL_SELECTION_NAMESPACE,
+  LINE_MODEL_SELECTION_TTL_MS,
+  createLineModelSwitchGuard,
 } from "./src/model-catalog-tool.js";
 
 type RegisteredLineCardCommand = OpenClawPluginCommandDefinition;
@@ -43,12 +50,51 @@ export default defineBundledChannelEntry({
     exportName: "setLineRuntime",
   },
   registerFull(api) {
+    const modelSwitchGuard = createLineModelSwitchGuard();
+    api.on("before_agent_run", modelSwitchGuard.beforeAgentRun);
+    api.on("before_tool_call", modelSwitchGuard.beforeToolCall);
+    api.on("agent_end", modelSwitchGuard.agentEnd);
+
+    const pendingModelSelectionStore = api.runtime.state.openKeyedStore<LinePendingModelSelection>({
+      namespace: LINE_MODEL_SELECTION_NAMESPACE,
+      maxEntries: LINE_MODEL_SELECTION_MAX_ENTRIES,
+      defaultTtlMs: LINE_MODEL_SELECTION_TTL_MS,
+    });
     api.registerTool(
       (ctx) =>
         createLineModelCatalogTool({
           messageChannel: ctx.messageChannel,
           senderIsOwner: ctx.senderIsOwner,
+          requesterSenderId: ctx.requesterSenderId,
+          sessionId: ctx.sessionId,
+          pendingStore: pendingModelSelectionStore,
           resolveApiKey: ctx.resolveApiKeyForProvider,
+          applySessionModel: async (model) => {
+            const sessionKey = ctx.sessionKey?.trim();
+            if (!sessionKey) {
+              return false;
+            }
+            const updated = await patchSessionEntry({
+              agentId: ctx.agentId,
+              sessionKey,
+              readConsistency: "latest",
+              replaceEntry: true,
+              requireWriteSuccess: true,
+              update: (entry) => {
+                applyModelOverrideToSessionEntry({
+                  entry,
+                  selection: {
+                    provider: "openrouter",
+                    model: model.id,
+                    isDefault: false,
+                  },
+                  markLiveSwitchPending: true,
+                });
+                return entry;
+              },
+            });
+            return updated?.providerOverride === "openrouter" && updated.modelOverride === model.id;
+          },
         }),
       {
         names: [LINE_MODEL_CATALOG_TOOL_NAME],
