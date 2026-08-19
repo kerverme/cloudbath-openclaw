@@ -5,10 +5,9 @@ import {
   type OpenClawPluginApi,
 } from "openclaw/plugin-sdk/channel-entry-contract";
 import { createLazyRuntimeModule } from "openclaw/plugin-sdk/lazy-runtime";
-import { applyModelOverrideToSessionEntry } from "openclaw/plugin-sdk/model-session-runtime";
-import { patchSessionEntry } from "openclaw/plugin-sdk/session-store-runtime";
 import {
   createLineModelCatalogTool,
+  createLineSessionModelApplier,
   type LinePendingModelSelection,
   LINE_MODEL_CATALOG_TOOL_NAME,
   LINE_MODEL_SELECTION_MAX_ENTRIES,
@@ -16,6 +15,7 @@ import {
   LINE_MODEL_SELECTION_TTL_MS,
   createLineModelSwitchGuard,
 } from "./src/model-catalog-tool.js";
+import { createLineModelSwitchIntentRouter } from "./src/model-switch-router.js";
 
 type RegisteredLineCardCommand = OpenClawPluginCommandDefinition;
 
@@ -69,37 +69,25 @@ export default defineBundledChannelEntry({
           sessionId: ctx.sessionId,
           pendingStore: pendingModelSelectionStore,
           resolveApiKey: ctx.resolveApiKeyForProvider,
-          applySessionModel: async (model) => {
-            const sessionKey = ctx.sessionKey?.trim();
-            if (!sessionKey) {
-              return false;
-            }
-            const updated = await patchSessionEntry({
-              agentId: ctx.agentId,
-              sessionKey,
-              readConsistency: "latest",
-              replaceEntry: true,
-              requireWriteSuccess: true,
-              update: (entry) => {
-                applyModelOverrideToSessionEntry({
-                  entry,
-                  selection: {
-                    provider: "openrouter",
-                    model: model.id,
-                    isDefault: false,
-                  },
-                  markLiveSwitchPending: true,
-                });
-                return entry;
-              },
-            });
-            return updated?.providerOverride === "openrouter" && updated.modelOverride === model.id;
-          },
+          applySessionModel: createLineSessionModelApplier({
+            agentId: ctx.agentId,
+            sessionKey: ctx.sessionKey,
+          }),
         }),
       {
         names: [LINE_MODEL_CATALOG_TOOL_NAME],
         optional: true,
       },
+    );
+
+    // Deterministic pre-agent routing: an owner's explicit switch request
+    // ("เปลี่ยนเป็น gemini หน่อย", "switch to Claude") or a numeric reply to an
+    // active pending picker is handled here, before the main agent ever runs,
+    // so the flow no longer depends on the active LLM deciding to call the
+    // AI-facing picker tool above. Ordinary model discussion is untouched.
+    api.on(
+      "before_dispatch",
+      createLineModelSwitchIntentRouter({ pendingStore: pendingModelSelectionStore }),
     );
 
     const loadLineCardCommand = createLineCardCommandLoader(api);

@@ -35,7 +35,12 @@ const BUNDLED_TYPED_HOOK_REGISTRATION_GUARDS = {
   "extensions/diffs/src/plugin.ts": ["before_prompt_build"],
   "extensions/discord/subagent-hooks-api.ts": ["subagent_delivery_target", "subagent_ended"],
   "extensions/feishu/subagent-hooks-api.ts": ["subagent_delivery_target", "subagent_ended"],
-  "extensions/line/index.ts": ["agent_end", "before_agent_run", "before_tool_call"],
+  "extensions/line/index.ts": [
+    "agent_end",
+    "before_agent_run",
+    "before_dispatch",
+    "before_tool_call",
+  ],
   "extensions/matrix/subagent-hooks-api.ts": ["subagent_delivery_target", "subagent_ended"],
   "extensions/memory-core/src/dreaming.ts": ["before_agent_reply", "gateway_start", "gateway_stop"],
   "extensions/memory-lancedb/index.ts": ["agent_end", "before_prompt_build", "session_end"],

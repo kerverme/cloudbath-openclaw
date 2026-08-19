@@ -695,4 +695,74 @@ describe("LINE session model switch guard", () => {
       ),
     ).toBeUndefined();
   });
+
+  it("blocks a gateway config.patch that mutates agents.list[].model during a LINE run", () => {
+    const guard = createLineModelSwitchGuard();
+    const ctx = { channel: "line", runId: "run-1" };
+    guard.beforeAgentRun({}, ctx);
+
+    expect(
+      guard.beforeToolCall(
+        {
+          toolName: "gateway",
+          params: {
+            action: "config.patch",
+            raw: JSON.stringify({ agents: { list: [{ id: "line", model: "openrouter/x" }] } }),
+          },
+        },
+        ctx,
+      ),
+    ).toMatchObject({ block: true });
+  });
+
+  it("blocks a gateway config.apply whose replacePaths target a model path", () => {
+    const guard = createLineModelSwitchGuard();
+    const ctx = { channel: "line", runId: "run-1" };
+    guard.beforeAgentRun({}, ctx);
+
+    expect(
+      guard.beforeToolCall(
+        {
+          toolName: "gateway",
+          params: {
+            action: "config.patch",
+            raw: "{}",
+            replacePaths: ["agents.list[0].model"],
+          },
+        },
+        ctx,
+      ),
+    ).toMatchObject({ block: true });
+  });
+
+  it("keeps unrelated gateway config mutations and read actions unblocked", () => {
+    const guard = createLineModelSwitchGuard();
+    const ctx = { channel: "line", runId: "run-1" };
+    guard.beforeAgentRun({}, ctx);
+
+    expect(
+      guard.beforeToolCall(
+        {
+          toolName: "gateway",
+          params: {
+            action: "config.patch",
+            raw: JSON.stringify({ messages: { visibleReplies: true } }),
+          },
+        },
+        ctx,
+      ),
+    ).toBeUndefined();
+    expect(
+      guard.beforeToolCall({ toolName: "gateway", params: { action: "config.get" } }, ctx),
+    ).toBeUndefined();
+    expect(
+      guard.beforeToolCall(
+        {
+          toolName: "gateway",
+          params: { action: "config.patch", raw: JSON.stringify({ agents: {} }) },
+        },
+        { channel: "telegram", runId: "run-2" },
+      ),
+    ).toBeUndefined();
+  });
 });

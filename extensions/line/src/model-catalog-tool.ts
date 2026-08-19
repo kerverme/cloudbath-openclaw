@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
+import { applyModelOverrideToSessionEntry } from "openclaw/plugin-sdk/model-session-runtime";
 import type { PluginStateKeyedStore } from "openclaw/plugin-sdk/plugin-state-runtime";
+import { patchSessionEntry } from "openclaw/plugin-sdk/session-store-runtime";
 import { jsonResult } from "openclaw/plugin-sdk/tool-results";
 import { Type } from "typebox";
 
@@ -116,6 +118,30 @@ function agentRunContextKeys(ctx: AgentRunContext): string[] {
   ].filter(Boolean);
 }
 
+// The gateway tool's config.apply/config.patch actions allow a narrow set of
+// agent-tunable paths, and "agents.list[].model" is one of them (see
+// ALLOWED_GATEWAY_CONFIG_PATHS in gateway-tool.ts) — a real path for an LLM to
+// persist a model change to global config, bypassing the validated LINE
+// picker's session-only mutation entirely. Block any gateway config mutation
+// that touches a model-shaped path/key while a LINE agent run is active; every
+// other allowed path (thinkingDefault, reasoningDefault, requireMention,
+// visibleReplies, ...) has no "model" substring, so this check cannot
+// false-positive against the tool's own allowlist.
+const GATEWAY_CONFIG_MUTATION_ACTIONS = new Set(["config.apply", "config.patch"]);
+const MODEL_PATH_PATTERN = /model/iu;
+
+function gatewayCallTouchesModelConfig(params: Record<string, unknown>): boolean {
+  if (!GATEWAY_CONFIG_MUTATION_ACTIONS.has(String(params.action))) {
+    return false;
+  }
+  const raw = typeof params.raw === "string" ? params.raw : "";
+  const replacePaths = Array.isArray(params.replacePaths) ? params.replacePaths : [];
+  return (
+    MODEL_PATH_PATTERN.test(raw) ||
+    replacePaths.some((path) => typeof path === "string" && MODEL_PATH_PATTERN.test(path))
+  );
+}
+
 /** Blocks AI-facing LINE model mutation outside the catalog-validated picker tool. */
 export function createLineModelSwitchGuard() {
   const activeLineContexts = new Set<string>();
@@ -132,14 +158,20 @@ export function createLineModelSwitchGuard() {
       const isActiveLineContext = agentRunContextKeys(ctx).some((key) =>
         activeLineContexts.has(key),
       );
-      if (
-        isActiveLineContext &&
-        event.toolName === "session_status" &&
-        typeof event.params.model === "string"
-      ) {
+      if (!isActiveLineContext) {
+        return undefined;
+      }
+      if (event.toolName === "session_status" && typeof event.params.model === "string") {
         return {
           block: true,
           blockReason: "LINE session model changes require the validated model picker.",
+        };
+      }
+      if (event.toolName === "gateway" && gatewayCallTouchesModelConfig(event.params)) {
+        return {
+          block: true,
+          blockReason:
+            "LINE session model changes require the validated model picker; global config model mutation is blocked from this session.",
         };
       }
       return undefined;
@@ -149,6 +181,40 @@ export function createLineModelSwitchGuard() {
         activeLineContexts.delete(key);
       }
     },
+  };
+}
+
+/**
+ * Builds a session-only model applier for one LINE conversation. Shared by the
+ * AI-facing catalog tool and the deterministic model-switch intent router so
+ * both apply verified catalog selections through the exact same session-store
+ * mutation — never global config, never a Gateway restart.
+ */
+export function createLineSessionModelApplier(params: {
+  agentId?: string;
+  sessionKey?: string;
+}): (model: OpenRouterAccountModel) => Promise<boolean> {
+  return async (model) => {
+    const sessionKey = params.sessionKey?.trim();
+    if (!sessionKey) {
+      return false;
+    }
+    const updated = await patchSessionEntry({
+      agentId: params.agentId,
+      sessionKey,
+      readConsistency: "latest",
+      replaceEntry: true,
+      requireWriteSuccess: true,
+      update: (entry) => {
+        applyModelOverrideToSessionEntry({
+          entry,
+          selection: { provider: "openrouter", model: model.id, isDefault: false },
+          markLiveSwitchPending: true,
+        });
+        return entry;
+      },
+    });
+    return updated?.providerOverride === "openrouter" && updated.modelOverride === model.id;
   };
 }
 
