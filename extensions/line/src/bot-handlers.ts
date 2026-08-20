@@ -37,6 +37,7 @@ import {
 } from "./bot-message-context.js";
 import { downloadLineMedia } from "./download.js";
 import { resolveLineGroupConfigEntry } from "./group-keys.js";
+import type { LineGroupSilentGate } from "./group-owner-control.js";
 import { pushMessageLine, replyMessageLine } from "./send.js";
 import type { LineGroupConfig, ResolvedLineAccount } from "./types.js";
 
@@ -75,6 +76,12 @@ interface LineHandlerContext {
   replayCache?: LineWebhookReplayCache;
   groupHistories?: Map<string, HistoryEntry[]>;
   historyLimit?: number;
+  /**
+   * Owner-only per-group/room silent-mode gate (group-owner-control.ts).
+   * Optional so existing callers/tests that never construct one keep their
+   * current behavior exactly — an absent gate means silent mode is inert.
+   */
+  silentGate?: LineGroupSilentGate;
 }
 
 const LINE_WEBHOOK_REPLAY_WINDOW_MS = 10 * 60 * 1000;
@@ -446,19 +453,39 @@ async function handleMessageEvent(event: MessageEvent, context: LineHandlerConte
     return;
   }
 
-  const { isGroup, groupId, roomId } = getLineSourceInfo(event.source);
+  const { isGroup, groupId, roomId, userId: senderId } = getLineSourceInfo(event.source);
+
+  // Owner-only silent-mode gate: runs after normal access control (above) but
+  // before mention activation, media download, and buildLineMessageContext,
+  // so a SILENT group/room never reaches any of that expensive/side-effecting
+  // work, and the owner's own "7272" toggle bypasses requireMention entirely
+  // (it is consumed here, before the mention-skip check below ever runs).
+  if (isGroup && context.silentGate) {
+    const gateOutcome = await context.silentGate({
+      cfg,
+      account,
+      isGroup,
+      groupId,
+      roomId,
+      senderId,
+      rawText: message.type === "text" ? message.text : undefined,
+      isTextMessage: message.type === "text",
+    });
+    if (gateOutcome.kind === "toggle-consumed" || gateOutcome.kind === "silent-suppressed") {
+      return;
+    }
+  }
+
   if (isGroup && decision.activationAccess.shouldSkip) {
     const rawText = message.type === "text" ? message.text : "";
-    const sourceInfo = getLineSourceInfo(event.source);
     logVerbose(`line: skipping group message (requireMention, not mentioned)`);
     const historyKey = groupId ?? roomId;
-    const senderId = sourceInfo.userId ?? "unknown";
     if (historyKey && context.groupHistories) {
       createChannelHistoryWindow({ historyMap: context.groupHistories }).record({
         historyKey,
         limit: context.historyLimit ?? DEFAULT_GROUP_HISTORY_LIMIT,
         entry: {
-          sender: `user:${senderId}`,
+          sender: `user:${senderId ?? "unknown"}`,
           body: rawText || `<${message.type}>`,
           timestamp: event.timestamp,
         },
@@ -554,6 +581,24 @@ async function handlePostbackEvent(
   const decision = await shouldProcessLineEvent(event, context);
   if (!decision) {
     return;
+  }
+
+  const { isGroup, groupId, roomId, userId: senderId } = getLineSourceInfo(event.source);
+  if (isGroup && context.silentGate) {
+    // Postbacks never carry the "7272" toggle text, so this only ever
+    // suppresses while SILENT or passes through — never toggle-consumed.
+    const gateOutcome = await context.silentGate({
+      cfg: context.cfg,
+      account: context.account,
+      isGroup,
+      groupId,
+      roomId,
+      senderId,
+      isTextMessage: false,
+    });
+    if (gateOutcome.kind === "silent-suppressed") {
+      return;
+    }
   }
 
   const postbackContext = await buildLinePostbackContext({

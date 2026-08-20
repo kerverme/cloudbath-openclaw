@@ -259,7 +259,7 @@ function resolveLineConversationLabel(params: {
     : params.senderLabel;
 }
 
-function resolveLineAddresses(params: {
+export function resolveLineAddresses(params: {
   isGroup: boolean;
   groupId?: string;
   roomId?: string;

@@ -11,6 +11,7 @@ import {
 import { resolveLineAccount } from "./accounts.js";
 import { createLineWebhookReplayCache, handleLineWebhookEvents } from "./bot-handlers.js";
 import type { LineInboundContext } from "./bot-message-context.js";
+import { createLineGroupSilentGate } from "./group-owner-control.js";
 import type { ResolvedLineAccount } from "./types.js";
 
 interface LineBotOptions {
@@ -46,6 +47,7 @@ export function createLineBot(opts: LineBotOptions): LineBot {
     });
   const replayCache = createLineWebhookReplayCache();
   const groupHistories = new Map<string, HistoryEntry[]>();
+  const silentGate = createLineGroupSilentGate();
 
   const handleWebhook = async (body: webhook.CallbackRequest): Promise<void> => {
     if (!body.events || body.events.length === 0) {
@@ -61,6 +63,7 @@ export function createLineBot(opts: LineBotOptions): LineBot {
       replayCache,
       groupHistories,
       historyLimit: cfg.messages?.groupChat?.historyLimit ?? DEFAULT_GROUP_HISTORY_LIMIT,
+      silentGate,
     });
   };
 
