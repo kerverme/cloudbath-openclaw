@@ -88,7 +88,7 @@ export async function resolveLineCanonicalOwner(params: {
     cfg: params.cfg,
     commandAuthorized: false,
   });
-  return authorization.senderIsOwner === true;
+  return authorization.senderIsOwner;
 }
 
 export type LineGroupSilentGateOutcome =
