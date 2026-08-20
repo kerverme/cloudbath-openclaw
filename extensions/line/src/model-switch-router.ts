@@ -47,19 +47,28 @@ type LineBeforeDispatchResult = {
 };
 
 export type LineModelControlIntent =
-  | { kind: "switch"; query: string }
+  | { kind: "switch"; query: string; explicit: boolean }
   | { kind: "numeric"; selection: number }
   | { kind: "none" };
 
-// Leading verb phrases that mark an explicit switch request. Longest-first so
+// Leading verb phrases that mark a tentative switch request. Longest-first so
 // "เปลี่ยนเป็น" is matched whole instead of leaving a stray "เป็น" behind after
 // the shorter "เปลี่ยน" prefix consumes part of it.
 const THAI_SWITCH_PREFIXES = ["เปลี่ยนเป็น", "เปลี่ยน", "ลองใช้", "ลอง", "ใช้"].toSorted(
   (a, b) => b.length - a.length,
 );
 const ENGLISH_SWITCH_PREFIXES = ["switch to", "change to"].toSorted((a, b) => b.length - a.length);
+// "เปลี่ยนเป็น"/"switch to"/"change to" are unambiguous "become X" constructions
+// with low false-positive risk on their own (see explicit-vs-tentative below).
+// The bare verbs "เปลี่ยน"/"ลอง"/"ใช้"/"ลองใช้" are extremely common Thai words
+// used constantly outside any model-control context ("ลองคิดดูหน่อย" = "try to
+// think about it", "ใช้เวลานานไหม" = "does it take long") — NOT in this set.
+const STRONG_THAI_SWITCH_PREFIXES = new Set(["เปลี่ยนเป็น"]);
 // Connector words between the verb and the model term ("เปลี่ยน model เป็น GPT").
 const LEADING_CONNECTOR_WORDS = ["model", "โมเดล", "เป็น"];
+// A connector that is itself the word "model"/"โมเดล" is explicit switch intent
+// even behind a bare/tentative verb ("เปลี่ยน model เป็น claude").
+const MODEL_CONNECTOR_WORDS = new Set(["model", "โมเดล"]);
 // Thai softeners/fillers the user tacks on around the model term.
 const TRAILING_FILLER_PHRASES = ["ให้หน่อย", "ตัวใหม่", "ให้ที", "ดูหน่อย", "หน่อย", "เลย"].toSorted(
   (a, b) => b.length - a.length,
@@ -67,28 +76,38 @@ const TRAILING_FILLER_PHRASES = ["ให้หน่อย", "ตัวใหม
 const NUMERIC_SELECTION_PATTERN = /^\d+$/u;
 const MAX_CLASSIFIER_STRIP_ITERATIONS = 4;
 
-function matchLeadingSwitchPrefix(text: string): string | null {
+type PrefixMatch = { remainder: string; strong: boolean };
+
+function matchLeadingSwitchPrefix(text: string): PrefixMatch | null {
   // Thai has no case; English is matched case-insensitively.
   for (const prefix of THAI_SWITCH_PREFIXES) {
     if (text.startsWith(prefix)) {
-      return text.slice(prefix.length);
+      return {
+        remainder: text.slice(prefix.length),
+        strong: STRONG_THAI_SWITCH_PREFIXES.has(prefix),
+      };
     }
   }
   const lower = text.toLowerCase();
   for (const prefix of ENGLISH_SWITCH_PREFIXES) {
     if (lower.startsWith(prefix)) {
-      return text.slice(prefix.length);
+      // "switch to"/"change to" are as unambiguous in English as "เปลี่ยนเป็น" is in Thai.
+      return { remainder: text.slice(prefix.length), strong: true };
     }
   }
   return null;
 }
 
-function stripLeadingConnectors(text: string): string {
+function stripLeadingConnectors(text: string): { remainder: string; sawModelWord: boolean } {
   let remainder = text.trim();
+  let sawModelWord = false;
   for (let guard = 0; guard < MAX_CLASSIFIER_STRIP_ITERATIONS; guard += 1) {
     const before = remainder;
     for (const word of LEADING_CONNECTOR_WORDS) {
       if (remainder.toLowerCase().startsWith(word.toLowerCase())) {
+        if (MODEL_CONNECTOR_WORDS.has(word.toLowerCase())) {
+          sawModelWord = true;
+        }
         remainder = remainder.slice(word.length).trim();
       }
     }
@@ -96,7 +115,7 @@ function stripLeadingConnectors(text: string): string {
       break;
     }
   }
-  return remainder;
+  return { remainder, sawModelWord };
 }
 
 function stripTrailingFillers(text: string): string {
@@ -117,28 +136,42 @@ function stripTrailingFillers(text: string): string {
 
 /**
  * Extracts the user's literal switch-target wording, stripped of the leading
- * verb/connector and trailing filler words. Never maps the extracted text to a
- * model ID — that resolution is entirely the existing catalog picker's job.
+ * verb/connector and trailing filler words, plus whether the wording itself
+ * was explicit enough to trust without catalog corroboration. Never maps the
+ * extracted text to a model ID — that resolution is entirely the existing
+ * catalog picker's job.
  */
-function extractSwitchQuery(rawText: string): string | null {
+function extractSwitchQuery(rawText: string): { query: string; explicit: boolean } | null {
   const trimmed = rawText.trim();
   if (!trimmed) {
     return null;
   }
-  const afterPrefix = matchLeadingSwitchPrefix(trimmed);
-  if (afterPrefix === null) {
+  const prefixMatch = matchLeadingSwitchPrefix(trimmed);
+  if (!prefixMatch) {
     return null;
   }
-  const query = stripTrailingFillers(stripLeadingConnectors(afterPrefix));
-  return query.length > 0 ? query : null;
+  const { remainder: afterConnectors, sawModelWord } = stripLeadingConnectors(
+    prefixMatch.remainder,
+  );
+  const query = stripTrailingFillers(afterConnectors);
+  return query.length > 0 ? { query, explicit: prefixMatch.strong || sawModelWord } : null;
 }
 
 /**
- * Deterministically classifies a LINE message as an explicit model-switch
- * request, a numeric picker reply, or ordinary chat. Only messages that START
- * with a recognized switch verb count as a switch request, so comparisons and
- * questions that merely mention a model name ("Gemini ดีไหม", "Grok เก่งกว่า
- * Claude ไหม") never match and continue to the normal agent unchanged.
+ * Deterministically classifies a LINE message as a (tentative or explicit)
+ * model-switch request, a numeric picker reply, or ordinary chat. Only
+ * messages that START with a recognized switch verb count as a switch
+ * request, so comparisons and questions that merely mention a model name
+ * ("Gemini ดีไหม", "Grok เก่งกว่า Claude ไหม") never match and continue to the
+ * normal agent unchanged.
+ *
+ * The leading verb alone is not proof of intent: "เปลี่ยน"/"ลอง"/"ใช้"/"ลองใช้"
+ * are ordinary Thai words used constantly outside any model context, so a
+ * match through one of those bare verbs is only `explicit: false` — tentative
+ * — and the caller must corroborate it against the live catalog before
+ * claiming the message (see createLineModelSwitchIntentRouter). Only the
+ * unambiguous "เปลี่ยนเป็น"/"switch to"/"change to" constructions, or wording
+ * that explicitly names "model"/"โมเดล", are trusted as `explicit: true`.
  */
 export function classifyLineModelControlIntent(rawText: string): LineModelControlIntent {
   const trimmed = rawText.trim();
@@ -151,8 +184,10 @@ export function classifyLineModelControlIntent(rawText: string): LineModelContro
       ? { kind: "numeric", selection }
       : { kind: "none" };
   }
-  const query = extractSwitchQuery(trimmed);
-  return query ? { kind: "switch", query } : { kind: "none" };
+  const extracted = extractSwitchQuery(trimmed);
+  return extracted
+    ? { kind: "switch", query: extracted.query, explicit: extracted.explicit }
+    : { kind: "none" };
 }
 
 function formatModelChoiceLines(value: unknown): string {
@@ -313,6 +348,16 @@ export function createLineModelSwitchIntentRouter(params: {
     if (intent.kind === "numeric" && details.resolution === "no_pending") {
       // No active pending selection for this session+owner: treat the bare
       // number as ordinary chat instead of a picker reply.
+      return undefined;
+    }
+    if (intent.kind === "switch" && !intent.explicit && details.resolution === "no_match") {
+      // A tentative match (bare "เปลี่ยน"/"ลอง"/"ใช้"/"ลองใช้", no "model"/"โมเดล"
+      // wording) found zero credible evidence in the live catalog that the
+      // extracted text names a real model — e.g. "ลองคิดดูหน่อย" ("try to think
+      // about it") vs "ลอง gemini". Fall through to ordinary chat instead of
+      // hijacking the message with an irrelevant "model not found" reply.
+      // Explicit wording ("เปลี่ยนเป็น X", "เปลี่ยน model เป็น X") still reports
+      // no_match normally, since the user unambiguously asked to switch.
       return undefined;
     }
 

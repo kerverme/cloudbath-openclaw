@@ -131,19 +131,27 @@ function ownerEvent(body: string, overrides?: Record<string, unknown>) {
 const ctxFor = (sessionKey = "line-session-a") => ({ sessionKey, agentId: "agent-1" });
 
 describe("classifyLineModelControlIntent", () => {
+  // "explicit" tracks whether the wording alone (the "เปลี่ยนเป็น"/"switch to"/
+  // "change to" construction, or an explicit "model"/"โมเดล" word) is trustworthy
+  // without catalog corroboration. A bare "เปลี่ยน"/"ลอง"/"ใช้"/"ลองใช้" verb is
+  // only tentative — see the router-level "credible catalog evidence" tests below.
   it.each([
-    ["เปลี่ยนเป็น gemini หน่อย", "gemini"],
-    ["เปลี่ยนเป็น Gemini", "Gemini"],
-    ["ลองใช้ Claude", "Claude"],
-    ["switch to Grok", "Grok"],
-    ["ใช้ DeepSeek ตัวใหม่", "DeepSeek"],
-    ["เปลี่ยน model เป็น GPT", "GPT"],
-    ["ลอง Grok", "Grok"],
-    ["switch to Claude", "Claude"],
-    ["ใช้ Grok ให้หน่อย", "Grok"],
-    ["switch to DeepSeek", "DeepSeek"],
-  ])("extracts the literal switch term from %s", (text, expectedQuery) => {
-    expect(classifyLineModelControlIntent(text)).toEqual({ kind: "switch", query: expectedQuery });
+    ["เปลี่ยนเป็น gemini หน่อย", "gemini", true],
+    ["เปลี่ยนเป็น Gemini", "Gemini", true],
+    ["ลองใช้ Claude", "Claude", false],
+    ["switch to Grok", "Grok", true],
+    ["ใช้ DeepSeek ตัวใหม่", "DeepSeek", false],
+    ["เปลี่ยน model เป็น GPT", "GPT", true],
+    ["ลอง Grok", "Grok", false],
+    ["switch to Claude", "Claude", true],
+    ["ใช้ Grok ให้หน่อย", "Grok", false],
+    ["switch to DeepSeek", "DeepSeek", true],
+  ])("extracts the literal switch term from %s", (text, expectedQuery, expectedExplicit) => {
+    expect(classifyLineModelControlIntent(text)).toEqual({
+      kind: "switch",
+      query: expectedQuery,
+      explicit: expectedExplicit,
+    });
   });
 
   it.each([
@@ -157,6 +165,24 @@ describe("classifyLineModelControlIntent", () => {
 
   it("classifies a bare number as a numeric selection", () => {
     expect(classifyLineModelControlIntent("2")).toEqual({ kind: "numeric", selection: 2 });
+  });
+
+  // Bare tentative-verb messages with no model connector are still classified as
+  // "switch" here (classification is purely lexical) — it's the router's live
+  // catalog check, not the classifier, that tells these apart from real switch
+  // requests like "ลอง gemini". See the router-level tests below.
+  it.each([
+    ["ลองคิดดูหน่อย", "คิด"],
+    ["ใช้เวลานานไหม", "เวลานานไหม"],
+    ["เปลี่ยนแผนหน่อย", "แผน"],
+    ["เปลี่ยนเสื้อ", "เสื้อ"],
+    ["ลองใช้แอปนี้", "แอปนี้"],
+  ])("classifies ordinary phrase %s as tentative (not explicit)", (text, expectedQuery) => {
+    expect(classifyLineModelControlIntent(text)).toEqual({
+      kind: "switch",
+      query: expectedQuery,
+      explicit: false,
+    });
   });
 });
 
@@ -316,6 +342,78 @@ describe("LINE model-switch intent router (before_dispatch)", () => {
     expect(result).toBeUndefined();
     expect(applySessionModel).not.toHaveBeenCalled();
     expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  describe("13: tentative generic-verb messages require credible catalog evidence", () => {
+    it.each([
+      ["ลองคิดดูหน่อย", "ordinary Thai request, not model-related"],
+      ["ใช้เวลานานไหม", "ordinary Thai question, not model-related"],
+      ["เปลี่ยนแผนหน่อย", "bare เปลี่ยน, not model-related"],
+      ["เปลี่ยนเสื้อ", "bare เปลี่ยน, not model-related"],
+      ["ลองใช้แอปนี้", "ลองใช้ with no catalog match"],
+    ])("falls through to the normal agent: %s (%s)", async (text) => {
+      const { router, applySessionModel, fetchImpl } = createRouter();
+      const result = await router(ownerEvent(text), ctxFor());
+
+      // The tentative verb still triggers a live catalog search (this is the
+      // whole point — resolving via the live catalog rather than a static
+      // model-name list) but a no_match result on a tentative message must
+      // fall through instead of hijacking the reply.
+      expect(fetchImpl).toHaveBeenCalled();
+      expect(result).toBeUndefined();
+      expect(applySessionModel).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ["เปลี่ยนเป็น deepseek", "deepseek/deepseek"],
+      ["ลองใช้ claude", "anthropic/claude"],
+      ["ลอง gemini", "google/gemini"],
+      ["ใช้ gpt", "openai/gpt"],
+      ["เปลี่ยน model เป็น claude", "anthropic/claude"],
+    ])("still switches on a credible catalog match: %s", async (text, expectedModelId) => {
+      const { router, applySessionModel } = createRouter();
+      const result = await router(ownerEvent(text), ctxFor());
+
+      expect(result?.handled).toBe(true);
+      expect(applySessionModel).toHaveBeenCalledWith(
+        expect.objectContaining({ id: expectedModelId }),
+      );
+    });
+
+    it("explicit wording still reports model-not-found on a genuine no_match (does not fall through)", async () => {
+      const { router, applySessionModel } = createRouter();
+      const result = await router(ownerEvent("เปลี่ยนเป็น totallynonexistentmodel"), ctxFor());
+
+      expect(result?.handled).toBe(true);
+      expect(result?.text).toContain("totallynonexistentmodel");
+      expect(applySessionModel).not.toHaveBeenCalled();
+    });
+
+    it("a tentative verb with multiple credible catalog candidates still creates a numbered pending picker", async () => {
+      const { router, pendingStore, applySessionModel } = createRouter({
+        catalog: ambiguousLunaProCatalog(),
+      });
+      const result = await router(ownerEvent("ลอง Luna Pro"), ctxFor());
+
+      expect(result?.handled).toBe(true);
+      expect(result?.text).toContain("เจอ luna pro หลายรุ่น:");
+      expect(applySessionModel).not.toHaveBeenCalled();
+      const stored = await pendingStore.entries();
+      expect(stored).toHaveLength(1);
+    });
+
+    it("pending numeric selection created via a tentative-verb search still resolves exactly as before", async () => {
+      const { router, applySessionModel } = createRouter({ catalog: ambiguousLunaProCatalog() });
+      await router(ownerEvent("ลอง Luna Pro"), ctxFor());
+
+      const result = await router(ownerEvent("2"), ctxFor());
+
+      expect(result?.handled).toBe(true);
+      expect(result?.text).toBe("เปลี่ยนเป็น Luna Pro Mini แล้ว");
+      expect(applySessionModel).toHaveBeenCalledWith(
+        expect.objectContaining({ id: "openai/luna-pro-mini" }),
+      );
+    });
   });
 
   it("14/15: applies the model through the session-only applier, not a global mutation, and never restarts Gateway", async () => {
