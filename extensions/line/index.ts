@@ -5,6 +5,7 @@ import {
   type OpenClawPluginApi,
 } from "openclaw/plugin-sdk/channel-entry-contract";
 import { createLazyRuntimeModule } from "openclaw/plugin-sdk/lazy-runtime";
+import type { PluginStateKeyedStore } from "openclaw/plugin-sdk/plugin-state-runtime";
 import {
   createLineModelCatalogTool,
   createLineSessionModelApplier,
@@ -15,9 +16,26 @@ import {
   LINE_MODEL_SELECTION_TTL_MS,
   createLineModelSwitchGuard,
 } from "./src/model-catalog-tool.js";
-import { createLineModelSwitchIntentRouter } from "./src/model-switch-router.js";
 
 type RegisteredLineCardCommand = OpenClawPluginCommandDefinition;
+// Inline `import(...)` type (no top-level `./src/` import statement) keeps this
+// bundled channel entrypoint on the dynamic-import boundary: the shape guard
+// (src/channels/plugins/bundled.shape-guard.test.ts) forbids a static
+// import/export line referencing "./src/" here, the same reason the card
+// command below is loaded through `createLazyRuntimeModule` instead of a
+// top-level import.
+type LineModelSwitchIntentRouter = ReturnType<
+  typeof import("./src/model-switch-router.js").createLineModelSwitchIntentRouter
+>;
+
+function createLineModelSwitchIntentRouterLoader(
+  pendingStore: PluginStateKeyedStore<LinePendingModelSelection>,
+) {
+  return createLazyRuntimeModule<LineModelSwitchIntentRouter>(async () => {
+    const { createLineModelSwitchIntentRouter } = await import("./src/model-switch-router.js");
+    return createLineModelSwitchIntentRouter({ pendingStore });
+  });
+}
 
 function createLineCardCommandLoader(api: OpenClawPluginApi) {
   return createLazyRuntimeModule<RegisteredLineCardCommand>(async () => {
@@ -85,10 +103,15 @@ export default defineBundledChannelEntry({
     // active pending picker is handled here, before the main agent ever runs,
     // so the flow no longer depends on the active LLM deciding to call the
     // AI-facing picker tool above. Ordinary model discussion is untouched.
-    api.on(
-      "before_dispatch",
-      createLineModelSwitchIntentRouter({ pendingStore: pendingModelSelectionStore }),
+    // Loaded lazily (see createLineModelSwitchIntentRouterLoader) so this
+    // entrypoint has no static "./src/" import for the router module.
+    const loadModelSwitchIntentRouter = createLineModelSwitchIntentRouterLoader(
+      pendingModelSelectionStore,
     );
+    api.on("before_dispatch", async (event, ctx) => {
+      const router = await loadModelSwitchIntentRouter();
+      return router(event, ctx);
+    });
 
     const loadLineCardCommand = createLineCardCommandLoader(api);
     api.registerCommand({
