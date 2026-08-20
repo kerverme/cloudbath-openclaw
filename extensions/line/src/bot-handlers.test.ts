@@ -1277,4 +1277,227 @@ describe("handleLineWebhookEvents", () => {
     expect(buildLineMessageContextMock).toHaveBeenCalledTimes(2);
     expect(processMessage).toHaveBeenCalledTimes(2);
   });
+
+  describe("owner-only group silent mode (7272)", () => {
+    const OWNER_ID = "owner-user";
+    const MEMBER_ID = "member-user";
+
+    function createFakeSilentStore() {
+      const values = new Map<string, { silent: true; toggledAt: number }>();
+      return {
+        values,
+        store: {
+          async register(key: string, value: { silent: true; toggledAt: number }) {
+            values.set(key, value);
+          },
+          async registerIfAbsent(key: string, value: { silent: true; toggledAt: number }) {
+            if (values.has(key)) {
+              return false;
+            }
+            values.set(key, value);
+            return true;
+          },
+          async lookup(key: string) {
+            return values.get(key);
+          },
+          async consume(key: string) {
+            const value = values.get(key);
+            values.delete(key);
+            return value;
+          },
+          async delete(key: string) {
+            return values.delete(key);
+          },
+          async entries() {
+            return [...values.entries()].map(([key, value]) => ({ key, value, createdAt: 0 }));
+          },
+          async clear() {
+            values.clear();
+          },
+        },
+      };
+    }
+
+    async function buildSilentGate(params?: { preSilentGroupId?: string }) {
+      const { createLineGroupSilentGate } = await import("./group-owner-control.js");
+      const fake = createFakeSilentStore();
+      if (params?.preSilentGroupId) {
+        await fake.store.register(`default|group:${params.preSilentGroupId}`, {
+          silent: true,
+          toggledAt: 0,
+        });
+      }
+      const resolveOwner = vi.fn(
+        async ({ senderId }: { senderId?: string }) => senderId === OWNER_ID,
+      );
+      const gate = createLineGroupSilentGate({ getStore: () => fake.store, resolveOwner });
+      return { gate, store: fake.store, resolveOwner };
+    }
+
+    it("10: owner 7272 toggles silent without @mention even when requireMention=true", async () => {
+      const { gate, store } = await buildSilentGate();
+      const processMessage = vi.fn();
+      const event = createTestMessageEvent({
+        message: { id: "m-7272-toggle", type: "text", text: "7272", quoteToken: "q-7272" },
+        source: { type: "group", groupId: "group-1", userId: OWNER_ID },
+        webhookEventId: "evt-7272-toggle",
+      });
+
+      await handleLineWebhookEvents([event], {
+        ...createLineWebhookTestContext({
+          processMessage,
+          groupPolicy: "open",
+          requireMention: true,
+        }),
+        silentGate: gate,
+      });
+
+      expect(processMessage).not.toHaveBeenCalled();
+      expect(buildLineMessageContextMock).not.toHaveBeenCalled();
+      expect(await store.lookup("default|group:group-1")).toMatchObject({ silent: true });
+    });
+
+    it("11: while SILENT, ordinary text never reaches processMessage", async () => {
+      const { gate } = await buildSilentGate({ preSilentGroupId: "group-1" });
+      const processMessage = vi.fn();
+      const event = createTestMessageEvent({
+        message: { id: "m-silent-text", type: "text", text: "hello", quoteToken: "q-silent-text" },
+        source: { type: "group", groupId: "group-1", userId: MEMBER_ID },
+        webhookEventId: "evt-silent-text",
+      });
+
+      await handleLineWebhookEvents([event], {
+        ...createLineWebhookTestContext({ processMessage, groupPolicy: "open" }),
+        silentGate: gate,
+      });
+
+      expect(processMessage).not.toHaveBeenCalled();
+      expect(buildLineMessageContextMock).not.toHaveBeenCalled();
+    });
+
+    it("12: while SILENT, image media never reaches downloadLineMedia", async () => {
+      const { gate } = await buildSilentGate({ preSilentGroupId: "group-1" });
+      const processMessage = vi.fn();
+      const event = createTestMessageEvent({
+        message: {
+          id: "m-silent-image",
+          type: "image",
+          contentProvider: { type: "line" },
+          quoteToken: "q-silent-image",
+        },
+        source: { type: "group", groupId: "group-1", userId: MEMBER_ID },
+        webhookEventId: "evt-silent-image",
+      });
+
+      await handleLineWebhookEvents([event], {
+        ...createLineWebhookTestContext({ processMessage, groupPolicy: "open" }),
+        silentGate: gate,
+      });
+
+      expect(downloadLineMediaMock).not.toHaveBeenCalled();
+      expect(processMessage).not.toHaveBeenCalled();
+    });
+
+    it("13: while SILENT, traffic is not added to group history", async () => {
+      const { gate } = await buildSilentGate({ preSilentGroupId: "group-1" });
+      const processMessage = vi.fn();
+      const groupHistories = new Map<string, HistoryEntry[]>();
+      // requireMention: true would normally still record an unmentioned message
+      // into history via the mention-skip branch; SILENT must pre-empt that.
+      const event = createTestMessageEvent({
+        message: { id: "m-silent-hist", type: "text", text: "hello", quoteToken: "q-silent-hist" },
+        source: { type: "group", groupId: "group-1", userId: MEMBER_ID },
+        webhookEventId: "evt-silent-hist",
+      });
+
+      await handleLineWebhookEvents([event], {
+        ...createLineWebhookTestContext({
+          processMessage,
+          groupPolicy: "open",
+          requireMention: true,
+          groupHistories,
+        }),
+        silentGate: gate,
+      });
+
+      expect(groupHistories.has("group-1")).toBe(false);
+      expect(processMessage).not.toHaveBeenCalled();
+    });
+
+    it("14: while SILENT, postback does not reach the agent/tool path", async () => {
+      const { gate } = await buildSilentGate({ preSilentGroupId: "group-1" });
+      const processMessage = vi.fn();
+      const event = {
+        type: "postback",
+        postback: { data: "action=confirm" },
+        replyToken: "reply-token",
+        timestamp: Date.now(),
+        source: { type: "group", groupId: "group-1", userId: MEMBER_ID },
+        mode: "active",
+        webhookEventId: "evt-silent-postback",
+        deliveryContext: { isRedelivery: false },
+      } as PostbackEvent;
+
+      await handleLineWebhookEvents([event], {
+        ...createLineWebhookTestContext({ processMessage, groupPolicy: "open" }),
+        silentGate: gate,
+      });
+
+      expect(buildLinePostbackContextMock).not.toHaveBeenCalled();
+      expect(processMessage).not.toHaveBeenCalled();
+    });
+
+    it("15: DM behavior remains unchanged with a silent gate present", async () => {
+      const { gate, store } = await buildSilentGate();
+      const lookupSpy = vi.spyOn(store, "lookup");
+      const processMessage = vi.fn();
+      const event = createTestMessageEvent({
+        message: { id: "m-dm-unaffected", type: "text", text: "7272", quoteToken: "q-dm" },
+        source: { type: "user", userId: OWNER_ID },
+        webhookEventId: "evt-dm-unaffected",
+      });
+
+      await handleLineWebhookEvents([event], {
+        ...createLineWebhookTestContext({ processMessage, dmPolicy: "open" }),
+        silentGate: gate,
+      });
+
+      // "7272" from a DM is ordinary text -- 7272 control is group/room-only.
+      expect(processMessage).toHaveBeenCalledTimes(1);
+      expect(lookupSpy).not.toHaveBeenCalled();
+    });
+
+    it("17: a duplicate/replayed owner 7272 webhook does not double-toggle", async () => {
+      const { gate, store, resolveOwner } = await buildSilentGate();
+      const processMessage = vi.fn();
+      const event = createReplayMessageEvent({
+        messageId: "m-7272-replay",
+        groupId: "group-1",
+        userId: OWNER_ID,
+        webhookEventId: "evt-7272-replay",
+        isRedelivery: false,
+      });
+      // createReplayMessageEvent hardcodes text "hello"; override to the exact toggle command.
+      event.message = { ...event.message, text: "7272" };
+      const context = {
+        ...createLineWebhookTestContext({
+          processMessage,
+          groupPolicy: "open",
+          replayCache: createLineWebhookReplayCache(),
+        }),
+        silentGate: gate,
+      };
+
+      await handleLineWebhookEvents([event], context);
+      // Same LINE message id redelivered -- the existing replay/dedupe cache
+      // (unchanged by this feature) must skip it before the gate ever runs again.
+      await handleLineWebhookEvents(
+        [{ ...event, deliveryContext: { isRedelivery: true } } as MessageEvent],
+        context,
+      );
+
+      expect(resolveOwner).toHaveBeenCalledTimes(1);
+      expect(await store.lookup("default|group:group-1")).toMatchObject({ silent: true });
+    });
+  });
 });
