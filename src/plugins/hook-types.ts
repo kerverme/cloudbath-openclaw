@@ -478,6 +478,14 @@ export type PluginHookBeforeDispatchEvent = {
   replyToIsQuote?: boolean;
   isGroup?: boolean;
   timestamp?: number;
+  /**
+   * Whether the sender is the resolved command owner for this message, per
+   * the same `resolveCommandAuthorization` decision used for plugin-bound
+   * inbound claims. Undefined when owner resolution could not be computed
+   * for this event; treat that as not-owner for privileged before_dispatch
+   * routing (e.g. LINE's deterministic model-switch guard).
+   */
+  senderIsOwner?: boolean;
 };
 
 export type PluginHookBeforeDispatchContext = {
@@ -491,6 +499,8 @@ export type PluginHookBeforeDispatchContext = {
   replyToBody?: string;
   replyToSender?: string;
   replyToIsQuote?: boolean;
+  /** Resolved agent id for this inbound conversation, when known. */
+  agentId?: string;
 };
 
 export type PluginHookBeforeDispatchResult = {

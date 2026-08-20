@@ -5,10 +5,10 @@ import {
   type OpenClawPluginApi,
 } from "openclaw/plugin-sdk/channel-entry-contract";
 import { createLazyRuntimeModule } from "openclaw/plugin-sdk/lazy-runtime";
-import { applyModelOverrideToSessionEntry } from "openclaw/plugin-sdk/model-session-runtime";
-import { patchSessionEntry } from "openclaw/plugin-sdk/session-store-runtime";
+import type { PluginStateKeyedStore } from "openclaw/plugin-sdk/plugin-state-runtime";
 import {
   createLineModelCatalogTool,
+  createLineSessionModelApplier,
   type LinePendingModelSelection,
   LINE_MODEL_CATALOG_TOOL_NAME,
   LINE_MODEL_SELECTION_MAX_ENTRIES,
@@ -18,6 +18,24 @@ import {
 } from "./src/model-catalog-tool.js";
 
 type RegisteredLineCardCommand = OpenClawPluginCommandDefinition;
+// Inline `import(...)` type (no top-level `./src/` import statement) keeps this
+// bundled channel entrypoint on the dynamic-import boundary: the shape guard
+// (src/channels/plugins/bundled.shape-guard.test.ts) forbids a static
+// import/export line referencing "./src/" here, the same reason the card
+// command below is loaded through `createLazyRuntimeModule` instead of a
+// top-level import.
+type LineModelSwitchIntentRouter = ReturnType<
+  typeof import("./src/model-switch-router.js").createLineModelSwitchIntentRouter
+>;
+
+function createLineModelSwitchIntentRouterLoader(
+  pendingStore: PluginStateKeyedStore<LinePendingModelSelection>,
+) {
+  return createLazyRuntimeModule<LineModelSwitchIntentRouter>(async () => {
+    const { createLineModelSwitchIntentRouter } = await import("./src/model-switch-router.js");
+    return createLineModelSwitchIntentRouter({ pendingStore });
+  });
+}
 
 function createLineCardCommandLoader(api: OpenClawPluginApi) {
   return createLazyRuntimeModule<RegisteredLineCardCommand>(async () => {
@@ -69,38 +87,31 @@ export default defineBundledChannelEntry({
           sessionId: ctx.sessionId,
           pendingStore: pendingModelSelectionStore,
           resolveApiKey: ctx.resolveApiKeyForProvider,
-          applySessionModel: async (model) => {
-            const sessionKey = ctx.sessionKey?.trim();
-            if (!sessionKey) {
-              return false;
-            }
-            const updated = await patchSessionEntry({
-              agentId: ctx.agentId,
-              sessionKey,
-              readConsistency: "latest",
-              replaceEntry: true,
-              requireWriteSuccess: true,
-              update: (entry) => {
-                applyModelOverrideToSessionEntry({
-                  entry,
-                  selection: {
-                    provider: "openrouter",
-                    model: model.id,
-                    isDefault: false,
-                  },
-                  markLiveSwitchPending: true,
-                });
-                return entry;
-              },
-            });
-            return updated?.providerOverride === "openrouter" && updated.modelOverride === model.id;
-          },
+          applySessionModel: createLineSessionModelApplier({
+            agentId: ctx.agentId,
+            sessionKey: ctx.sessionKey,
+          }),
         }),
       {
         names: [LINE_MODEL_CATALOG_TOOL_NAME],
         optional: true,
       },
     );
+
+    // Deterministic pre-agent routing: an owner's explicit switch request
+    // ("เปลี่ยนเป็น gemini หน่อย", "switch to Claude") or a numeric reply to an
+    // active pending picker is handled here, before the main agent ever runs,
+    // so the flow no longer depends on the active LLM deciding to call the
+    // AI-facing picker tool above. Ordinary model discussion is untouched.
+    // Loaded lazily (see createLineModelSwitchIntentRouterLoader) so this
+    // entrypoint has no static "./src/" import for the router module.
+    const loadModelSwitchIntentRouter = createLineModelSwitchIntentRouterLoader(
+      pendingModelSelectionStore,
+    );
+    api.on("before_dispatch", async (event, ctx) => {
+      const router = await loadModelSwitchIntentRouter();
+      return router(event, ctx);
+    });
 
     const loadLineCardCommand = createLineCardCommandLoader(api);
     api.registerCommand({

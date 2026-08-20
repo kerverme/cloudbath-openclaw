@@ -3305,6 +3305,21 @@ async function dispatchReplyFromConfigInner(
 
     // Run before_dispatch hook — let plugins inspect or handle before model dispatch.
     if (hookRunner?.hasHooks("before_dispatch")) {
+      // Owner status is a prepared fact for privileged before_dispatch routing
+      // (e.g. LINE's deterministic model-switch guard), resolved once here via
+      // the same canonical decision used for plugin-bound inbound claims above.
+      // Resolution never blocks dispatch: a failure just omits the field, and
+      // hook consumers must treat a missing value as not-owner.
+      let dispatchSenderIsOwner: boolean | undefined;
+      try {
+        dispatchSenderIsOwner = resolveCommandAuthorization({
+          ctx,
+          cfg,
+          commandAuthorized: ctx.CommandAuthorized,
+        }).senderIsOwner;
+      } catch {
+        dispatchSenderIsOwner = undefined;
+      }
       const beforeDispatchResult = await traceReplyPhase("reply.before_dispatch_hooks", () =>
         runWithDispatchLifecycleAdmission(
           async () =>
@@ -3325,6 +3340,7 @@ async function dispatchReplyFromConfigInner(
                     replyToIsQuote: hookContext.replyToIsQuote,
                     isGroup: hookContext.isGroup,
                     timestamp: hookContext.timestamp,
+                    senderIsOwner: dispatchSenderIsOwner,
                   },
                   {
                     channelId: hookContext.channelId,
@@ -3337,6 +3353,7 @@ async function dispatchReplyFromConfigInner(
                     replyToBody: hookContext.replyToBody,
                     replyToSender: hookContext.replyToSender,
                     replyToIsQuote: hookContext.replyToIsQuote,
+                    agentId: hookContext.agentId,
                   },
                 ),
               trackDispatchLifecycleWork,
