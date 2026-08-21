@@ -88,7 +88,7 @@ function detectVideoContentType(bytes: Buffer): string {
   if (isWebm(bytes)) {
     return "video/webm";
   }
-  fail("video_type_invalid");
+  return fail("video_type_invalid");
 }
 
 export type LineVideoOutboundStagingDependencies = {
@@ -149,7 +149,7 @@ export async function stageLineOutboundVideo(
     );
     return { url, objectKey, contentType, contentLength: bytes.byteLength, sha256 };
   } catch {
-    fail("signed_url_generation_failed");
+    return fail("signed_url_generation_failed");
   }
 }
 
