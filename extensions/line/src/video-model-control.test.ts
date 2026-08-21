@@ -85,6 +85,32 @@ describe("classifyLineVideoModelControlIntent", () => {
   it("classifies a bare number as a numeric selection", () => {
     expect(classifyLineVideoModelControlIntent("2")).toEqual({ kind: "numeric", selection: 2 });
   });
+
+  it.each([
+    ["English 'video model status'", "video model status"],
+    ["English 'current video model'", "current video model"],
+    ["Thai 'ตอนนี้ใช้ video model อะไร'", "ตอนนี้ใช้ video model อะไร"],
+    ["Thai 'ตอนนี้ใช้ video model รุ่นไหนอยู่'", "ตอนนี้ใช้ video model รุ่นไหนอยู่"],
+    ["Thai 'เช็ก video model ปัจจุบัน'", "เช็ก video model ปัจจุบัน"],
+    ["Thai 'เช็กโมเดลสร้างวิดีโอ'", "เช็กโมเดลสร้างวิดีโอ"],
+    ["Thai 'โมเดลวิดีโอตอนนี้คืออะไร'", "โมเดลวิดีโอตอนนี้คืออะไร"],
+  ])("classifies %s as a status question, not a search", (_label, text) => {
+    expect(classifyLineVideoModelControlIntent(text)).toEqual({ kind: "status" });
+  });
+
+  it("still treats bare 'video model' as a list/switch request, not status", () => {
+    expect(classifyLineVideoModelControlIntent("video model")).toEqual({
+      kind: "switch",
+      query: "",
+    });
+  });
+
+  it("still treats an explicit switch target as a search, not status", () => {
+    expect(classifyLineVideoModelControlIntent("เปลี่ยน video model เป็น seedance 2.5")).toEqual({
+      kind: "switch",
+      query: "seedance 2.5",
+    });
+  });
 });
 
 const OWNER_ID = "U-owner";
@@ -221,6 +247,140 @@ describe("createLineVideoModelControlRouter", () => {
       CTX,
     );
     expect(result).toBeUndefined();
+  });
+});
+
+describe("createLineVideoModelControlRouter — status intent", () => {
+  it("7: reports the persisted model after an explicit switch", async () => {
+    const { router, preferenceStore } = createRouterFixture({ models: [seedanceModel()] });
+    await router(baseEvent({ body: "เปลี่ยน video model เป็น seedance 2.5" }), CTX);
+    expect(await preferenceStore.lookup("acct-1|grp-a")).toMatchObject({
+      model: "bytedance/seedance-2.5",
+    });
+
+    const result = await router(baseEvent({ body: "ตอนนี้ใช้ video model อะไร" }), CTX);
+
+    expect(result?.handled).toBe(true);
+    expect(result?.text).toBe("🎬 Video model ปัจจุบัน\nSeedance 2.5\nbytedance/seedance-2.5");
+  });
+
+  it("8: 'ตอนนี้ใช้ video model รุ่นไหนอยู่' is status, not a fuzzy search", async () => {
+    const { router, pendingStore } = createRouterFixture({ models: [seedanceModel()] });
+    const result = await router(baseEvent({ body: "ตอนนี้ใช้ video model รุ่นไหนอยู่" }), CTX);
+
+    expect(result?.handled).toBe(true);
+    expect(result?.text).toContain("🎬 Video model ปัจจุบัน");
+    // A fuzzy search over "ตอนนี้ รุ่นไหนอยู่" would find zero catalog matches
+    // and either report no_match or create pending candidate state; status
+    // must do neither.
+    expect((await pendingStore.entries()).length).toBe(0);
+  });
+
+  it("9: 'เช็กโมเดลสร้างวิดีโอ' is status, not an LLM fallthrough", async () => {
+    const { router } = createRouterFixture({ models: [seedanceModel()] });
+    const result = await router(baseEvent({ body: "เช็กโมเดลสร้างวิดีโอ" }), CTX);
+
+    // A defined, handled result is what prevents before_dispatch from
+    // falling through to the main agent/LLM.
+    expect(result?.handled).toBe(true);
+    expect(result?.text).toContain("🎬 Video model ปัจจุบัน");
+  });
+
+  it("10: 'video model status' is status", async () => {
+    const { router } = createRouterFixture({ models: [seedanceModel()] });
+    const result = await router(baseEvent({ body: "video model status" }), CTX);
+    expect(result?.text).toContain("🎬 Video model ปัจจุบัน");
+  });
+
+  it("11: bare 'video model' still shows the existing catalog/list, not status", async () => {
+    const { router, pendingStore } = createRouterFixture({
+      models: [
+        seedanceModel(),
+        seedanceModel({ id: "bytedance/seedance-2.0", name: "Seedance 2.0" }),
+      ],
+    });
+    const result = await router(baseEvent({ body: "video model" }), CTX);
+
+    expect(result?.text).not.toContain("🎬 Video model ปัจจุบัน");
+    expect(result?.text).toContain("1.");
+    expect(result?.text).toContain("2.");
+    expect((await pendingStore.entries()).length).toBe(1);
+  });
+
+  it("12: status never changes the selected model", async () => {
+    const { router, preferenceStore } = createRouterFixture({
+      models: [
+        seedanceModel(),
+        seedanceModel({ id: "bytedance/seedance-2.0", name: "Seedance 2.0" }),
+      ],
+    });
+    await router(baseEvent({ body: "เปลี่ยน video model เป็น seedance 2.5" }), CTX);
+    await router(baseEvent({ body: "video model status" }), CTX);
+
+    expect(await preferenceStore.lookup("acct-1|grp-a")).toMatchObject({
+      model: "bytedance/seedance-2.5",
+    });
+  });
+
+  it("13: status never creates pending candidate-selection state", async () => {
+    const { router, pendingStore } = createRouterFixture({ models: [seedanceModel()] });
+    await router(baseEvent({ body: "current video model" }), CTX);
+    expect((await pendingStore.entries()).length).toBe(0);
+  });
+
+  it("14: status is owner-only and does not resolve for a non-owner", async () => {
+    const { router } = createRouterFixture({ models: [seedanceModel()] });
+    const result = await router(
+      baseEvent({ body: "video model status", senderId: MEMBER_ID, senderIsOwner: false }),
+      CTX,
+    );
+    expect(result).toBeUndefined();
+  });
+
+  it("15: Group A and Group B video-model status remain isolated", async () => {
+    const { router, preferenceStore } = createRouterFixture({
+      models: [
+        seedanceModel(),
+        seedanceModel({ id: "bytedance/seedance-2.0", name: "Seedance 2.0" }),
+      ],
+    });
+    const CTX_A = { accountId: "acct-1", conversationId: "grp-a" };
+    const CTX_B = { accountId: "acct-1", conversationId: "grp-b" };
+
+    await router(baseEvent({ body: "เปลี่ยน video model เป็น seedance 2.5" }), CTX_A);
+    await router(baseEvent({ body: "เปลี่ยน video model เป็น seedance 2.0" }), CTX_B);
+
+    const statusA = await router(baseEvent({ body: "video model status" }), CTX_A);
+    const statusB = await router(baseEvent({ body: "video model status" }), CTX_B);
+
+    expect(statusA?.text).toContain("bytedance/seedance-2.5");
+    expect(statusB?.text).toContain("bytedance/seedance-2.0");
+    expect(await preferenceStore.lookup("acct-1|grp-a")).toMatchObject({
+      model: "bytedance/seedance-2.5",
+    });
+    expect(await preferenceStore.lookup("acct-1|grp-b")).toMatchObject({
+      model: "bytedance/seedance-2.0",
+    });
+  });
+
+  it("16: missing explicit preference reports the actual default model", async () => {
+    const { router } = createRouterFixture({ models: [seedanceModel()] });
+    const result = await router(baseEvent({ body: "video model status" }), CTX);
+
+    expect(result?.text).toBe("🎬 Video model ปัจจุบัน\nSeedance 2.5\nbytedance/seedance-2.5");
+  });
+
+  it("17: degrades gracefully to the raw model id if the catalog is unavailable", async () => {
+    const { preferenceStore, pendingStore } = createRouterFixture({ models: [seedanceModel()] });
+    const router = createLineVideoModelControlRouter({
+      preferenceStore,
+      pendingStore,
+      resolveApiKey: async () => undefined,
+    });
+    const result = await router(baseEvent({ body: "video model status" }), CTX);
+
+    expect(result?.handled).toBe(true);
+    expect(result?.text).toBe("🎬 Video model ปัจจุบัน\nbytedance/seedance-2.5");
   });
 });
 
