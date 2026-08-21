@@ -57,8 +57,8 @@ import type { LineVideoActiveJobLock, LineVideoJob } from "./video-job-store.js"
 import type { LinePendingVideoModelSelection } from "./video-model-control.js";
 import type { LineVideoModelPreferenceState } from "./video-model-preference.js";
 
-/** The owner's real production phrasing: "please make me a video of a cat sitting on a horse, 5s". */
-const OWNER_REQUEST = "ช่วยทำ วีดีโอ แมวนั่ง อยู่บนม้า ให้หน่อย 5 วิ";
+/** The owner's real production phrasing: "please make me a video of a cat sitting on water, 5s". */
+const OWNER_REQUEST = "ช่วยทำ วีดีโอ แมวนั่ง อยู่บนน้ำ ให้หน่อย 5 วิ";
 const OWNER_ID = "U-owner";
 const CTX = { accountId: "acct-1", conversationId: "grp-a" };
 /**
@@ -229,7 +229,7 @@ describe("owner natural-language video request routing", () => {
   it("3: the draft returns the expected preview and makes ZERO paid provider POSTs", async () => {
     const { tool, draftStore, paidVideoPosts } = buildFlow();
     const result = await tool!.execute("call-1", {
-      prompt: "a cat sitting on a horse",
+      prompt: "a cat sitting on water",
       durationSeconds: 5,
     });
     const text = (result as { content: Array<{ text: string }> }).content[0]?.text ?? "";
@@ -249,7 +249,7 @@ describe("owner natural-language video request routing", () => {
 describe("owner confirmation -> job lifecycle (direct store assertions)", () => {
   it("4: no paid submission and no job/lock exist until the exact confirmation arrives", async () => {
     const { tool, jobStore, activeJobLockStore, paidVideoPosts } = buildFlow();
-    await tool!.execute("call-1", { prompt: "a cat sitting on a horse" });
+    await tool!.execute("call-1", { prompt: "a cat sitting on water" });
 
     expect(await jobStore.entries()).toStrictEqual([]);
     expect(await activeJobLockStore.entries()).toStrictEqual([]);
@@ -259,7 +259,7 @@ describe("owner confirmation -> job lifecycle (direct store assertions)", () => 
 
   it("5: confirmation creates a running job and holds the lock; success releases it", async () => {
     const flow = buildFlow();
-    await flow.tool!.execute("call-1", { prompt: "a cat sitting on a horse" });
+    await flow.tool!.execute("call-1", { prompt: "a cat sitting on water" });
     const [draftEntry] = await flow.draftStore.entries();
     const draftId = draftEntry!.value.draftId;
 
@@ -291,7 +291,7 @@ describe("owner confirmation -> job lifecycle (direct store assertions)", () => 
   it("6: a provider failure marks the job failed, releases the lock, and allows a new draft", async () => {
     generateVideoMock.mockRejectedValueOnce(new Error("OpenRouter rejected the request"));
     const flow = buildFlow();
-    await flow.tool!.execute("call-1", { prompt: "a cat sitting on a horse" });
+    await flow.tool!.execute("call-1", { prompt: "a cat sitting on water" });
     const [firstDraft] = await flow.draftStore.entries();
 
     await flow.gate(
@@ -322,7 +322,7 @@ describe("owner confirmation -> job lifecycle (direct store assertions)", () => 
 
   it("7: the consumed confirmation code cannot be replayed; a retry needs a new code", async () => {
     const flow = buildFlow();
-    await flow.tool!.execute("call-1", { prompt: "a cat sitting on a horse" });
+    await flow.tool!.execute("call-1", { prompt: "a cat sitting on water" });
     const [draftEntry] = await flow.draftStore.entries();
     const draftId = draftEntry!.value.draftId;
     const confirmEvent = {
@@ -346,7 +346,7 @@ describe("owner confirmation -> job lifecycle (direct store assertions)", () => 
 
   it("8: a non-owner cannot confirm, and no paid submission happens", async () => {
     const flow = buildFlow();
-    await flow.tool!.execute("call-1", { prompt: "a cat sitting on a horse" });
+    await flow.tool!.execute("call-1", { prompt: "a cat sitting on water" });
     const [draftEntry] = await flow.draftStore.entries();
 
     const result = await flow.gate(

@@ -1,5 +1,4 @@
 import type { PluginStateKeyedStore } from "openclaw/plugin-sdk/plugin-state-runtime";
-import { resolveOpenClawAgentDir } from "openclaw/plugin-sdk/provider-auth";
 /**
  * Deterministic LINE model-switch intent router.
  *
@@ -16,13 +15,12 @@ import { resolveOpenClawAgentDir } from "openclaw/plugin-sdk/provider-auth";
  * exact-match switching, numbered pending choices, TTL, fresh catalog
  * revalidation, and session/owner isolation are identical on both paths.
  */
-import { resolveApiKeyForProvider } from "openclaw/plugin-sdk/provider-auth-runtime";
-import { getRuntimeConfig } from "openclaw/plugin-sdk/runtime-config-snapshot";
 import {
   createLineModelCatalogTool,
   createLineSessionModelApplier,
   type LinePendingModelSelection,
 } from "./model-catalog-tool.js";
+import { resolveLineProviderApiKey } from "./openrouter-auth.js";
 
 /** Minimal structural shape of the shared `before_dispatch` hook event this router reads. */
 type LineBeforeDispatchEvent = {
@@ -260,15 +258,6 @@ export function formatLineModelCatalogReply(
   }
 }
 
-async function resolveLineOpenRouterApiKey(providerId: string): Promise<string | undefined> {
-  const auth = await resolveApiKeyForProvider({
-    provider: providerId,
-    cfg: getRuntimeConfig(),
-    agentDir: resolveOpenClawAgentDir(),
-  });
-  return auth.apiKey;
-}
-
 type FetchLike = typeof fetch;
 
 /**
@@ -288,7 +277,7 @@ export function createLineModelSwitchIntentRouter(params: {
   fetchImpl?: FetchLike;
   now?: () => number;
 }) {
-  const resolveApiKey = params.resolveApiKey ?? resolveLineOpenRouterApiKey;
+  const resolveApiKey = params.resolveApiKey ?? resolveLineProviderApiKey;
   const buildSessionModelApplier = params.buildSessionModelApplier ?? createLineSessionModelApplier;
   return async (
     event: LineBeforeDispatchEvent,
