@@ -209,6 +209,53 @@ function resolveResolution(resolution: VideoGenerationRequest["resolution"]): st
   return normalized ? normalized.toLowerCase() : undefined;
 }
 
+/** Extracts the numeric "P" tier from a resolution string ("720p" -> 720). */
+function resolutionTierFromResolution(resolution: string): number | undefined {
+  const match = resolution.trim().match(/^(\d+(?:\.\d+)?)p$/iu);
+  return match ? Number(match[1]) : undefined;
+}
+
+/** Extracts the effective "P" tier from a WIDTHxHEIGHT size ("1920x1080" -> 1080). */
+function resolutionTierFromSize(size: string): number | undefined {
+  const match = size.trim().match(/^(\d+)\s*x\s*(\d+)$/iu);
+  if (!match) {
+    return undefined;
+  }
+  const width = Number(match[1]);
+  const height = Number(match[2]);
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+    return undefined;
+  }
+  return Math.min(width, height);
+}
+
+/**
+ * Refuses to submit a request whose `resolution` and `size` disagree on
+ * pixel tier (e.g. resolution "720p" alongside a 1920x1080-derived size).
+ * Both fields are normally resolved from the same model capability source
+ * (see normalization.ts), so this should never legitimately fire -- it is a
+ * last-line-of-defense check run BEFORE the paid POST is issued (as a
+ * synchronous argument to postJsonRequest, so a throw here never reaches the
+ * network), catching any future caller or capability-merge regression that
+ * reintroduces the resolution/size conflict this module was rejected for in
+ * production.
+ */
+function assertConsistentResolutionAndSize(
+  resolution: string | undefined,
+  size: string | undefined,
+) {
+  if (!resolution || !size) {
+    return;
+  }
+  const resolutionTier = resolutionTierFromResolution(resolution);
+  const sizeTier = resolutionTierFromSize(size);
+  if (resolutionTier !== undefined && sizeTier !== undefined && resolutionTier !== sizeTier) {
+    throw new Error(
+      `OpenRouter video request has conflicting settings: resolution ${resolution} disagrees with size ${size}; refusing to submit`,
+    );
+  }
+}
+
 function resolveSeed(seed: unknown): number | undefined {
   if (seed === undefined) {
     return undefined;
@@ -238,6 +285,8 @@ function buildRequestBody(req: VideoGenerationRequest, model: string): Record<st
     body.duration = duration;
   }
   const resolution = resolveResolution(req.resolution);
+  const size = normalizeOptionalString(req.size);
+  assertConsistentResolutionAndSize(resolution, size);
   if (resolution) {
     body.resolution = resolution;
   }
@@ -245,7 +294,6 @@ function buildRequestBody(req: VideoGenerationRequest, model: string): Record<st
   if (aspectRatio) {
     body.aspect_ratio = aspectRatio;
   }
-  const size = normalizeOptionalString(req.size);
   if (size) {
     body.size = size;
   }

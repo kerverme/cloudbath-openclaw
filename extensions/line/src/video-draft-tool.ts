@@ -18,6 +18,10 @@ import { Type, type TSchema } from "typebox";
 import { resolveLineAccount } from "./accounts.js";
 import { evaluateLineVideoCostGuard } from "./video-cost-guard.js";
 import { createLineVideoDraft, type LineVideoDraftStore } from "./video-draft-store.js";
+import {
+  resolveLineVideoActiveJobLock,
+  type LineVideoActiveJobLockStore,
+} from "./video-job-store.js";
 import { loadOpenRouterVideoModels, type OpenRouterVideoModel } from "./video-model-catalog.js";
 import {
   buildLineVideoConversationKey,
@@ -112,6 +116,7 @@ type CreateLineVideoDraftToolParams = {
   cfg?: OpenClawConfig;
   draftStore?: LineVideoDraftStore;
   preferenceStore?: LineVideoModelPreferenceStore;
+  activeJobLockStore?: LineVideoActiveJobLockStore;
   resolveApiKey?: () => Promise<string | undefined>;
   resolveAccount?: typeof resolveLineAccount;
   fetchImpl?: typeof fetch;
@@ -160,7 +165,8 @@ export function createLineVideoDraftTool(params: CreateLineVideoDraftToolParams)
         !requesterSenderId ||
         !accountId ||
         !params.draftStore ||
-        !params.preferenceStore
+        !params.preferenceStore ||
+        !params.activeJobLockStore
       ) {
         return jsonResult({ resolution: "unavailable" });
       }
@@ -170,6 +176,21 @@ export function createLineVideoDraftTool(params: CreateLineVideoDraftToolParams)
       });
       if (!conversationKey) {
         return jsonResult({ resolution: "unavailable" });
+      }
+
+      // A previous confirmed job for this conversation is still running
+      // (or was, before a stale lock got auto-cleared) -- refuse a new draft
+      // rather than let the owner start a second concurrent paid job. Once
+      // that job reaches a terminal state (completed or failed), the lock is
+      // released and this check passes again immediately; no separate
+      // "unstick" step is needed.
+      const activeLock = await resolveLineVideoActiveJobLock({
+        store: params.activeJobLockStore,
+        conversationKey,
+        ...(params.now ? { now: params.now } : {}),
+      });
+      if (activeLock) {
+        return jsonResult({ resolution: "already_running", jobId: activeLock.jobId });
       }
 
       const imagePath = typeof input.image === "string" ? input.image.trim() : undefined;

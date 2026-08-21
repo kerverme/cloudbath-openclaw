@@ -579,6 +579,61 @@ describe("openrouter video generation provider", () => {
     });
   });
 
+  it("reports supportsResolution:false (not omitted) for a model that only declares supported_sizes", async () => {
+    // A live catalog entry with sizes but no resolutions must never let the
+    // merge in capability-overlays.ts fall back to the generic static
+    // provider default (resolutions: ["720P","1080P"], supportsResolution:
+    // true) -- that silent fallback is the root cause of a production bug
+    // where a "720p" request was accepted as if the axis were supported, then
+    // resolved by the provider to a disagreeing (1080p) size.
+    fetchWithTimeoutGuardedMock.mockResolvedValueOnce(
+      releasedJson({
+        data: [
+          {
+            id: "bytedance/seedance-2.5",
+            name: "Seedance 2.5",
+            supported_durations: [4, 6, 8],
+            supported_aspect_ratios: ["16:9", "9:16"],
+            supported_sizes: ["1280x720", "1920x1080"],
+          },
+        ],
+      }),
+    );
+
+    const provider = buildOpenRouterVideoGenerationProvider();
+    const capabilities = await provider.resolveModelCapabilities?.({
+      provider: "openrouter",
+      model: "bytedance/seedance-2.5",
+      cfg: {} as never,
+    });
+
+    const generateCaps = requireRecord(
+      requireRecord(capabilities, "resolved capabilities").generate,
+      "generate capabilities",
+    );
+    expect(generateCaps.supportsResolution).toBe(false);
+    expect(generateCaps.resolutions).toEqual([]);
+    expect(generateCaps.supportsSize).toBe(true);
+    expect(generateCaps.sizes).toEqual(["1280x720", "1920x1080"]);
+  });
+
+  it("refuses to submit when resolution and size disagree on pixel tier, before any network call", async () => {
+    const provider = buildOpenRouterVideoGenerationProvider();
+
+    await expect(
+      provider.generateVideo({
+        provider: "openrouter",
+        model: "bytedance/seedance-2.5",
+        prompt: "a cat riding a skateboard",
+        resolution: "720p",
+        size: "1920x1080",
+        cfg: {} as never,
+      }),
+    ).rejects.toThrow(/conflicting settings/iu);
+
+    expect(postJsonRequestMock).not.toHaveBeenCalled();
+  });
+
   it("clamps direct exact integer durations to static OpenRouter supported values", async () => {
     postJsonRequestMock.mockResolvedValue(
       releasedJson({

@@ -1,14 +1,19 @@
 import type { PluginStateKeyedStore } from "openclaw/plugin-sdk/plugin-state-runtime";
 import { describe, expect, it } from "vitest";
 import {
+  claimLineVideoActiveJobLock,
   createLineVideoJob,
   getLineVideoJob,
+  LINE_VIDEO_JOB_STALE_RUNNING_MS,
+  releaseLineVideoActiveJobLock,
+  resolveLineVideoActiveJobLock,
   updateLineVideoJob,
+  type LineVideoActiveJobLock,
   type LineVideoJob,
 } from "./video-job-store.js";
 
-function createMemoryStore(): PluginStateKeyedStore<LineVideoJob> {
-  const values = new Map<string, LineVideoJob>();
+function createMemoryStore<T = LineVideoJob>(): PluginStateKeyedStore<T> {
+  const values = new Map<string, T>();
   return {
     async register(key, value) {
       values.set(key, value);
@@ -67,14 +72,14 @@ function jobParams(overrides?: Partial<Parameters<typeof createLineVideoJob>[0]>
 }
 
 describe("createLineVideoJob / updateLineVideoJob / getLineVideoJob", () => {
-  it("1: persists every required job field with status 'submitted'", async () => {
+  it("1: persists every required job field with status 'running'", async () => {
     const job = await createLineVideoJob(jobParams());
     expect(job).toMatchObject({
       draftId: "1234",
       accountId: "acct-1",
       conversationKey: "acct-1|grp-a",
       model: "bytedance/seedance-2.5",
-      status: "submitted",
+      status: "running",
       estimatedCostUsd: 1.5,
     });
     expect(job.jobId).toBeTruthy();
@@ -139,5 +144,89 @@ describe("createLineVideoJob / updateLineVideoJob / getLineVideoJob", () => {
       patch: { status: "completed" },
     });
     expect(updated).toBeUndefined();
+  });
+});
+
+describe("claimLineVideoActiveJobLock / releaseLineVideoActiveJobLock / resolveLineVideoActiveJobLock", () => {
+  it("6: resolves undefined when no lock has ever been claimed for a conversation", async () => {
+    const lockStore = createMemoryStore<LineVideoActiveJobLock>();
+    expect(
+      await resolveLineVideoActiveJobLock({ store: lockStore, conversationKey: "acct-1|grp-a" }),
+    ).toBeUndefined();
+  });
+
+  it("7: resolves the claimed lock, scoped by conversation key", async () => {
+    const lockStore = createMemoryStore<LineVideoActiveJobLock>();
+    await claimLineVideoActiveJobLock({
+      store: lockStore,
+      conversationKey: "acct-1|grp-a",
+      jobId: "job-1",
+    });
+
+    expect(
+      await resolveLineVideoActiveJobLock({ store: lockStore, conversationKey: "acct-1|grp-a" }),
+    ).toMatchObject({ jobId: "job-1", conversationKey: "acct-1|grp-a" });
+    // Group A and Group B locks are fully isolated.
+    expect(
+      await resolveLineVideoActiveJobLock({ store: lockStore, conversationKey: "acct-1|grp-b" }),
+    ).toBeUndefined();
+  });
+
+  it("8: releasing the lock clears it for that conversation only", async () => {
+    const lockStore = createMemoryStore<LineVideoActiveJobLock>();
+    await claimLineVideoActiveJobLock({
+      store: lockStore,
+      conversationKey: "acct-1|grp-a",
+      jobId: "job-1",
+    });
+    await claimLineVideoActiveJobLock({
+      store: lockStore,
+      conversationKey: "acct-1|grp-b",
+      jobId: "job-2",
+    });
+
+    await releaseLineVideoActiveJobLock({ store: lockStore, conversationKey: "acct-1|grp-a" });
+
+    expect(
+      await resolveLineVideoActiveJobLock({ store: lockStore, conversationKey: "acct-1|grp-a" }),
+    ).toBeUndefined();
+    expect(
+      await resolveLineVideoActiveJobLock({ store: lockStore, conversationKey: "acct-1|grp-b" }),
+    ).toMatchObject({ jobId: "job-2" });
+  });
+
+  it("9: a lock older than LINE_VIDEO_JOB_STALE_RUNNING_MS is treated as abandoned and cleared", async () => {
+    const lockStore = createMemoryStore<LineVideoActiveJobLock>();
+    const claimedAt = 1_000_000;
+    await claimLineVideoActiveJobLock({
+      store: lockStore,
+      conversationKey: "acct-1|grp-a",
+      jobId: "job-1",
+      now: () => claimedAt,
+    });
+
+    const justUnderStale = await resolveLineVideoActiveJobLock({
+      store: lockStore,
+      conversationKey: "acct-1|grp-a",
+      now: () => claimedAt + LINE_VIDEO_JOB_STALE_RUNNING_MS - 1,
+    });
+    expect(justUnderStale).toMatchObject({ jobId: "job-1" });
+
+    const staleResolve = await resolveLineVideoActiveJobLock({
+      store: lockStore,
+      conversationKey: "acct-1|grp-a",
+      now: () => claimedAt + LINE_VIDEO_JOB_STALE_RUNNING_MS + 1,
+    });
+    expect(staleResolve).toBeUndefined();
+    // The stale check also clears the entry, so a later call at any time
+    // (including one that would have been "fresh" relative to the old claim)
+    // still reports no lock -- a genuinely abandoned lock never resurfaces.
+    expect(
+      await resolveLineVideoActiveJobLock({
+        store: lockStore,
+        conversationKey: "acct-1|grp-a",
+        now: () => claimedAt,
+      }),
+    ).toBeUndefined();
   });
 });
