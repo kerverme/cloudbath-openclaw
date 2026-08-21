@@ -1334,9 +1334,10 @@ describe("handleLineWebhookEvents", () => {
       return { gate, store: fake.store, resolveOwner };
     }
 
-    it("10: owner 7272 toggles silent without @mention even when requireMention=true", async () => {
+    it("10: owner 7272 toggles silent without @mention even when requireMention=true, and acknowledges once", async () => {
       const { gate, store } = await buildSilentGate();
       const processMessage = vi.fn();
+      replyMessageLineMock.mockImplementation(async () => ({}) as never);
       const event = createTestMessageEvent({
         message: { id: "m-7272-toggle", type: "text", text: "7272", quoteToken: "q-7272" },
         source: { type: "group", groupId: "group-1", userId: OWNER_ID },
@@ -1355,6 +1356,62 @@ describe("handleLineWebhookEvents", () => {
       expect(processMessage).not.toHaveBeenCalled();
       expect(buildLineMessageContextMock).not.toHaveBeenCalled();
       expect(await store.lookup("default|group:group-1")).toMatchObject({ silent: true });
+      // Deterministic, code-only acknowledgement -- delivered through the
+      // reply path even though the group just went SILENT.
+      expect(replyMessageLineMock).toHaveBeenCalledTimes(1);
+      expect(replyMessageLineMock).toHaveBeenCalledWith(
+        "reply-token",
+        [{ type: "text", text: "🔴 ปิดระบบเรียบร้อยแล้ว\nสถานะ: ปิด" }],
+        expect.objectContaining({ accountId: "default" }),
+      );
+      expect(pushMessageLineMock).not.toHaveBeenCalled();
+    });
+
+    it("10b: owner 7272 toggles back to ACTIVE and acknowledges once", async () => {
+      const { gate, store } = await buildSilentGate({ preSilentGroupId: "group-1" });
+      const processMessage = vi.fn();
+      replyMessageLineMock.mockImplementation(async () => ({}) as never);
+      const event = createTestMessageEvent({
+        message: { id: "m-7272-toggle-back", type: "text", text: "7272", quoteToken: "q-7272b" },
+        source: { type: "group", groupId: "group-1", userId: OWNER_ID },
+        webhookEventId: "evt-7272-toggle-back",
+      });
+
+      await handleLineWebhookEvents([event], {
+        ...createLineWebhookTestContext({ processMessage, groupPolicy: "open" }),
+        silentGate: gate,
+      });
+
+      expect(processMessage).not.toHaveBeenCalled();
+      expect(await store.lookup("default|group:group-1")).toBeUndefined();
+      expect(replyMessageLineMock).toHaveBeenCalledTimes(1);
+      expect(replyMessageLineMock).toHaveBeenCalledWith(
+        "reply-token",
+        [{ type: "text", text: "🟢 เปิดระบบเรียบร้อยแล้ว\nสถานะ: เปิด" }],
+        expect.objectContaining({ accountId: "default" }),
+      );
+    });
+
+    it("10c: non-owner exact 7272 never toggles and never receives the acknowledgement", async () => {
+      const { gate, store } = await buildSilentGate();
+      const processMessage = vi.fn();
+      const event = createTestMessageEvent({
+        message: { id: "m-7272-non-owner", type: "text", text: "7272", quoteToken: "q-non-owner" },
+        source: { type: "group", groupId: "group-1", userId: MEMBER_ID },
+        webhookEventId: "evt-7272-non-owner",
+      });
+
+      await handleLineWebhookEvents([event], {
+        ...createLineWebhookTestContext({ processMessage, groupPolicy: "open" }),
+        silentGate: gate,
+      });
+
+      expect(await store.lookup("default|group:group-1")).toBeUndefined();
+      // Falls through to ordinary chat -- default mocks throw if send.js is
+      // ever called, so a passing test already proves no acknowledgement was
+      // sent; assert explicitly for clarity.
+      expect(replyMessageLineMock).not.toHaveBeenCalled();
+      expect(pushMessageLineMock).not.toHaveBeenCalled();
     });
 
     it("11: while SILENT, ordinary text never reaches processMessage", async () => {
@@ -1467,9 +1524,10 @@ describe("handleLineWebhookEvents", () => {
       expect(lookupSpy).not.toHaveBeenCalled();
     });
 
-    it("17: a duplicate/replayed owner 7272 webhook does not double-toggle", async () => {
+    it("17: a duplicate/replayed owner 7272 webhook does not double-toggle or send a duplicate acknowledgement", async () => {
       const { gate, store, resolveOwner } = await buildSilentGate();
       const processMessage = vi.fn();
+      replyMessageLineMock.mockImplementation(async () => ({}) as never);
       const event = createReplayMessageEvent({
         messageId: "m-7272-replay",
         groupId: "group-1",
@@ -1498,6 +1556,7 @@ describe("handleLineWebhookEvents", () => {
 
       expect(resolveOwner).toHaveBeenCalledTimes(1);
       expect(await store.lookup("default|group:group-1")).toMatchObject({ silent: true });
+      expect(replyMessageLineMock).toHaveBeenCalledTimes(1);
     });
 
     it("18: SILENT groups suppress video-shaped traffic too (draft request and confirmation code)", async () => {

@@ -182,6 +182,59 @@ function resolveLineGroupConfig(params: {
   });
 }
 
+// Deterministic, code-only acknowledgement text for the owner's 7272
+// silent-mode toggle (group-owner-control.ts). Never LLM-generated: exact
+// strings keyed only by the toggle outcome's own `silent` boolean.
+const LINE_SILENT_TOGGLE_OFF_REPLY = "🔴 ปิดระบบเรียบร้อยแล้ว\nสถานะ: ปิด";
+const LINE_SILENT_TOGGLE_ON_REPLY = "🟢 เปิดระบบเรียบร้อยแล้ว\nสถานะ: เปิด";
+
+/**
+ * Sends the owner's exactly-once 7272 toggle acknowledgement. Reuses the
+ * existing reply path: the message's own replyToken first, falling back to
+ * a push targeted at the same group/room (never the sender's DM) so the
+ * acknowledgement lands in the conversation that was just toggled, matching
+ * sendLinePairingReply's reply/push fallback shape. Delivered before the
+ * caller returns, so it still fires on the ACTIVE->SILENT transition even
+ * though every other reply for that conversation is about to be suppressed.
+ */
+async function sendLineSilentToggleAcknowledgement(params: {
+  silent: boolean;
+  replyToken?: string;
+  groupId?: string;
+  roomId?: string;
+  context: LineHandlerContext;
+}): Promise<void> {
+  const { silent, replyToken, groupId, roomId, context } = params;
+  const text = silent ? LINE_SILENT_TOGGLE_OFF_REPLY : LINE_SILENT_TOGGLE_ON_REPLY;
+
+  if (replyToken) {
+    try {
+      await replyMessageLine(replyToken, [{ type: "text", text }], {
+        cfg: context.cfg,
+        accountId: context.account.accountId,
+        channelAccessToken: context.account.channelAccessToken,
+      });
+      return;
+    } catch (err) {
+      logVerbose(`line: silent-toggle reply failed: ${String(err)}`);
+    }
+  }
+
+  const target = groupId ? `line:group:${groupId}` : roomId ? `line:room:${roomId}` : undefined;
+  if (!target) {
+    return;
+  }
+  try {
+    await pushMessageLine(target, text, {
+      cfg: context.cfg,
+      accountId: context.account.accountId,
+      channelAccessToken: context.account.channelAccessToken,
+    });
+  } catch (err) {
+    logVerbose(`line: silent-toggle push failed: ${String(err)}`);
+  }
+}
+
 async function sendLinePairingReply(params: {
   senderId: string;
   replyToken?: string;
@@ -471,7 +524,17 @@ async function handleMessageEvent(event: MessageEvent, context: LineHandlerConte
       rawText: message.type === "text" ? message.text : undefined,
       isTextMessage: message.type === "text",
     });
-    if (gateOutcome.kind === "toggle-consumed" || gateOutcome.kind === "silent-suppressed") {
+    if (gateOutcome.kind === "toggle-consumed") {
+      await sendLineSilentToggleAcknowledgement({
+        silent: gateOutcome.silent,
+        replyToken: event.replyToken,
+        groupId,
+        roomId,
+        context,
+      });
+      return;
+    }
+    if (gateOutcome.kind === "silent-suppressed") {
       return;
     }
   }
