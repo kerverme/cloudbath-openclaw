@@ -27,8 +27,12 @@ import {
   LINE_VIDEO_DRAFT_TOOL_NAME,
 } from "./src/video-draft-tool.js";
 import {
+  LINE_VIDEO_ACTIVE_JOB_MAX_ENTRIES,
+  LINE_VIDEO_ACTIVE_JOB_NAMESPACE,
   LINE_VIDEO_JOB_MAX_ENTRIES,
   LINE_VIDEO_JOB_NAMESPACE,
+  LINE_VIDEO_JOB_STALE_RUNNING_MS,
+  type LineVideoActiveJobLock,
   type LineVideoJob,
 } from "./src/video-job-store.js";
 import {
@@ -81,6 +85,7 @@ function createLineVideoModelControlRouterLoader(deps: {
 function createLineVideoConfirmationGateLoader(deps: {
   draftStore: PluginStateKeyedStore<LineVideoDraft>;
   jobStore: PluginStateKeyedStore<LineVideoJob>;
+  activeJobLockStore: PluginStateKeyedStore<LineVideoActiveJobLock>;
 }) {
   return createLazyRuntimeModule<LineVideoConfirmationGate>(async () => {
     const { createLineVideoConfirmationGate } = await import("./src/video-confirmation.js");
@@ -148,6 +153,11 @@ export default defineBundledChannelEntry({
       namespace: LINE_VIDEO_JOB_NAMESPACE,
       maxEntries: LINE_VIDEO_JOB_MAX_ENTRIES,
     });
+    const videoActiveJobLockStore = api.runtime.state.openKeyedStore<LineVideoActiveJobLock>({
+      namespace: LINE_VIDEO_ACTIVE_JOB_NAMESPACE,
+      maxEntries: LINE_VIDEO_ACTIVE_JOB_MAX_ENTRIES,
+      defaultTtlMs: LINE_VIDEO_JOB_STALE_RUNNING_MS,
+    });
 
     api.registerTool(
       (ctx) =>
@@ -161,6 +171,7 @@ export default defineBundledChannelEntry({
           cfg: ctx.config,
           draftStore: videoDraftStore,
           preferenceStore: videoModelPreferenceStore,
+          activeJobLockStore: videoActiveJobLockStore,
           resolveApiKey: () =>
             ctx.resolveApiKeyForProvider?.("openrouter") ?? Promise.resolve(undefined),
         }),
@@ -177,6 +188,7 @@ export default defineBundledChannelEntry({
     const loadVideoConfirmationGate = createLineVideoConfirmationGateLoader({
       draftStore: videoDraftStore,
       jobStore: videoJobStore,
+      activeJobLockStore: videoActiveJobLockStore,
     });
     api.on("before_dispatch", async (event, ctx) => {
       const gate = await loadVideoConfirmationGate();

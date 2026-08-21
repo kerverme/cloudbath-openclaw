@@ -26,6 +26,41 @@ const VIDEO_RESOLUTION_ORDER: readonly VideoGenerationResolution[] = [
   "1080P",
 ];
 
+/**
+ * Synthesizes a "WIDTHxHEIGHT" candidate from a resolution tier (e.g. "720P")
+ * and an aspect ratio (e.g. "16:9"), so a model that only exposes a fixed
+ * `sizes` list -- not a resolution enum -- can still honor the requested
+ * resolution tier via resolveClosestSize's existing area-closeness matching,
+ * instead of silently dropping the user's choice to the model's own default.
+ * Defaults to 16:9 when no aspect ratio is available, matching this module's
+ * only other implicit-ratio default (video-draft-tool.ts's DEFAULT_ASPECT_RATIO).
+ */
+function deriveSizeFromResolution(
+  resolution: string,
+  aspectRatio: string | undefined,
+): string | undefined {
+  const resolutionMatch = resolution.trim().match(/^(\d+(?:\.\d+)?)p$/iu);
+  const shortEdge = resolutionMatch ? Number(resolutionMatch[1]) : undefined;
+  if (!shortEdge || !Number.isFinite(shortEdge) || shortEdge <= 0) {
+    return undefined;
+  }
+  const ratioMatch = (aspectRatio ?? "16:9")
+    .trim()
+    .match(/^(\d+(?:\.\d+)?)\s*:\s*(\d+(?:\.\d+)?)$/u);
+  const ratioWidth = ratioMatch ? Number(ratioMatch[1]) : 16;
+  const ratioHeight = ratioMatch ? Number(ratioMatch[2]) : 9;
+  if (![ratioWidth, ratioHeight].every((value) => Number.isFinite(value) && value > 0)) {
+    return undefined;
+  }
+  const isPortrait = ratioWidth < ratioHeight;
+  const longEdge = Math.round(
+    shortEdge * (Math.max(ratioWidth, ratioHeight) / Math.min(ratioWidth, ratioHeight)),
+  );
+  const width = Math.round(isPortrait ? shortEdge : longEdge);
+  const height = Math.round(isPortrait ? longEdge : shortEdge);
+  return `${width}x${height}`;
+}
+
 type ResolvedVideoGenerationOverrides = {
   size?: string;
   aspectRatio?: string;
@@ -160,7 +195,34 @@ export function resolveVideoGenerationOverrides(params: {
       }
       resolution = normalizedResolution;
     } else if (resolution && !caps.supportsResolution) {
-      ignoredOverrides.push({ key: "resolution", value: resolution });
+      // Mirrors the aspectRatio->size derivation above: a model that expresses
+      // sizing exclusively via a fixed `sizes` list (no resolution enum) must
+      // still receive the requester's resolution choice translated to size,
+      // never silently dropped -- dropping it would let the provider apply
+      // its own default resolution while the draft's cost guard, pricing, and
+      // owner confirmation were all computed against the requested one.
+      let translated = false;
+      if (caps.supportsSize && !size) {
+        const syntheticSize = deriveSizeFromResolution(resolution, aspectRatio);
+        const derivedSize = syntheticSize
+          ? resolveClosestSize({
+              requestedSize: syntheticSize,
+              requestedAspectRatio: aspectRatio,
+              supportedSizes: caps.sizes,
+            })
+          : undefined;
+        if (derivedSize) {
+          size = derivedSize;
+          normalization.size = {
+            applied: derivedSize,
+            derivedFrom: "resolution",
+          };
+          translated = true;
+        }
+      }
+      if (!translated) {
+        ignoredOverrides.push({ key: "resolution", value: resolution });
+      }
       resolution = undefined;
     }
 

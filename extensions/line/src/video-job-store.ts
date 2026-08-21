@@ -5,7 +5,7 @@
  * (video-confirmation.ts) and updated as the background generation completes
  * or fails.
  */
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { PluginStateKeyedStore } from "openclaw/plugin-sdk/plugin-state-runtime";
 
 export const LINE_VIDEO_JOB_NAMESPACE = "video-job-v1";
@@ -14,7 +14,7 @@ export const LINE_VIDEO_JOB_MAX_ENTRIES = 20_000;
 // transient pending state, but must not accumulate forever either.
 export const LINE_VIDEO_JOB_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
-export type LineVideoJobStatus = "submitted" | "completed" | "failed";
+export type LineVideoJobStatus = "running" | "completed" | "failed";
 
 export type LineVideoJob = {
   version: 1;
@@ -66,7 +66,7 @@ export async function createLineVideoJob(params: {
     aspectRatio: params.aspectRatio,
     resolution: params.resolution,
     audio: params.audio,
-    status: "submitted",
+    status: "running",
     submittedAt: (params.now ?? Date.now)(),
     estimatedCostUsd: params.estimatedCostUsd,
   };
@@ -114,4 +114,92 @@ export async function getLineVideoJob(params: {
   jobId: string;
 }): Promise<LineVideoJob | undefined> {
   return params.store.lookup(params.jobId);
+}
+
+/**
+ * Per-conversation "a video job is currently running" lock — a separate
+ * namespace/store from LineVideoJob itself (mirrors video-model-control.ts's
+ * separate pending-selection store), so the lock's lifecycle (claim right
+ * before background work starts, release the instant it reaches a terminal
+ * state) is independent of the job record's own longer-lived audit history.
+ *
+ * A stale lock is always safely recoverable: resolveLineVideoActiveJobLock
+ * clears any lock older than LINE_VIDEO_JOB_STALE_RUNNING_MS before
+ * reporting it, so a background worker killed by a process/gateway restart
+ * mid-generation (before it ever reaches its own terminal update) can never
+ * block a conversation from starting a new draft forever. The store's own
+ * TTL (registered at claim time) is a second, independent expiry layer for
+ * the same reason.
+ */
+export const LINE_VIDEO_ACTIVE_JOB_NAMESPACE = "video-active-job-v1";
+export const LINE_VIDEO_ACTIVE_JOB_MAX_ENTRIES = 5_000;
+// Generous margin over the OpenRouter provider's own single-call timeout
+// (600_000ms / 10 minutes, extensions/openrouter/video-generation-provider.ts's
+// DEFAULT_TIMEOUT_MS) so a legitimately slow-but-alive generation is never
+// mistaken for an abandoned one.
+export const LINE_VIDEO_JOB_STALE_RUNNING_MS = 15 * 60 * 1000;
+
+export type LineVideoActiveJobLock = {
+  version: 1;
+  jobId: string;
+  conversationKey: string;
+  startedAt: number;
+};
+
+export type LineVideoActiveJobLockStore = PluginStateKeyedStore<LineVideoActiveJobLock>;
+
+// Hash the trusted conversation scope key so it never becomes an unbounded or
+// unsafe SQLite key, matching video-model-control.ts's resolvePendingKey.
+function resolveActiveJobLockKey(conversationKey: string): string {
+  return createHash("sha256").update(conversationKey).digest("hex");
+}
+
+/** Claims the active-job lock for a conversation right before background submission starts. */
+export async function claimLineVideoActiveJobLock(params: {
+  store: LineVideoActiveJobLockStore;
+  conversationKey: string;
+  jobId: string;
+  now?: () => number;
+}): Promise<void> {
+  await params.store.register(
+    resolveActiveJobLockKey(params.conversationKey),
+    {
+      version: 1,
+      jobId: params.jobId,
+      conversationKey: params.conversationKey,
+      startedAt: (params.now ?? Date.now)(),
+    },
+    { ttlMs: LINE_VIDEO_JOB_STALE_RUNNING_MS },
+  );
+}
+
+/** Releases the active-job lock once a job reaches a terminal state (completed or failed). */
+export async function releaseLineVideoActiveJobLock(params: {
+  store: LineVideoActiveJobLockStore;
+  conversationKey: string;
+}): Promise<void> {
+  await params.store.delete(resolveActiveJobLockKey(params.conversationKey));
+}
+
+/**
+ * Resolves the current active-job lock for a conversation, if any, treating
+ * a stale lock (older than LINE_VIDEO_JOB_STALE_RUNNING_MS) as abandoned and
+ * clearing it so it can never block a new draft forever.
+ */
+export async function resolveLineVideoActiveJobLock(params: {
+  store: LineVideoActiveJobLockStore;
+  conversationKey: string;
+  now?: () => number;
+}): Promise<LineVideoActiveJobLock | undefined> {
+  const key = resolveActiveJobLockKey(params.conversationKey);
+  const lock = await params.store.lookup(key);
+  if (!lock) {
+    return undefined;
+  }
+  const now = (params.now ?? Date.now)();
+  if (now - lock.startedAt > LINE_VIDEO_JOB_STALE_RUNNING_MS) {
+    await params.store.delete(key);
+    return undefined;
+  }
+  return lock;
 }

@@ -116,18 +116,25 @@ function buildOpenRouterVideoModeCapabilities(params: {
           aspectRatios: params.aspectRatios,
         }
       : {}),
-    ...(params.resolutions.length > 0
-      ? {
-          supportsResolution: true,
-          resolutions: params.resolutions,
-        }
-      : {}),
-    ...(params.sizes.length > 0
-      ? {
-          supportsSize: true,
-          sizes: params.sizes,
-        }
-      : {}),
+    // supportsResolution/supportsSize are always set explicitly (never
+    // omitted) as true or false. This overlay is built from OpenRouter's
+    // live, per-model /videos/models entry -- the authoritative answer for
+    // whether THIS model exposes a resolution enum vs. a fixed-size list.
+    // capability-overlays.ts's mergeVideoGenerationModeCapabilities does a
+    // shallow `{...base, ...overlay}` merge, so an omitted key here would
+    // silently fall back to the generic static provider capabilities
+    // (video-generation-provider.ts's resolutions: ["720P","1080P"]).
+    // A model that only reports supported_sizes (no supported_resolutions)
+    // would then still be reported as supportsResolution:true with that
+    // generic list, letting a request pass resolution-axis validation while
+    // the model's real, size-only API silently defaults to a different
+    // resolution tier than requested -- see normalization.test.ts's
+    // "never lets a stale generic resolution list override a model that
+    // only reports sizes" regression test.
+    supportsResolution: params.resolutions.length > 0,
+    resolutions: params.resolutions,
+    supportsSize: params.sizes.length > 0,
+    sizes: params.sizes,
     ...(params.supportsAudio === undefined ? {} : { supportsAudio: params.supportsAudio }),
   };
 }

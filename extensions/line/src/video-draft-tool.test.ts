@@ -2,6 +2,7 @@ import type { PluginStateKeyedStore } from "openclaw/plugin-sdk/plugin-state-run
 import { describe, expect, it, vi } from "vitest";
 import type { LineVideoDraft } from "./video-draft-store.js";
 import { createLineVideoDraftTool, createLineVideoGenerationGuard } from "./video-draft-tool.js";
+import { claimLineVideoActiveJobLock, type LineVideoActiveJobLock } from "./video-job-store.js";
 import type { LineVideoModelPreferenceState } from "./video-model-preference.js";
 
 function createMemoryStore<T>(): PluginStateKeyedStore<T> {
@@ -56,6 +57,7 @@ function seedanceCatalogResponse() {
 function toolFixture(params?: { models?: unknown; fileExists?: () => Promise<boolean> }) {
   const draftStore = createMemoryStore<LineVideoDraft>();
   const preferenceStore = createMemoryStore<LineVideoModelPreferenceState>();
+  const activeJobLockStore = createMemoryStore<LineVideoActiveJobLock>();
   const requestedUrls: string[] = [];
   const fetchImpl = vi.fn(async (url: string | URL) => {
     requestedUrls.push(String(url));
@@ -74,11 +76,12 @@ function toolFixture(params?: { models?: unknown; fileExists?: () => Promise<boo
     cfg: {},
     draftStore,
     preferenceStore,
+    activeJobLockStore,
     resolveApiKey: async () => "sk-test",
     fetchImpl,
     fileExists: params?.fileExists ?? (async () => true),
   });
-  return { tool, draftStore, preferenceStore, requestedUrls };
+  return { tool, draftStore, preferenceStore, activeJobLockStore, requestedUrls };
 }
 
 describe("createLineVideoDraftTool", () => {
@@ -195,6 +198,60 @@ describe("createLineVideoDraftTool", () => {
 
     const [entry] = await draftStore.entries();
     expect(entry?.value.model).toBe("google/veo-3.1");
+  });
+
+  it("9: refuses a new draft while a job is already running for this conversation", async () => {
+    const { tool, draftStore, activeJobLockStore } = toolFixture();
+    await claimLineVideoActiveJobLock({
+      store: activeJobLockStore,
+      conversationKey: "acct-1|grp-a",
+      jobId: "job-1",
+    });
+
+    const result = await tool!.execute("call-1", { prompt: "a cat riding a skateboard" });
+
+    expect((result as { details?: { resolution?: string } }).details?.resolution).toBe(
+      "already_running",
+    );
+    expect((await draftStore.entries()).length).toBe(0);
+  });
+
+  it("10: allows a new draft once the previous job's lock is released", async () => {
+    const { tool, draftStore, activeJobLockStore } = toolFixture();
+    await claimLineVideoActiveJobLock({
+      store: activeJobLockStore,
+      conversationKey: "acct-1|grp-a",
+      jobId: "job-1",
+    });
+    await activeJobLockStore.delete((await activeJobLockStore.entries())[0]?.key ?? "");
+
+    const result = await tool!.execute("call-1", { prompt: "a cat riding a skateboard" });
+
+    expect((result as { details?: { resolution?: string } }).details?.resolution).toBe(
+      "draft_created",
+    );
+    expect((await draftStore.entries()).length).toBe(1);
+  });
+
+  it("11: a stale (abandoned) lock is treated as released, allowing a new draft", async () => {
+    const { tool, draftStore, activeJobLockStore } = toolFixture();
+    const now = Date.now();
+    await claimLineVideoActiveJobLock({
+      store: activeJobLockStore,
+      conversationKey: "acct-1|grp-a",
+      jobId: "job-1",
+      // 20 minutes ago -- past LINE_VIDEO_JOB_STALE_RUNNING_MS (15 min), so
+      // this simulates a background worker killed by a process/gateway
+      // restart before it ever reached its own terminal update.
+      now: () => now - 20 * 60 * 1000,
+    });
+
+    const result = await tool!.execute("call-1", { prompt: "a cat riding a skateboard" });
+
+    expect((result as { details?: { resolution?: string } }).details?.resolution).toBe(
+      "draft_created",
+    );
+    expect((await draftStore.entries()).length).toBe(1);
   });
 });
 

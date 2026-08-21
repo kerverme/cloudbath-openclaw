@@ -53,7 +53,7 @@ const { createLineVideoConfirmationGate, parseLineVideoConfirmationCode } =
   await import("./video-confirmation.js");
 const { createLineVideoDraft } = await import("./video-draft-store.js");
 import type { LineVideoDraft } from "./video-draft-store.js";
-import type { LineVideoJob } from "./video-job-store.js";
+import type { LineVideoActiveJobLock, LineVideoJob } from "./video-job-store.js";
 
 function createMemoryStore<T>(): PluginStateKeyedStore<T> {
   const values = new Map<string, T>();
@@ -131,10 +131,12 @@ const MEMBER_ID = "U-member";
 async function fixture(params?: { fetchImpl?: typeof fetch; now?: () => number }) {
   const draftStore = createMemoryStore<LineVideoDraft>();
   const jobStore = createMemoryStore<LineVideoJob>();
+  const activeJobLockStore = createMemoryStore<LineVideoActiveJobLock>();
   const scheduled: Array<() => Promise<void>> = [];
   const gate = createLineVideoConfirmationGate({
     draftStore,
     jobStore,
+    activeJobLockStore,
     resolveApiKey: async () => "sk-test",
     fetchImpl: params?.fetchImpl ?? catalogFetch(),
     scheduleBackgroundWork: (run) => {
@@ -157,7 +159,7 @@ async function fixture(params?: { fetchImpl?: typeof fetch; now?: () => number }
     deliveryTo: "line:group:grp-a",
     ...(params?.now ? { now: params.now } : {}),
   });
-  return { gate, draftStore, jobStore, draft, scheduled };
+  return { gate, draftStore, jobStore, activeJobLockStore, draft, scheduled };
 }
 
 const CTX = { accountId: "acct-1", conversationId: "grp-a" };
@@ -200,12 +202,18 @@ describe("parseLineVideoConfirmationCode", () => {
 
 describe("createLineVideoConfirmationGate", () => {
   it("1: owner confirmation submits exactly once and pushes the finished video", async () => {
-    const { gate, draft, scheduled, jobStore } = await fixture();
+    const { gate, draft, scheduled, jobStore, activeJobLockStore } = await fixture();
     const result = await gate(confirmEvent(draft.draftId), CTX);
 
     expect(result?.handled).toBe(true);
     expect(result?.text).toContain("เริ่มสร้างวิดีโอแล้ว");
     expect(scheduled.length).toBe(1);
+    // Required lifecycle: the job is "running" and the conversation's
+    // active-job lock is held the instant confirmation returns, before the
+    // background work has even started.
+    const [runningJob] = await jobStore.entries();
+    expect(runningJob?.value.status).toBe("running");
+    expect((await activeJobLockStore.entries()).length).toBe(1);
 
     await scheduled[0]?.();
 
@@ -223,6 +231,8 @@ describe("createLineVideoConfirmationGate", () => {
     const [job] = await jobStore.entries();
     expect(job?.value.status).toBe("completed");
     expect(job?.value.actualCostUsd).toBe(0.79);
+    // running -> completed released the lock: a new draft is immediately allowed.
+    expect((await activeJobLockStore.entries()).length).toBe(0);
   });
 
   it("2: non-owner confirmation never submits, even with a valid code", async () => {
@@ -294,19 +304,105 @@ describe("createLineVideoConfirmationGate", () => {
   });
 
   it("8: a failed background submission reports the error instead of losing the job silently", async () => {
-    generateVideoMock.mockRejectedValueOnce(new Error("OpenRouter video generation failed"));
-    const { gate, draft, scheduled, jobStore } = await fixture();
+    generateVideoMock.mockRejectedValueOnce(
+      new Error(
+        "OpenRouter video request has conflicting settings: resolution 720p disagrees with size 1920x1080; refusing to submit",
+      ),
+    );
+    const { gate, draft, scheduled, jobStore, activeJobLockStore } = await fixture();
     await gate(confirmEvent(draft.draftId), CTX);
     await scheduled[0]?.();
 
     const [job] = await jobStore.entries();
     expect(job?.value.status).toBe("failed");
-    expect(job?.value.error).toContain("failed");
+    expect(job?.value.error).toContain("conflicting settings");
+    // Deterministic, code-only failure acknowledgement -- exact template,
+    // never LLM-composed, and never promises the job "will clear" on its own.
     expect(sendMessageLineMock).toHaveBeenCalledWith(
       "line:group:grp-a",
-      expect.stringContaining("ไม่สำเร็จ"),
+      [
+        "❌ สร้างวิดีโอไม่สำเร็จ",
+        "สาเหตุ: OpenRouter video request has conflicting settings: resolution 720p disagrees with size 1920x1080; refusing to submit",
+        "",
+        "งานนี้ถูกปิดสถานะเป็น Failed แล้ว",
+        "สามารถสร้าง Draft ใหม่ได้",
+      ].join("\n"),
       expect.anything(),
     );
+    // running -> failed is terminal and releases the active-job lock, so it
+    // never remains an active blocker for the conversation.
+    expect((await activeJobLockStore.entries()).length).toBe(0);
+  });
+
+  it("9: a polling/timeout failure is equally terminal and releases the lock", async () => {
+    generateVideoMock.mockRejectedValueOnce(
+      new Error("OpenRouter video generation did not finish in time"),
+    );
+    const { gate, draft, scheduled, jobStore, activeJobLockStore } = await fixture();
+    await gate(confirmEvent(draft.draftId), CTX);
+    await scheduled[0]?.();
+
+    const [job] = await jobStore.entries();
+    expect(job?.value.status).toBe("failed");
+    expect(job?.value.error).toContain("did not finish in time");
+    expect((await activeJobLockStore.entries()).length).toBe(0);
+  });
+
+  it("10: redacts anything that looks like an API key/bearer token from the failure reason", async () => {
+    generateVideoMock.mockRejectedValueOnce(
+      new Error("upstream rejected Authorization: Bearer sk-or-v1-abcdef0123456789"),
+    );
+    const { gate, draft, scheduled, jobStore } = await fixture();
+    await gate(confirmEvent(draft.draftId), CTX);
+    await scheduled[0]?.();
+
+    const [job] = await jobStore.entries();
+    expect(job?.value.error).not.toContain("sk-or-v1-abcdef0123456789");
+    expect(job?.value.error).toContain("[redacted]");
+  });
+
+  it("11: a new confirmation is refused while a previous job for the same conversation is still running", async () => {
+    const { gate, draftStore, jobStore, scheduled } = await fixture();
+    const first = await createLineVideoDraft({
+      store: draftStore,
+      accountId: "acct-1",
+      conversationKey: "acct-1|grp-a",
+      ownerSenderId: OWNER_ID,
+      model: "bytedance/seedance-2.5",
+      prompt: "first video",
+      durationSeconds: 8,
+      aspectRatio: "16:9",
+      resolution: "1080p",
+      audio: false,
+      estimatedCostUsd: 0.8,
+      deliveryTo: "line:group:grp-a",
+    });
+    const second = await createLineVideoDraft({
+      store: draftStore,
+      accountId: "acct-1",
+      conversationKey: "acct-1|grp-a",
+      ownerSenderId: OWNER_ID,
+      model: "bytedance/seedance-2.5",
+      prompt: "second video",
+      durationSeconds: 8,
+      aspectRatio: "16:9",
+      resolution: "1080p",
+      audio: false,
+      estimatedCostUsd: 0.8,
+      deliveryTo: "line:group:grp-a",
+    });
+
+    await gate(confirmEvent(first.draftId), CTX);
+    // First job is "running" (its background work is queued but not yet
+    // executed) -- confirming the second draft must never start a second
+    // concurrent paid job for the same conversation (cost safety: no double
+    // submit), even though the draft/consume layer would otherwise allow it.
+    const secondResult = await gate(confirmEvent(second.draftId), CTX);
+
+    expect(secondResult?.text).toContain("กำลังทำงานอยู่");
+    expect(scheduled.length).toBe(1);
+    const jobs = await jobStore.entries();
+    expect(jobs.length).toBe(1);
   });
 
   it("does not fire for ordinary chat text", async () => {

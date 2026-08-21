@@ -28,8 +28,12 @@ import {
   type LineVideoDraftStore,
 } from "./video-draft-store.js";
 import {
+  claimLineVideoActiveJobLock,
   createLineVideoJob,
+  releaseLineVideoActiveJobLock,
+  resolveLineVideoActiveJobLock,
   updateLineVideoJob,
+  type LineVideoActiveJobLockStore,
   type LineVideoJobStore,
 } from "./video-job-store.js";
 import { loadOpenRouterVideoModels, type OpenRouterVideoModel } from "./video-model-catalog.js";
@@ -72,6 +76,32 @@ function readOpenRouterUsageCost(
   return typeof cost === "number" ? cost : undefined;
 }
 
+const MAX_FAILURE_REASON_LENGTH = 200;
+// Strips patterns that look like bearer tokens/API keys before a raw
+// provider/SDK error message ever reaches the user-facing failure reply.
+const SENSITIVE_TOKEN_PATTERN = /\b(?:bearer\s+\S+|sk-[a-z0-9_-]{8,})/giu;
+
+/** Renders a caught error as a short, safe-to-display failure reason. */
+function sanitizeLineVideoFailureReason(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  const singleLine = message.replace(/\s+/gu, " ").trim();
+  const redacted = singleLine.replace(SENSITIVE_TOKEN_PATTERN, "[redacted]");
+  return redacted.length > MAX_FAILURE_REASON_LENGTH
+    ? `${redacted.slice(0, MAX_FAILURE_REASON_LENGTH)}…`
+    : redacted;
+}
+
+/** Deterministic, code-only failure acknowledgement -- never LLM-composed. */
+function formatLineVideoFailureReply(reason: string): string {
+  return [
+    "❌ สร้างวิดีโอไม่สำเร็จ",
+    `สาเหตุ: ${reason}`,
+    "",
+    "งานนี้ถูกปิดสถานะเป็น Failed แล้ว",
+    "สามารถสร้าง Draft ใหม่ได้",
+  ].join("\n");
+}
+
 async function loadSourceImageAsset(path: string): Promise<VideoGenerationSourceAsset | undefined> {
   try {
     const buffer = await fs.readFile(path);
@@ -86,6 +116,7 @@ async function executeConfirmedLineVideoJob(params: {
   draft: LineVideoDraft;
   model: OpenRouterVideoModel;
   jobStore: LineVideoJobStore;
+  activeJobLockStore: LineVideoActiveJobLockStore;
   jobId: string;
   account: ReturnType<typeof resolveLineAccount>;
 }): Promise<void> {
@@ -99,6 +130,10 @@ async function executeConfirmedLineVideoJob(params: {
     }
   }
 
+  // Whatever happens below -- success, provider rejection, or a polling
+  // failure -- the job reaches a terminal state and the active-job lock is
+  // released in the same pass, so a failed job can never remain an active
+  // blocker: the very next draft attempt for this conversation sees no lock.
   try {
     const result = await generateVideo({
       cfg,
@@ -154,19 +189,27 @@ async function executeConfirmedLineVideoJob(params: {
       });
     }
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const reason = sanitizeLineVideoFailureReason(error);
     await updateLineVideoJob({
       store: params.jobStore,
       jobId: params.jobId,
-      patch: { status: "failed", error: message },
+      patch: { status: "failed", error: reason },
     });
     if (params.draft.deliveryTo) {
-      await sendMessageLine(params.draft.deliveryTo, `❌ สร้างวิดีโอไม่สำเร็จ: ${message}`, {
+      await sendMessageLine(params.draft.deliveryTo, formatLineVideoFailureReply(reason), {
         cfg,
         accountId: account.accountId,
         channelAccessToken: account.channelAccessToken,
       }).catch(() => {});
     }
+  } finally {
+    // Releases unconditionally on every exit path (success and failure
+    // alike), so a failed generation never leaves the conversation's active
+    // lock held -- the next line_video_draft call sees no lock and proceeds.
+    await releaseLineVideoActiveJobLock({
+      store: params.activeJobLockStore,
+      conversationKey: params.draft.conversationKey,
+    });
   }
 }
 
@@ -182,6 +225,7 @@ async function resolveLineOpenRouterApiKey(): Promise<string | undefined> {
 export function createLineVideoConfirmationGate(params: {
   draftStore: LineVideoDraftStore;
   jobStore: LineVideoJobStore;
+  activeJobLockStore: LineVideoActiveJobLockStore;
   resolveApiKey?: () => Promise<string | undefined>;
   fetchImpl?: typeof fetch;
   scheduleBackgroundWork?: (run: () => Promise<void>) => void;
@@ -287,6 +331,25 @@ export function createLineVideoConfirmationGate(params: {
       };
     }
 
+    // Defense in depth against a lock-claim race (two drafts confirmed for
+    // the same conversation before video-draft-tool.ts's own active-lock
+    // check ever saw the first one): never start a second background job
+    // while one is still active for this conversation. The draft was already
+    // atomically consumed above, so refusing here still costs nothing extra
+    // -- a fresh draft + confirmation is required either way, matching the
+    // "retry requires a new draft" rule.
+    const existingLock = await resolveLineVideoActiveJobLock({
+      store: params.activeJobLockStore,
+      conversationKey,
+      now: params.now,
+    });
+    if (existingLock) {
+      return {
+        handled: true,
+        text: "มีงานสร้างวิดีโออื่นกำลังทำงานอยู่ในบทสนทนานี้ กรุณารอให้เสร็จก่อนเริ่มงานใหม่",
+      };
+    }
+
     const job = await createLineVideoJob({
       store: params.jobStore,
       draftId: draft.draftId,
@@ -301,12 +364,19 @@ export function createLineVideoConfirmationGate(params: {
       estimatedCostUsd: costGuard.estimatedCostUsd,
       now: params.now,
     });
+    await claimLineVideoActiveJobLock({
+      store: params.activeJobLockStore,
+      conversationKey,
+      jobId: job.jobId,
+      now: params.now,
+    });
 
     scheduleBackgroundWork(() =>
       executeConfirmedLineVideoJob({
         draft,
         model,
         jobStore: params.jobStore,
+        activeJobLockStore: params.activeJobLockStore,
         jobId: job.jobId,
         account,
       }),
