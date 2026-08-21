@@ -23,6 +23,7 @@ import { getRuntimeConfig } from "openclaw/plugin-sdk/runtime-config-snapshot";
 import { loadOpenRouterVideoModels, type OpenRouterVideoModel } from "./video-model-catalog.js";
 import {
   buildLineVideoConversationKey,
+  resolveLineVideoModelPreference,
   setLineVideoModelPreference,
   type LineVideoModelPreferenceStore,
 } from "./video-model-preference.js";
@@ -42,21 +43,59 @@ export type LinePendingVideoModelSelection = {
 export type LinePendingVideoModelSelectionStore =
   PluginStateKeyedStore<LinePendingVideoModelSelection>;
 
-const VIDEO_MODEL_TRIGGER_WORDS = ["video model", "โมเดลวิดีโอ", "วิดีโอโมเดล"];
+// "โมเดลสร้างวิดีโอ" ("the model that generates videos") is a natural Thai
+// phrasing distinct from the "video model"/"โมเดลวิดีโอ"/"วิดีโอโมเดล" word
+// order, needed so status wording like "เช็กโมเดลสร้างวิดีโอ" is recognized
+// at all instead of falling through to the chat router or the main LLM.
+const VIDEO_MODEL_TRIGGER_WORDS = ["video model", "โมเดลวิดีโอ", "วิดีโอโมเดล", "โมเดลสร้างวิดีโอ"];
 const NUMERIC_SELECTION_PATTERN = /^\d+$/u;
 const MAX_LISTED_CANDIDATES = 20;
 
+// Substrings that, once found in the wording left over after stripping the
+// video-model trigger and ordinary switch connectors, mark a "what's the
+// current model" question rather than a switch target. Checked as plain
+// substrings (not tokenized) because Thai is often written without spaces
+// between words, so a token-boundary match would miss real examples like
+// "ตอนนี้ใช้" (no space between "ตอนนี้" and "ใช้"). Bare "video model" (empty
+// remainder) never matches any of these, so it is unaffected and keeps
+// showing the live catalog.
+const STATUS_REMAINDER_MARKERS = [
+  "ตอนนี้",
+  "ปัจจุบัน",
+  "รุ่นไหน",
+  "อยู่",
+  "อะไร",
+  "คือ",
+  "เช็ก",
+  "เช็ค",
+  "status",
+  "current",
+];
+
 export type LineVideoModelControlIntent =
   | { kind: "switch"; query: string }
+  | { kind: "status" }
   | { kind: "numeric"; selection: number }
   | { kind: "none" };
 
+function isStatusRemainder(remainder: string): boolean {
+  if (!remainder) {
+    return false;
+  }
+  const lower = remainder.toLowerCase();
+  return STATUS_REMAINDER_MARKERS.some((marker) => lower.includes(marker.toLowerCase()));
+}
+
 /**
- * Deterministically classifies a LINE message as a video-model switch
- * request or a numeric picker reply. Only messages that literally contain
- * "video model"/"โมเดลวิดีโอ"/"วิดีโอโมเดล" count as a switch request; every
+ * Deterministically classifies a LINE message as a video-model status
+ * question, a switch request, or a numeric picker reply. Only messages that
+ * literally contain a recognized video-model reference count at all; every
  * other message — including ordinary chat-model requests and unrelated
  * conversation — is "none" and falls through unchanged.
+ *
+ * Status is checked BEFORE the remainder is ever used as a search query, so
+ * question wording ("ตอนนี้", "อะไร", "รุ่นไหนอยู่") is never passed to the
+ * catalog matcher as if it were a model name.
  */
 export function classifyLineVideoModelControlIntent(rawText: string): LineVideoModelControlIntent {
   const trimmed = rawText.trim();
@@ -84,6 +123,9 @@ export function classifyLineVideoModelControlIntent(rawText: string): LineVideoM
     .replace(/\bchange to\b|\bswitch to\b|\buse\b/giu, " ")
     .replace(/\s+/gu, " ")
     .trim();
+  if (isStatusRemainder(query)) {
+    return { kind: "status" };
+  }
   return { kind: "switch", query };
 }
 
@@ -191,6 +233,34 @@ export function createLineVideoModelControlRouter(params: {
       return undefined;
     }
     const pendingKey = resolvePendingKey(scopeKey);
+
+    if (intent.kind === "status") {
+      // Read-only: never mutates the preference store, never touches
+      // pendingStore, never calls the catalog search/matching path below.
+      const modelId = await resolveLineVideoModelPreference({
+        store: params.preferenceStore,
+        key: scopeKey,
+      });
+      let modelName = modelId;
+      try {
+        const apiKey = await resolveApiKey();
+        if (apiKey?.trim()) {
+          const models = await loadOpenRouterVideoModels({ apiKey, fetchImpl: params.fetchImpl });
+          modelName = models.find((model) => model.id === modelId)?.name ?? modelId;
+        }
+      } catch {
+        // Best-effort friendly name only; the persisted/default id itself is
+        // always the source of truth and never depends on the catalog being
+        // reachable, so a lookup failure degrades gracefully instead of
+        // erroring the status query out.
+      }
+      const lines = [
+        "🎬 Video model ปัจจุบัน",
+        ...(modelName !== modelId ? [modelName] : []),
+        modelId,
+      ];
+      return { handled: true, text: lines.join("\n") };
+    }
 
     if (intent.kind === "numeric") {
       const pending = await params.pendingStore.lookup(pendingKey);
