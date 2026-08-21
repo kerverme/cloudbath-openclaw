@@ -235,7 +235,10 @@ export default defineBundledChannelEntry({
           requesterSenderId: ctx.requesterSenderId,
           sessionId: ctx.sessionId,
           pendingStore: pendingModelSelectionStore,
-          resolveApiKey: ctx.resolveApiKeyForProvider,
+          // No resolveApiKey override: the tool resolves OpenRouter credentials
+          // through the shared canonical path. ctx.resolveApiKeyForProvider is
+          // deliberately NOT used -- it reads only saved auth profiles, so a
+          // deployment holding credentials in env/config gets undefined from it.
           applySessionModel: createLineSessionModelApplier({
             agentId: ctx.agentId,
             sessionKey: ctx.sessionKey,

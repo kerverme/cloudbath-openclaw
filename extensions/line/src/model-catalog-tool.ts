@@ -4,6 +4,7 @@ import type { PluginStateKeyedStore } from "openclaw/plugin-sdk/plugin-state-run
 import { patchSessionEntry } from "openclaw/plugin-sdk/session-store-runtime";
 import { jsonResult } from "openclaw/plugin-sdk/tool-results";
 import { Type } from "typebox";
+import { resolveLineProviderApiKey } from "./openrouter-auth.js";
 
 const OPENROUTER_USER_MODELS_URL = "https://openrouter.ai/api/v1/models/user";
 const OPENROUTER_CATALOG_TIMEOUT_MS = 10_000;
@@ -50,6 +51,7 @@ type CreateLineModelCatalogToolParams = {
   requesterSenderId?: string;
   sessionId?: string;
   pendingStore?: PluginStateKeyedStore<LinePendingModelSelection>;
+  /** Overrides canonical LINE OpenRouter credential resolution (tests/routers). */
   resolveApiKey?: (providerId: string) => Promise<string | undefined>;
   applySessionModel?: (model: OpenRouterAccountModel) => Promise<boolean>;
   fetchImpl?: FetchLike;
@@ -457,6 +459,14 @@ export function createLineModelCatalogTool(params: CreateLineModelCatalogToolPar
     return null;
   }
 
+  // Canonical LINE OpenRouter credential resolution by default. Previously the
+  // AI-facing registration in index.ts injected ctx.resolveApiKeyForProvider,
+  // which only reads saved auth profiles and yields undefined on a deployment
+  // holding OpenRouter credentials in env/config -- the same narrow path that
+  // broke the video draft in production. The switch router still injects its
+  // own resolver, so model-switch routing semantics are unchanged.
+  const resolveApiKey = params.resolveApiKey ?? resolveLineProviderApiKey;
+
   const pendingKey = resolvePendingSelectionKey(params);
 
   const applyVerifiedCatalogModel = async (model: OpenRouterAccountModel): Promise<boolean> => {
@@ -536,7 +546,7 @@ export function createLineModelCatalogTool(params: CreateLineModelCatalogToolPar
           });
         }
 
-        const apiKey = await params.resolveApiKey?.("openrouter");
+        const apiKey = await resolveApiKey("openrouter");
         if (!apiKey?.trim()) {
           throw new Error("OPENROUTER_ACCOUNT_CATALOG_AUTH_UNAVAILABLE");
         }
@@ -586,7 +596,7 @@ export function createLineModelCatalogTool(params: CreateLineModelCatalogToolPar
         await params.pendingStore.delete(pendingKey);
       }
 
-      const apiKey = await params.resolveApiKey?.("openrouter");
+      const apiKey = await resolveApiKey("openrouter");
       if (!apiKey?.trim()) {
         throw new Error("OPENROUTER_ACCOUNT_CATALOG_AUTH_UNAVAILABLE");
       }
