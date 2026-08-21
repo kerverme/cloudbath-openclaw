@@ -141,6 +141,62 @@ function readBalancedCallArguments(source: string, openParenIndex: number): stri
   return undefined;
 }
 
+/**
+ * Removes line and block comments while preserving string/template literals.
+ *
+ * Applied before every scan below so that (a) an explanatory comment sitting
+ * between `registerTool`'s arguments cannot hide the options object from
+ * `splitTopLevelArgs`, and (b) commented-out code is never mistaken for a real
+ * registration or constant.
+ */
+function stripTypeScriptComments(source: string): string {
+  let out = "";
+  let quote: '"' | "'" | "`" | undefined;
+  let escaped = false;
+  for (let index = 0; index < source.length; index += 1) {
+    const char = source[index] ?? "";
+    const next = source[index + 1] ?? "";
+    if (quote) {
+      out += char;
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (char === "\\") {
+        escaped = true;
+        continue;
+      }
+      if (char === quote) {
+        quote = undefined;
+      }
+      continue;
+    }
+    if (char === '"' || char === "'" || char === "`") {
+      quote = char;
+      out += char;
+      continue;
+    }
+    if (char === "/" && next === "/") {
+      while (index < source.length && source[index] !== "\n") {
+        index += 1;
+      }
+      out += "\n";
+      continue;
+    }
+    if (char === "/" && next === "*") {
+      index += 2;
+      while (index < source.length && !(source[index] === "*" && source[index + 1] === "/")) {
+        index += 1;
+      }
+      index += 1;
+      out += " ";
+      continue;
+    }
+    out += char;
+  }
+  return out;
+}
+
 function listRegisterToolCalls(source: string): string[] {
   const calls: string[] = [];
   const pattern = /\bregisterTool\s*\(/g;
@@ -219,42 +275,131 @@ function extractStringLiterals(source: string): string[] {
   return names;
 }
 
-function extractStaticRegisteredToolNamesFromObject(source: string): string[] {
+/**
+ * Resolves `const NAME = "tool"` / `const NAME = ["a", "b"] as const` string
+ * constants declared anywhere in a plugin's production sources.
+ *
+ * Plugins commonly register tools by exported constant rather than inline
+ * literal (`names: [LINE_VIDEO_DRAFT_TOOL_NAME]`,
+ * `names: [...CODEX_SUPERVISION_COMPAT_TOOL_NAMES]`). Without this resolution
+ * the literal-only scan below extracts nothing for those calls, the plugin
+ * silently contributes zero registered names, and an undeclared tool sails
+ * past this contract test — which is exactly how `line_video_draft` shipped
+ * missing from the LINE manifest and was rejected at runtime by
+ * registry.ts's "plugin must declare contracts.tools for:" check.
+ */
+function collectPluginStringConstants(sources: readonly string[]): Map<string, string[]> {
+  const constants = new Map<string, string[]>();
+  for (const source of sources) {
+    const scalarPattern = /\bconst\s+([A-Za-z_$][\w$]*)\s*(?::[^=]+)?=\s*["']([^"']+)["']/g;
+    let scalarMatch: RegExpExecArray | null;
+    while ((scalarMatch = scalarPattern.exec(source))) {
+      const name = scalarMatch[1];
+      const value = scalarMatch[2];
+      if (name && value) {
+        constants.set(name, [value]);
+      }
+    }
+
+    const arrayPattern =
+      /\bconst\s+([A-Za-z_$][\w$]*)\s*(?::[^=]+)?=\s*\[([\s\S]*?)\]\s*(?:as\s+const)?\s*;/g;
+    let arrayMatch: RegExpExecArray | null;
+    while ((arrayMatch = arrayPattern.exec(source))) {
+      const name = arrayMatch[1];
+      const body = arrayMatch[2] ?? "";
+      if (!name || /[A-Za-z_$][\w$]*\s*[,\]]/.test(body.replace(/["'][^"']*["']/g, ""))) {
+        // Skip arrays holding anything other than plain string literals; a
+        // partially-resolved list would be worse than reporting it unresolved.
+        continue;
+      }
+      const values = extractStringLiterals(body);
+      if (values.length > 0) {
+        constants.set(name, values);
+      }
+    }
+  }
+  return constants;
+}
+
+type ExtractedToolNames = { names: string[]; unresolved: string[] };
+
+function extractStaticRegisteredToolNamesFromObject(
+  source: string,
+  constants: Map<string, string[]>,
+): ExtractedToolNames {
   const names = new Set<string>();
+  const unresolved = new Set<string>();
+
+  const addIdentifier = (identifier: string) => {
+    const resolved = constants.get(identifier);
+    if (resolved) {
+      for (const value of resolved) {
+        names.add(value);
+      }
+      return;
+    }
+    unresolved.add(identifier);
+  };
+
   const namesPattern = /\bnames\s*:\s*\[([\s\S]*?)\]/g;
   let namesMatch: RegExpExecArray | null;
   while ((namesMatch = namesPattern.exec(source))) {
-    for (const name of extractStringLiterals(namesMatch[1] ?? "")) {
+    const body = namesMatch[1] ?? "";
+    for (const name of extractStringLiterals(body)) {
       names.add(name);
+    }
+    // Entries that are not string literals: bare identifiers and spreads.
+    const withoutLiterals = body.replace(/["'][^"']*["']/g, "");
+    const identifierPattern = /(?:\.\.\.)?\s*([A-Za-z_$][\w$]*)/g;
+    let identifierMatch: RegExpExecArray | null;
+    while ((identifierMatch = identifierPattern.exec(withoutLiterals))) {
+      const identifier = identifierMatch[1];
+      if (identifier) {
+        addIdentifier(identifier);
+      }
     }
   }
 
-  const namePattern = /\bname\s*:\s*["']([^"']+)["']/g;
+  const nameLiteralPattern = /\bname\s*:\s*["']([^"']+)["']/g;
   let nameMatch: RegExpExecArray | null;
-  while ((nameMatch = namePattern.exec(source))) {
+  while ((nameMatch = nameLiteralPattern.exec(source))) {
     if (nameMatch[1]) {
       names.add(nameMatch[1]);
     }
   }
-  return [...names];
+
+  const nameIdentifierPattern = /\bname\s*:\s*([A-Za-z_$][\w$]*)\s*[,}]/g;
+  let nameIdentifierMatch: RegExpExecArray | null;
+  while ((nameIdentifierMatch = nameIdentifierPattern.exec(source))) {
+    const identifier = nameIdentifierMatch[1];
+    if (identifier) {
+      addIdentifier(identifier);
+    }
+  }
+
+  return { names: [...names], unresolved: [...unresolved] };
 }
 
-function extractStaticRegisteredToolNames(callArgs: string): string[] {
+function extractStaticRegisteredToolNames(
+  callArgs: string,
+  constants: Map<string, string[]>,
+): ExtractedToolNames {
   const args = splitTopLevelArgs(callArgs);
   const names = new Set<string>();
-  const firstArg = args[0]?.trim() ?? "";
-  const optionsArg = args[1]?.trim() ?? "";
-  if (firstArg.startsWith("{")) {
-    for (const name of extractStaticRegisteredToolNamesFromObject(firstArg)) {
+  const unresolved = new Set<string>();
+  for (const arg of [args[0]?.trim() ?? "", args[1]?.trim() ?? ""]) {
+    if (!arg.startsWith("{")) {
+      continue;
+    }
+    const extracted = extractStaticRegisteredToolNamesFromObject(arg, constants);
+    for (const name of extracted.names) {
       names.add(name);
     }
-  }
-  if (optionsArg.startsWith("{")) {
-    for (const name of extractStaticRegisteredToolNamesFromObject(optionsArg)) {
-      names.add(name);
+    for (const identifier of extracted.unresolved) {
+      unresolved.add(identifier);
     }
   }
-  return [...names];
+  return { names: [...names], unresolved: [...unresolved] };
 }
 
 function readManifest(manifestPath: string): PluginManifestFile {
@@ -292,6 +437,53 @@ describe("bundled plugin tool manifest contracts", () => {
   it("declares every production registerTool owner in contracts.tools", () => {
     expect(toolContractFailures).toStrictEqual([]);
   });
+
+  // Regression pin for the production failure "[plugins] plugin must declare
+  // contracts.tools for: line_video_draft". LINE registers both of its tools by
+  // exported constant, so before constant resolution was added above this whole
+  // plugin contributed zero names and the generic check passed vacuously.
+  it("resolves LINE's constant-named tools and finds both declared", () => {
+    const extensionsDir = path.join(process.cwd(), "extensions");
+    const pluginDir = path.join(extensionsDir, "line");
+    const manifest = readManifest(path.join(pluginDir, "openclaw.plugin.json"));
+    const declaredTools = normalizeManifestTools(manifest.contracts?.tools);
+
+    const sources = walkFiles(pluginDir)
+      .filter(isProductionSource)
+      .map((filePath) => stripTypeScriptComments(fs.readFileSync(filePath, "utf-8")));
+    const constants = collectPluginStringConstants(sources);
+    const registered = new Set<string>();
+    for (const source of sources) {
+      for (const call of listRegisterToolCalls(source)) {
+        for (const name of extractStaticRegisteredToolNames(call, constants).names) {
+          registered.add(name);
+        }
+      }
+    }
+
+    expect(constants.get("LINE_VIDEO_DRAFT_TOOL_NAME")).toStrictEqual(["line_video_draft"]);
+    expect(registered).toContain("line_video_draft");
+    expect(registered).toContain("openrouter_account_models");
+    expect(declaredTools).toContain("line_video_draft");
+    expect(declaredTools).toContain("openrouter_account_models");
+  });
+
+  // line_video_draft is the only sanctioned path to a paid LINE video request
+  // (video_generate is blocked on the channel), so it must stay in the default
+  // tool set. Manifest `optional: true` would hide it behind tools.allow
+  // (src/plugins/tools.ts isOptionalToolAllowed), leaving an owner's natural
+  // "make me a video" request with no reachable tool at all.
+  it("keeps line_video_draft non-optional while openrouter_account_models stays optional", () => {
+    const manifest = JSON.parse(
+      fs.readFileSync(
+        path.join(process.cwd(), "extensions", "line", "openclaw.plugin.json"),
+        "utf-8",
+      ),
+    ) as { toolMetadata?: Record<string, { optional?: boolean } | undefined> };
+
+    expect(manifest.toolMetadata?.line_video_draft?.optional).not.toBe(true);
+    expect(manifest.toolMetadata?.openrouter_account_models?.optional).toBe(true);
+  });
 });
 
 function collectToolContractFailures(extensionsDir: string): string[] {
@@ -303,14 +495,24 @@ function collectToolContractFailures(extensionsDir: string): string[] {
     const pluginId = typeof manifest.id === "string" ? manifest.id : path.basename(pluginDir);
     const declaredTools = new Set(normalizeManifestTools(manifest.contracts?.tools));
     const registeredNames = new Set<string>();
+    const unresolvedIdentifiers = new Set<string>();
     let registerCallCount = 0;
 
-    for (const filePath of walkFiles(pluginDir).filter(isProductionSource)) {
-      const source = fs.readFileSync(filePath, "utf-8");
+    const sourcePaths = walkFiles(pluginDir).filter(isProductionSource);
+    const sources = sourcePaths.map((filePath) =>
+      stripTypeScriptComments(fs.readFileSync(filePath, "utf-8")),
+    );
+    const constants = collectPluginStringConstants(sources);
+
+    for (const source of sources) {
       for (const call of listRegisterToolCalls(source)) {
         registerCallCount += 1;
-        for (const name of extractStaticRegisteredToolNames(call)) {
+        const extracted = extractStaticRegisteredToolNames(call, constants);
+        for (const name of extracted.names) {
           registeredNames.add(name);
+        }
+        for (const identifier of extracted.unresolved) {
+          unresolvedIdentifiers.add(identifier);
         }
       }
     }
@@ -320,6 +522,18 @@ function collectToolContractFailures(extensionsDir: string): string[] {
     }
     if (declaredTools.size === 0) {
       failures.push(`${pluginId}: registers agent tools but has no contracts.tools`);
+      continue;
+    }
+
+    // A tool name this scan cannot statically resolve is reported rather than
+    // skipped. Silently ignoring it is what let an undeclared tool ship: the
+    // plugin contributed zero names and the subset check below passed
+    // vacuously. Failing here keeps the blind spot closed as plugins adopt new
+    // ways of naming tools.
+    if (unresolvedIdentifiers.size > 0) {
+      failures.push(
+        `${pluginId}: cannot statically resolve registerTool name(s) ${[...unresolvedIdentifiers].toSorted().join(", ")}; declare them as a string literal or a plain string/string[] const so contracts.tools can be verified`,
+      );
       continue;
     }
 

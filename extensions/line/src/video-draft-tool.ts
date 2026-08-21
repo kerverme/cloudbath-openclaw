@@ -293,11 +293,29 @@ export function createLineVideoDraftTool(params: CreateLineVideoDraftToolParams)
   };
 }
 
-type PluginHookToolContext = { channelId?: string };
-type PluginHookBeforeToolCallEvent = { toolName: string };
-type PluginHookBeforeToolCallResult = { block: boolean; blockReason?: string };
+/**
+ * Agent-run context for the LINE video guard. `channel` is the
+ * host-authoritative channel/plugin id stamped on channel-originated runs
+ * (`PluginHookAgentContext.channel`); `channelId` on the tool-call context is
+ * NOT a reliable substitute (see the guard doc below).
+ */
+type AgentRunContext = {
+  channel?: string;
+  runId?: string;
+  sessionId?: string;
+};
+
+type BeforeToolCallEvent = { toolName: string };
+type BeforeToolCallResult = { block: boolean; blockReason?: string };
 
 const BLOCKED_VIDEO_GENERATE_TOOL_NAME = "video_generate";
+
+function agentRunContextKeys(ctx: AgentRunContext): string[] {
+  return [
+    ctx.runId ? `run:${ctx.runId}` : "",
+    ctx.sessionId ? `session:${ctx.sessionId}` : "",
+  ].filter(Boolean);
+}
 
 /**
  * Blocks the core `video_generate` agent tool from ever firing directly
@@ -305,17 +323,46 @@ const BLOCKED_VIDEO_GENERATE_TOOL_NAME = "video_generate";
  * only path to an actual paid OpenRouter video request on LINE is the
  * deterministic owner-only draft/confirm flow above (this tool +
  * video-confirmation.ts) — the chat LLM must never be able to trigger
- * generation on its own by calling the generic tool. Lives alongside
- * createLineVideoDraftTool (the sanctioned path it protects), mirroring
- * model-catalog-tool.ts's createLineModelSwitchGuard/tool pairing.
+ * generation on its own by calling the generic tool.
+ *
+ * LINE-ness is captured at `before_agent_run`, where the host stamps the
+ * authoritative `ctx.channel`, and matched later by run/session key. It is
+ * deliberately NOT read from the tool-call context's `channelId`: that field
+ * is populated only from `hookChannelId ?? currentChannelId`
+ * (src/agents/agent-tools.ts:1184), `hookChannelId` is never assigned
+ * anywhere in the tree, and `currentChannelId` carries a delivery target on
+ * some paths rather than a channel id. A `ctx.channelId !== "line"` test
+ * therefore FAILS OPEN whenever the field is absent — which is how a paid
+ * `video_generate` run reached the provider in production. Keying off the
+ * recorded run instead fails closed for every LINE execution path, while
+ * non-LINE runs are never recorded and stay completely unaffected.
+ *
+ * Mirrors model-catalog-tool.ts's createLineModelSwitchGuard, which already
+ * uses this same before_agent_run/agent_end context-tracking shape for the
+ * identical "is this tool call inside a LINE run" question.
  */
 export function createLineVideoGenerationGuard() {
+  const activeLineContexts = new Set<string>();
   return {
+    beforeAgentRun: (_event: unknown, ctx: AgentRunContext): void => {
+      if (ctx.channel !== "line") {
+        return;
+      }
+      for (const key of agentRunContextKeys(ctx)) {
+        activeLineContexts.add(key);
+      }
+    },
     beforeToolCall: (
-      event: PluginHookBeforeToolCallEvent,
-      ctx: PluginHookToolContext,
-    ): PluginHookBeforeToolCallResult | undefined => {
-      if (ctx.channelId !== "line" || event.toolName !== BLOCKED_VIDEO_GENERATE_TOOL_NAME) {
+      event: BeforeToolCallEvent,
+      ctx: AgentRunContext,
+    ): BeforeToolCallResult | undefined => {
+      if (event.toolName !== BLOCKED_VIDEO_GENERATE_TOOL_NAME) {
+        return undefined;
+      }
+      const isActiveLineContext = agentRunContextKeys(ctx).some((key) =>
+        activeLineContexts.has(key),
+      );
+      if (!isActiveLineContext) {
         return undefined;
       }
       return {
@@ -323,6 +370,11 @@ export function createLineVideoGenerationGuard() {
         blockReason:
           "LINE video generation requires the owner-only draft/confirm flow (create a draft, then send the exact confirmation code); direct video_generate calls are blocked on this channel.",
       };
+    },
+    agentEnd: (_event: unknown, ctx: AgentRunContext): void => {
+      for (const key of agentRunContextKeys(ctx)) {
+        activeLineContexts.delete(key);
+      }
     },
   };
 }
