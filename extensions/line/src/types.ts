@@ -16,6 +16,18 @@ interface LineThreadBindingsConfig {
   spawnAcpSessions?: boolean;
 }
 
+/**
+ * Owner-only LINE video-generation cost guard. `maxEstimatedCostUsd` bounds
+ * confirmation-time spend before any paid OpenRouter video request is
+ * submitted (see video-cost-guard.ts); `defaultModel` seeds a conversation's
+ * first video-model preference (video-model-preference.ts) before the owner
+ * ever switches it explicitly.
+ */
+interface LineVideoGenerationConfig {
+  maxEstimatedCostUsd?: number;
+  defaultModel?: string;
+}
+
 interface LineAccountBaseConfig {
   enabled?: boolean;
   channelAccessToken?: string;
@@ -32,6 +44,7 @@ interface LineAccountBaseConfig {
   webhookPath?: string;
   threadBindings?: LineThreadBindingsConfig;
   groups?: Record<string, LineGroupConfig>;
+  videoGeneration?: LineVideoGenerationConfig;
 }
 
 export interface LineConfig extends LineAccountBaseConfig {

@@ -16,6 +16,31 @@ import {
   LINE_MODEL_SELECTION_TTL_MS,
   createLineModelSwitchGuard,
 } from "./src/model-catalog-tool.js";
+import {
+  LINE_VIDEO_DRAFT_MAX_ENTRIES,
+  LINE_VIDEO_DRAFT_NAMESPACE,
+  type LineVideoDraft,
+} from "./src/video-draft-store.js";
+import {
+  createLineVideoDraftTool,
+  createLineVideoGenerationGuard,
+  LINE_VIDEO_DRAFT_TOOL_NAME,
+} from "./src/video-draft-tool.js";
+import {
+  LINE_VIDEO_JOB_MAX_ENTRIES,
+  LINE_VIDEO_JOB_NAMESPACE,
+  type LineVideoJob,
+} from "./src/video-job-store.js";
+import {
+  LINE_VIDEO_MODEL_SELECTION_MAX_ENTRIES,
+  LINE_VIDEO_MODEL_SELECTION_NAMESPACE,
+  type LinePendingVideoModelSelection,
+} from "./src/video-model-control.js";
+import {
+  LINE_VIDEO_MODEL_PREFERENCE_MAX_ENTRIES,
+  LINE_VIDEO_MODEL_PREFERENCE_NAMESPACE,
+  type LineVideoModelPreferenceState,
+} from "./src/video-model-preference.js";
 
 type RegisteredLineCardCommand = OpenClawPluginCommandDefinition;
 // Inline `import(...)` type (no top-level `./src/` import statement) keeps this
@@ -27,6 +52,12 @@ type RegisteredLineCardCommand = OpenClawPluginCommandDefinition;
 type LineModelSwitchIntentRouter = ReturnType<
   typeof import("./src/model-switch-router.js").createLineModelSwitchIntentRouter
 >;
+type LineVideoModelControlRouter = ReturnType<
+  typeof import("./src/video-model-control.js").createLineVideoModelControlRouter
+>;
+type LineVideoConfirmationGate = ReturnType<
+  typeof import("./src/video-confirmation.js").createLineVideoConfirmationGate
+>;
 
 function createLineModelSwitchIntentRouterLoader(
   pendingStore: PluginStateKeyedStore<LinePendingModelSelection>,
@@ -34,6 +65,26 @@ function createLineModelSwitchIntentRouterLoader(
   return createLazyRuntimeModule<LineModelSwitchIntentRouter>(async () => {
     const { createLineModelSwitchIntentRouter } = await import("./src/model-switch-router.js");
     return createLineModelSwitchIntentRouter({ pendingStore });
+  });
+}
+
+function createLineVideoModelControlRouterLoader(deps: {
+  preferenceStore: PluginStateKeyedStore<LineVideoModelPreferenceState>;
+  pendingStore: PluginStateKeyedStore<LinePendingVideoModelSelection>;
+}) {
+  return createLazyRuntimeModule<LineVideoModelControlRouter>(async () => {
+    const { createLineVideoModelControlRouter } = await import("./src/video-model-control.js");
+    return createLineVideoModelControlRouter(deps);
+  });
+}
+
+function createLineVideoConfirmationGateLoader(deps: {
+  draftStore: PluginStateKeyedStore<LineVideoDraft>;
+  jobStore: PluginStateKeyedStore<LineVideoJob>;
+}) {
+  return createLazyRuntimeModule<LineVideoConfirmationGate>(async () => {
+    const { createLineVideoConfirmationGate } = await import("./src/video-confirmation.js");
+    return createLineVideoConfirmationGate(deps);
   });
 }
 
@@ -72,6 +123,73 @@ export default defineBundledChannelEntry({
     api.on("before_agent_run", modelSwitchGuard.beforeAgentRun);
     api.on("before_tool_call", modelSwitchGuard.beforeToolCall);
     api.on("agent_end", modelSwitchGuard.agentEnd);
+
+    // Video generation is expensive: the LLM must never trigger it directly
+    // on LINE. Every path to a paid OpenRouter video request runs through the
+    // owner-only draft/confirm flow registered below instead.
+    const videoGenerationGuard = createLineVideoGenerationGuard();
+    api.on("before_tool_call", videoGenerationGuard.beforeToolCall);
+
+    const videoModelPreferenceStore =
+      api.runtime.state.openKeyedStore<LineVideoModelPreferenceState>({
+        namespace: LINE_VIDEO_MODEL_PREFERENCE_NAMESPACE,
+        maxEntries: LINE_VIDEO_MODEL_PREFERENCE_MAX_ENTRIES,
+      });
+    const videoModelSelectionStore =
+      api.runtime.state.openKeyedStore<LinePendingVideoModelSelection>({
+        namespace: LINE_VIDEO_MODEL_SELECTION_NAMESPACE,
+        maxEntries: LINE_VIDEO_MODEL_SELECTION_MAX_ENTRIES,
+      });
+    const videoDraftStore = api.runtime.state.openKeyedStore<LineVideoDraft>({
+      namespace: LINE_VIDEO_DRAFT_NAMESPACE,
+      maxEntries: LINE_VIDEO_DRAFT_MAX_ENTRIES,
+    });
+    const videoJobStore = api.runtime.state.openKeyedStore<LineVideoJob>({
+      namespace: LINE_VIDEO_JOB_NAMESPACE,
+      maxEntries: LINE_VIDEO_JOB_MAX_ENTRIES,
+    });
+
+    api.registerTool(
+      (ctx) =>
+        createLineVideoDraftTool({
+          messageChannel: ctx.messageChannel,
+          senderIsOwner: ctx.senderIsOwner,
+          requesterSenderId: ctx.requesterSenderId,
+          sessionId: ctx.sessionId,
+          accountId: ctx.agentAccountId,
+          deliveryTo: ctx.deliveryContext?.to,
+          cfg: ctx.config,
+          draftStore: videoDraftStore,
+          preferenceStore: videoModelPreferenceStore,
+          resolveApiKey: () =>
+            ctx.resolveApiKeyForProvider?.("openrouter") ?? Promise.resolve(undefined),
+        }),
+      { names: [LINE_VIDEO_DRAFT_TOOL_NAME], optional: true },
+    );
+
+    // Deterministic pre-agent routing, registered before the chat model-switch
+    // router below (before_dispatch is first-claim-wins): the exact "ยืนยัน
+    // VIDEO <code>" confirmation, then "video model" wording, must be claimed
+    // here before the chat router's much broader tentative-verb matching ever
+    // sees the message. Both are loaded lazily for the same reason as the
+    // chat router (see createLineModelSwitchIntentRouterLoader above) — no
+    // static "./src/" import for these heavier modules from this entrypoint.
+    const loadVideoConfirmationGate = createLineVideoConfirmationGateLoader({
+      draftStore: videoDraftStore,
+      jobStore: videoJobStore,
+    });
+    api.on("before_dispatch", async (event, ctx) => {
+      const gate = await loadVideoConfirmationGate();
+      return gate(event, ctx);
+    });
+    const loadVideoModelControlRouter = createLineVideoModelControlRouterLoader({
+      preferenceStore: videoModelPreferenceStore,
+      pendingStore: videoModelSelectionStore,
+    });
+    api.on("before_dispatch", async (event, ctx) => {
+      const router = await loadVideoModelControlRouter();
+      return router(event, ctx);
+    });
 
     const pendingModelSelectionStore = api.runtime.state.openKeyedStore<LinePendingModelSelection>({
       namespace: LINE_MODEL_SELECTION_NAMESPACE,

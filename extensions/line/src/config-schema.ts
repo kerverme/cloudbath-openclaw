@@ -20,6 +20,17 @@ const ThreadBindingsSchema = z
   })
   .strict();
 
+// Owner-only video-generation cost guard and default-model seed (see
+// video-cost-guard.ts / video-model-preference.ts). `maxEstimatedCostUsd`
+// bounds confirmation-time spend before any paid OpenRouter video request;
+// omitting it keeps the safe built-in default rather than an unbounded ceiling.
+const LineVideoGenerationConfigSchema = z
+  .object({
+    maxEstimatedCostUsd: z.number().positive().optional(),
+    defaultModel: z.string().optional(),
+  })
+  .strict();
+
 const LineCommonConfigSchemaBase = z.object({
   enabled: z.boolean().optional(),
   channelAccessToken: z.string().optional(),
@@ -35,6 +46,7 @@ const LineCommonConfigSchemaBase = z.object({
   mediaMaxMb: z.number().optional(),
   webhookPath: z.string().optional(),
   threadBindings: ThreadBindingsSchema.optional(),
+  videoGeneration: LineVideoGenerationConfigSchema.optional(),
 });
 
 const LineGroupConfigSchema = z

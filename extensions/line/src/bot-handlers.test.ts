@@ -1499,5 +1499,43 @@ describe("handleLineWebhookEvents", () => {
       expect(resolveOwner).toHaveBeenCalledTimes(1);
       expect(await store.lookup("default|group:group-1")).toMatchObject({ silent: true });
     });
+
+    it("18: SILENT groups suppress video-shaped traffic too (draft request and confirmation code)", async () => {
+      const { gate } = await buildSilentGate({ preSilentGroupId: "group-1" });
+      const processMessage = vi.fn();
+      const draftRequest = createTestMessageEvent({
+        message: {
+          id: "m-silent-video-draft",
+          type: "text",
+          text: "ทำ video แมวขี่สเก็ตบอร์ด",
+          quoteToken: "q-1",
+        },
+        source: { type: "group", groupId: "group-1", userId: MEMBER_ID },
+        webhookEventId: "evt-silent-video-draft",
+      });
+      const confirmRequest = createTestMessageEvent({
+        message: {
+          id: "m-silent-video-confirm",
+          type: "text",
+          text: "ยืนยัน VIDEO 1234",
+          quoteToken: "q-2",
+        },
+        source: { type: "group", groupId: "group-1", userId: OWNER_ID },
+        webhookEventId: "evt-silent-video-confirm",
+      });
+
+      const context = {
+        ...createLineWebhookTestContext({ processMessage, groupPolicy: "open" }),
+        silentGate: gate,
+      };
+      await handleLineWebhookEvents([draftRequest], context);
+      await handleLineWebhookEvents([confirmRequest], context);
+
+      // SILENT suppression happens in bot-handlers.ts before processMessage is
+      // ever called, so the before_dispatch video draft/confirmation hooks
+      // (which only run inside a dispatched agent turn) never see either
+      // message — no draft is created and no confirmation is evaluated.
+      expect(processMessage).not.toHaveBeenCalled();
+    });
   });
 });
