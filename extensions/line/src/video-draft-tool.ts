@@ -12,10 +12,12 @@
  */
 import fs from "node:fs/promises";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
+import { logInfo, redactIdentifier } from "openclaw/plugin-sdk/logging-core";
 import { getRuntimeConfig } from "openclaw/plugin-sdk/runtime-config-snapshot";
 import { jsonResult } from "openclaw/plugin-sdk/tool-results";
 import { Type, type TSchema } from "typebox";
 import { resolveLineAccount } from "./accounts.js";
+import { LINE_OPENROUTER_PROVIDER_ID, resolveLineProviderApiKey } from "./openrouter-auth.js";
 import { evaluateLineVideoCostGuard } from "./video-cost-guard.js";
 import { createLineVideoDraft, type LineVideoDraftStore } from "./video-draft-store.js";
 import {
@@ -105,6 +107,49 @@ function formatDraftPreview(params: {
   ].join("\n");
 }
 
+/** Provider whose credentials this tool needs. Named in every auth-failure result. */
+const VIDEO_PROVIDER_ID = LINE_OPENROUTER_PROVIDER_ID;
+
+/**
+ * Closed set of draft outcomes. Exactly one is logged per attempt and returned
+ * to the model, so a LINE-visible failure can always be traced to a specific
+ * branch instead of being re-invented by the LLM.
+ */
+type LineVideoDraftResolution =
+  | "draft_created"
+  | "invalid_input"
+  | "context_unavailable"
+  | "already_running"
+  | "image_unavailable"
+  | "provider_auth_unavailable"
+  | "catalog_unavailable"
+  | "model_unavailable"
+  | "unknown_cost"
+  | "over_limit";
+
+/**
+ * Deterministic owner-facing text for infrastructure failures.
+ *
+ * The tool returns this verbatim so the LLM relays a true cause instead of
+ * inventing one. The production regression this prevents: a provider-credential
+ * failure surfaced in LINE as "ระบบสร้างวิดีโอขอยืนยันสิทธิ์การใช้งานไม่สำเร็จ"
+ * ("authorization check failed"), which reads as a LINE owner-permission
+ * problem and is simply wrong -- owner authorization had already succeeded.
+ */
+const DRAFT_FAILURE_TEXT: Partial<Record<LineVideoDraftResolution, string>> = {
+  context_unavailable: "❌ ยังสร้าง Video Draft ไม่ได้\nสาเหตุ: LINE runtime context ไม่ครบ",
+  provider_auth_unavailable:
+    "❌ ยังสร้าง Video Draft ไม่ได้\nสาเหตุ: ระบบไม่พบการเชื่อมต่อ OpenRouter สำหรับ Video",
+  catalog_unavailable:
+    "❌ ยังสร้าง Video Draft ไม่ได้\nสาเหตุ: โหลดรายการ Video Model จาก OpenRouter ไม่สำเร็จ",
+  model_unavailable: "❌ ยังสร้าง Video Draft ไม่ได้\nสาเหตุ: ไม่พบ Video Model ที่เลือกไว้ใน OpenRouter",
+};
+
+/** Presence marker for diagnostics; never emits the value itself. */
+function present(value: unknown): boolean {
+  return typeof value === "string" ? value.trim().length > 0 : value != null;
+}
+
 type CreateLineVideoDraftToolParams = {
   messageChannel?: string;
   senderIsOwner?: boolean;
@@ -117,7 +162,16 @@ type CreateLineVideoDraftToolParams = {
   draftStore?: LineVideoDraftStore;
   preferenceStore?: LineVideoModelPreferenceStore;
   activeJobLockStore?: LineVideoActiveJobLockStore;
+  /** Overrides canonical OpenRouter credential resolution (tests only). */
   resolveApiKey?: () => Promise<string | undefined>;
+  /** ctx.hasAuthForProvider, for diagnostics only -- never gates the flow. */
+  hasProviderAuth?: (providerId: string) => boolean;
+  /**
+   * Whether the agent tool context supplied resolveApiKeyForProvider. Recorded
+   * so production logs can confirm the auth-profile-only closure's presence
+   * without it deciding anything.
+   */
+  contextApiKeyResolverAvailable?: boolean;
   resolveAccount?: typeof resolveLineAccount;
   fetchImpl?: typeof fetch;
   fileExists?: (path: string) => Promise<boolean>;
@@ -131,6 +185,9 @@ export function createLineVideoDraftTool(params: CreateLineVideoDraftToolParams)
     return null;
   }
   const resolveAccount = params.resolveAccount ?? resolveLineAccount;
+  // Canonical resolver by default; tests inject their own.
+  const resolveApiKey =
+    params.resolveApiKey ?? (() => resolveLineProviderApiKey(VIDEO_PROVIDER_ID));
   const fileExists =
     params.fileExists ??
     (async (path: string) => {
@@ -149,13 +206,54 @@ export function createLineVideoDraftTool(params: CreateLineVideoDraftToolParams)
       "OWNER-ONLY. Creates a video-generation DRAFT for owner confirmation. Never triggers paid generation — call this whenever the owner asks to make/generate a video, with a finished prompt and settings you have derived from their request. Include `image` with the exact attached image's local path for image-to-video; never invent a different image path.",
     parameters: Type.Object(VideoDraftToolProperties),
     execute: async (_toolCallId: string, rawInput: unknown) => {
+      // Presence-only attempt record. Railway could not previously tell which
+      // branch a LINE draft failed on; identifiers are hashed, never raw, and
+      // no credential value is ever read here.
+      logInfo(
+        `[line/video-draft] event=video_draft_attempt channel=line ` +
+          `accountId=${redactIdentifier(params.accountId)} ` +
+          `sessionId=${redactIdentifier(params.sessionId)} ` +
+          `requesterSenderId=${redactIdentifier(params.requesterSenderId)} ` +
+          `senderIsOwner=${params.senderIsOwner === true} ` +
+          `deliveryTo=${present(params.deliveryTo)} ` +
+          `contextApiKeyResolver=${params.contextApiKeyResolverAvailable === true} ` +
+          `hasAuthForProvider=${params.hasProviderAuth?.(VIDEO_PROVIDER_ID) ?? "unknown"}`,
+      );
+
+      /** Logs exactly one resolution per attempt, then returns the tool result. */
+      const finish = <T>(resolution: LineVideoDraftResolution, result: T): T => {
+        logInfo(
+          `[line/video-draft] event=video_draft_result channel=line resolution=${resolution}`,
+        );
+        return result;
+      };
+
+      /**
+       * Infrastructure failure: return the deterministic Thai cause as tool
+       * text so the model relays it verbatim, plus structured details naming
+       * the provider so "auth" can never be read as LINE owner authorization.
+       */
+      const failDeterministic = (
+        resolution: LineVideoDraftResolution,
+        details?: Record<string, unknown>,
+      ) => {
+        const text = DRAFT_FAILURE_TEXT[resolution];
+        return finish(resolution, {
+          content: [{ type: "text" as const, text: text ?? "" }],
+          details: { resolution, ...details },
+        });
+      };
+
       const input =
         rawInput && typeof rawInput === "object" && !Array.isArray(rawInput)
           ? (rawInput as Record<string, unknown>)
           : {};
       const prompt = typeof input.prompt === "string" ? input.prompt.trim() : "";
       if (!prompt) {
-        return jsonResult({ resolution: "invalid_input", reason: "prompt is required" });
+        return finish(
+          "invalid_input",
+          jsonResult({ resolution: "invalid_input", reason: "prompt is required" }),
+        );
       }
       const sessionId = params.sessionId?.trim();
       const requesterSenderId = params.requesterSenderId?.trim();
@@ -168,14 +266,14 @@ export function createLineVideoDraftTool(params: CreateLineVideoDraftToolParams)
         !params.preferenceStore ||
         !params.activeJobLockStore
       ) {
-        return jsonResult({ resolution: "unavailable" });
+        return failDeterministic("context_unavailable");
       }
       const conversationKey = buildLineVideoConversationKey({
         accountId,
         conversationId: sessionId,
       });
       if (!conversationKey) {
-        return jsonResult({ resolution: "unavailable" });
+        return failDeterministic("context_unavailable");
       }
 
       // A previous confirmed job for this conversation is still running
@@ -190,24 +288,33 @@ export function createLineVideoDraftTool(params: CreateLineVideoDraftToolParams)
         ...(params.now ? { now: params.now } : {}),
       });
       if (activeLock) {
-        return jsonResult({ resolution: "already_running", jobId: activeLock.jobId });
+        return finish(
+          "already_running",
+          jsonResult({ resolution: "already_running", jobId: activeLock.jobId }),
+        );
       }
 
       const imagePath = typeof input.image === "string" ? input.image.trim() : undefined;
       if (imagePath && !(await fileExists(imagePath))) {
-        return jsonResult({ resolution: "image_unavailable", image: imagePath });
+        return finish(
+          "image_unavailable",
+          jsonResult({ resolution: "image_unavailable", image: imagePath }),
+        );
       }
 
-      const apiKey = await params.resolveApiKey?.();
+      // Renamed from the ambiguous "auth_unavailable": this is strictly a
+      // missing OpenRouter provider credential. Owner authorization was already
+      // enforced at factory time and has NOT failed here.
+      const apiKey = await resolveApiKey();
       if (!apiKey?.trim()) {
-        return jsonResult({ resolution: "auth_unavailable" });
+        return failDeterministic("provider_auth_unavailable", { provider: VIDEO_PROVIDER_ID });
       }
 
       let models: OpenRouterVideoModel[];
       try {
         models = await loadOpenRouterVideoModels({ apiKey, fetchImpl: params.fetchImpl });
       } catch {
-        return jsonResult({ resolution: "catalog_unavailable" });
+        return failDeterministic("catalog_unavailable", { provider: VIDEO_PROVIDER_ID });
       }
 
       const modelId = await resolveLineVideoModelPreference({
@@ -216,7 +323,10 @@ export function createLineVideoDraftTool(params: CreateLineVideoDraftToolParams)
       });
       const model = models.find((entry) => entry.id === modelId);
       if (!model) {
-        return jsonResult({ resolution: "model_unavailable", model: modelId });
+        return failDeterministic("model_unavailable", {
+          provider: VIDEO_PROVIDER_ID,
+          model: modelId,
+        });
       }
 
       const durationSeconds = resolveDuration(
@@ -242,15 +352,18 @@ export function createLineVideoDraftTool(params: CreateLineVideoDraftToolParams)
         cfg: { videoGeneration: account.config.videoGeneration },
       });
       if (!costGuard.allowed) {
-        return jsonResult({
-          resolution: costGuard.reason,
-          ...(costGuard.reason === "over_limit"
-            ? {
-                estimatedCostUsd: costGuard.estimatedCostUsd,
-                maxAllowedUsd: costGuard.maxAllowedUsd,
-              }
-            : {}),
-        });
+        return finish(
+          costGuard.reason,
+          jsonResult({
+            resolution: costGuard.reason,
+            ...(costGuard.reason === "over_limit"
+              ? {
+                  estimatedCostUsd: costGuard.estimatedCostUsd,
+                  maxAllowedUsd: costGuard.maxAllowedUsd,
+                }
+              : {}),
+          }),
+        );
       }
 
       const draft = await createLineVideoDraft({
@@ -280,7 +393,7 @@ export function createLineVideoDraftTool(params: CreateLineVideoDraftToolParams)
         estimatedCostUsd: costGuard.estimatedCostUsd,
         prompt,
       });
-      return {
+      return finish("draft_created", {
         content: [{ type: "text" as const, text: preview }],
         details: {
           resolution: "draft_created",
@@ -288,7 +401,7 @@ export function createLineVideoDraftTool(params: CreateLineVideoDraftToolParams)
           model: model.id,
           estimatedCostUsd: costGuard.estimatedCostUsd,
         },
-      };
+      });
     },
   };
 }

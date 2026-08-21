@@ -179,8 +179,15 @@ export default defineBundledChannelEntry({
           draftStore: videoDraftStore,
           preferenceStore: videoModelPreferenceStore,
           activeJobLockStore: videoActiveJobLockStore,
-          resolveApiKey: () =>
-            ctx.resolveApiKeyForProvider?.("openrouter") ?? Promise.resolve(undefined),
+          // No resolveApiKey override: the tool resolves OpenRouter credentials
+          // through the canonical provider-auth path, matching the LINE model
+          // and video-model switch routers. ctx.resolveApiKeyForProvider is
+          // deliberately NOT used -- it only reads saved auth profiles, so a
+          // deployment holding OpenRouter credentials in env or config got
+          // undefined from it and the draft failed as an auth error. Both
+          // context fields below feed diagnostics only.
+          hasProviderAuth: ctx.hasAuthForProvider,
+          contextApiKeyResolverAvailable: typeof ctx.resolveApiKeyForProvider === "function",
         }),
       // Non-optional: the owner-only draft tool is the ONLY sanctioned path to
       // a paid LINE video request (the generic video_generate tool is blocked

@@ -15,11 +15,11 @@
  */
 import fs from "node:fs/promises";
 import { resolveOpenClawAgentDir } from "openclaw/plugin-sdk/provider-auth";
-import { resolveApiKeyForProvider } from "openclaw/plugin-sdk/provider-auth-runtime";
 import { getRuntimeConfig } from "openclaw/plugin-sdk/runtime-config-snapshot";
 import type { VideoGenerationSourceAsset } from "openclaw/plugin-sdk/video-generation";
 import { generateVideo } from "openclaw/plugin-sdk/video-generation-runtime";
 import { resolveLineAccount } from "./accounts.js";
+import { resolveLineProviderApiKey } from "./openrouter-auth.js";
 import { sendMessageLine } from "./send.js";
 import { evaluateLineVideoCostGuard } from "./video-cost-guard.js";
 import {
@@ -213,15 +213,6 @@ async function executeConfirmedLineVideoJob(params: {
   }
 }
 
-async function resolveLineOpenRouterApiKey(): Promise<string | undefined> {
-  const auth = await resolveApiKeyForProvider({
-    provider: "openrouter",
-    cfg: getRuntimeConfig(),
-    agentDir: resolveOpenClawAgentDir(),
-  });
-  return auth.apiKey;
-}
-
 export function createLineVideoConfirmationGate(params: {
   draftStore: LineVideoDraftStore;
   jobStore: LineVideoJobStore;
@@ -232,7 +223,7 @@ export function createLineVideoConfirmationGate(params: {
   resolveAccount?: typeof resolveLineAccount;
   now?: () => number;
 }) {
-  const resolveApiKey = params.resolveApiKey ?? resolveLineOpenRouterApiKey;
+  const resolveApiKey = params.resolveApiKey ?? (() => resolveLineProviderApiKey());
   const resolveAccount = params.resolveAccount ?? resolveLineAccount;
   const scheduleBackgroundWork =
     params.scheduleBackgroundWork ?? ((run: () => Promise<void>) => void run());

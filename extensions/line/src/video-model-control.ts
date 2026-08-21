@@ -17,9 +17,7 @@
  */
 import { createHash } from "node:crypto";
 import type { PluginStateKeyedStore } from "openclaw/plugin-sdk/plugin-state-runtime";
-import { resolveOpenClawAgentDir } from "openclaw/plugin-sdk/provider-auth";
-import { resolveApiKeyForProvider } from "openclaw/plugin-sdk/provider-auth-runtime";
-import { getRuntimeConfig } from "openclaw/plugin-sdk/runtime-config-snapshot";
+import { resolveLineProviderApiKey } from "./openrouter-auth.js";
 import { loadOpenRouterVideoModels, type OpenRouterVideoModel } from "./video-model-catalog.js";
 import {
   buildLineVideoConversationKey,
@@ -178,15 +176,6 @@ function formatCandidateList(candidates: Array<{ name: string }>): string {
   return candidates.map((entry, index) => `${index + 1}. ${entry.name}`).join("\n");
 }
 
-async function resolveLineOpenRouterApiKey(): Promise<string | undefined> {
-  const auth = await resolveApiKeyForProvider({
-    provider: "openrouter",
-    cfg: getRuntimeConfig(),
-    agentDir: resolveOpenClawAgentDir(),
-  });
-  return auth.apiKey;
-}
-
 type FetchLike = typeof fetch;
 
 /**
@@ -202,7 +191,7 @@ export function createLineVideoModelControlRouter(params: {
   fetchImpl?: FetchLike;
   now?: () => number;
 }) {
-  const resolveApiKey = params.resolveApiKey ?? resolveLineOpenRouterApiKey;
+  const resolveApiKey = params.resolveApiKey ?? (() => resolveLineProviderApiKey());
   const now = params.now ?? Date.now;
 
   return async (
