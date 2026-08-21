@@ -256,21 +256,88 @@ describe("createLineVideoDraftTool", () => {
 });
 
 describe("createLineVideoGenerationGuard", () => {
-  it("blocks video_generate on the LINE channel", () => {
+  const LINE_RUN = { channel: "line", runId: "run-1", sessionId: "sess-1" };
+
+  it("blocks video_generate inside a LINE agent run", () => {
     const guard = createLineVideoGenerationGuard();
-    const result = guard.beforeToolCall({ toolName: "video_generate" }, { channelId: "line" });
-    expect(result).toMatchObject({ block: true });
+    guard.beforeAgentRun({}, LINE_RUN);
+
+    expect(guard.beforeToolCall({ toolName: "video_generate" }, LINE_RUN)).toMatchObject({
+      block: true,
+    });
   });
 
-  it("does not block video_generate on other channels", () => {
+  // The production regression: the observed paid run logged
+  // "[agents/agent-command] [agent] run video_generate:...:error", which only
+  // the background completion-wake path emits -- i.e. the call executed rather
+  // than being blocked. The old guard tested `ctx.channelId !== "line"` and
+  // channelId is absent on this path (agent-tools.ts only sets it from
+  // hookChannelId ?? currentChannelId, and hookChannelId is never assigned),
+  // so it failed open. Keying off the recorded run fails closed here.
+  it("blocks video_generate when the tool-call context carries no channelId at all", () => {
     const guard = createLineVideoGenerationGuard();
-    const result = guard.beforeToolCall({ toolName: "video_generate" }, { channelId: "telegram" });
-    expect(result).toBeUndefined();
+    guard.beforeAgentRun({}, LINE_RUN);
+
+    const productionToolCallContext = { runId: "run-1", sessionId: "sess-1" };
+    expect(
+      guard.beforeToolCall({ toolName: "video_generate" }, productionToolCallContext),
+    ).toMatchObject({ block: true });
   });
 
-  it("does not block unrelated tools on LINE", () => {
+  it("blocks when only the runId matches and blocks when only the sessionId matches", () => {
     const guard = createLineVideoGenerationGuard();
-    const result = guard.beforeToolCall({ toolName: "image_generate" }, { channelId: "line" });
-    expect(result).toBeUndefined();
+    guard.beforeAgentRun({}, LINE_RUN);
+
+    expect(guard.beforeToolCall({ toolName: "video_generate" }, { runId: "run-1" })).toMatchObject({
+      block: true,
+    });
+    expect(
+      guard.beforeToolCall({ toolName: "video_generate" }, { sessionId: "sess-1" }),
+    ).toMatchObject({ block: true });
+  });
+
+  it("leaves non-LINE video_generate untouched", () => {
+    const guard = createLineVideoGenerationGuard();
+    guard.beforeAgentRun({}, { channel: "telegram", runId: "run-2", sessionId: "sess-2" });
+
+    expect(
+      guard.beforeToolCall({ toolName: "video_generate" }, { runId: "run-2", sessionId: "sess-2" }),
+    ).toBeUndefined();
+  });
+
+  it("does not block video_generate for a run that was never recorded as LINE", () => {
+    const guard = createLineVideoGenerationGuard();
+    expect(
+      guard.beforeToolCall({ toolName: "video_generate" }, { runId: "run-3", sessionId: "sess-3" }),
+    ).toBeUndefined();
+  });
+
+  it("does not block unrelated tools inside a LINE run", () => {
+    const guard = createLineVideoGenerationGuard();
+    guard.beforeAgentRun({}, LINE_RUN);
+
+    expect(guard.beforeToolCall({ toolName: "image_generate" }, LINE_RUN)).toBeUndefined();
+    expect(guard.beforeToolCall({ toolName: "line_video_draft" }, LINE_RUN)).toBeUndefined();
+  });
+
+  it("stops blocking once the LINE run ends, without leaking across runs", () => {
+    const guard = createLineVideoGenerationGuard();
+    guard.beforeAgentRun({}, LINE_RUN);
+    guard.agentEnd({}, LINE_RUN);
+
+    expect(guard.beforeToolCall({ toolName: "video_generate" }, LINE_RUN)).toBeUndefined();
+  });
+
+  it("keeps concurrent LINE and non-LINE runs independent", () => {
+    const guard = createLineVideoGenerationGuard();
+    const lineRun = { channel: "line", runId: "run-line", sessionId: "sess-line" };
+    const otherRun = { channel: "discord", runId: "run-other", sessionId: "sess-other" };
+    guard.beforeAgentRun({}, lineRun);
+    guard.beforeAgentRun({}, otherRun);
+
+    expect(guard.beforeToolCall({ toolName: "video_generate" }, lineRun)).toMatchObject({
+      block: true,
+    });
+    expect(guard.beforeToolCall({ toolName: "video_generate" }, otherRun)).toBeUndefined();
   });
 });

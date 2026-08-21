@@ -131,9 +131,16 @@ export default defineBundledChannelEntry({
 
     // Video generation is expensive: the LLM must never trigger it directly
     // on LINE. Every path to a paid OpenRouter video request runs through the
-    // owner-only draft/confirm flow registered below instead.
+    // owner-only draft/confirm flow registered below instead. The guard tracks
+    // LINE runs via before_agent_run/agent_end (where the host stamps the
+    // authoritative ctx.channel) rather than the tool-call context's optional
+    // channelId, so it fails closed on every LINE execution path — all three
+    // hooks are required for that; registering only before_tool_call would
+    // leave it permanently open. See createLineVideoGenerationGuard.
     const videoGenerationGuard = createLineVideoGenerationGuard();
+    api.on("before_agent_run", videoGenerationGuard.beforeAgentRun);
     api.on("before_tool_call", videoGenerationGuard.beforeToolCall);
+    api.on("agent_end", videoGenerationGuard.agentEnd);
 
     const videoModelPreferenceStore =
       api.runtime.state.openKeyedStore<LineVideoModelPreferenceState>({
@@ -175,7 +182,12 @@ export default defineBundledChannelEntry({
           resolveApiKey: () =>
             ctx.resolveApiKeyForProvider?.("openrouter") ?? Promise.resolve(undefined),
         }),
-      { names: [LINE_VIDEO_DRAFT_TOOL_NAME], optional: true },
+      // Non-optional: the owner-only draft tool is the ONLY sanctioned path to
+      // a paid LINE video request (the generic video_generate tool is blocked
+      // above), so it must always be present in the LINE agent's default tool
+      // set. Marking it optional would hide it behind tools.allow and leave the
+      // owner's "make me a video" request with no reachable tool at all.
+      { names: [LINE_VIDEO_DRAFT_TOOL_NAME] },
     );
 
     // Deterministic pre-agent routing, registered before the chat model-switch

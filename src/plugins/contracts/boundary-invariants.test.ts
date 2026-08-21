@@ -35,8 +35,14 @@ const BUNDLED_TYPED_HOOK_REGISTRATION_GUARDS = {
   "extensions/diffs/src/plugin.ts": ["before_prompt_build"],
   "extensions/discord/subagent-hooks-api.ts": ["subagent_delivery_target", "subagent_ended"],
   "extensions/feishu/subagent-hooks-api.ts": ["subagent_delivery_target", "subagent_ended"],
+  // Two independent LINE guards each register the before_agent_run /
+  // before_tool_call / agent_end trio: createLineModelSwitchGuard and
+  // createLineVideoGenerationGuard. Both need the run-scoped pair because a
+  // tool-call context alone cannot tell them the run is LINE-originated.
   "extensions/line/index.ts": [
     "agent_end",
+    "agent_end",
+    "before_agent_run",
     "before_agent_run",
     "before_dispatch",
     "before_dispatch",

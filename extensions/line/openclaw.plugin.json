@@ -22,7 +22,8 @@
   },
   "contracts": {
     "tools": [
-      "openrouter_account_models"
+      "openrouter_account_models",
+      "line_video_draft"
     ]
   },
   "toolMetadata": {
