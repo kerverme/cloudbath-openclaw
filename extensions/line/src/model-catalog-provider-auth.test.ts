@@ -14,7 +14,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 /** Swappable canonical-resolver result; mirrors env/config/profile resolution. */
 let providerAuthResult: { apiKey?: string } = { apiKey: "sk-openrouter-canonical" };
-const resolveApiKeyForProviderMock = vi.fn(async () => providerAuthResult);
+const resolveApiKeyForProviderMock = vi.fn(async (..._args: unknown[]) => providerAuthResult);
 
 vi.mock("openclaw/plugin-sdk/provider-auth", () => ({
   resolveOpenClawAgentDir: () => "/agent-dir",
