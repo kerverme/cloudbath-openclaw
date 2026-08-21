@@ -4,6 +4,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
+import { loadPluginManifest, type PluginManifest } from "../manifest.js";
 import {
   findUndeclaredPluginToolNames,
   normalizePluginToolContractNames,
@@ -12,15 +13,18 @@ import {
 
 const LINE_PLUGIN_DIR = path.join(process.cwd(), "extensions", "line");
 
-type LineManifest = {
-  contracts?: { tools?: unknown };
-  toolMetadata?: Record<string, { optional?: boolean } | undefined>;
-};
-
-function readLineManifest(): LineManifest {
-  return JSON.parse(
-    fs.readFileSync(path.join(LINE_PLUGIN_DIR, "openclaw.plugin.json"), "utf-8"),
-  ) as LineManifest;
+/**
+ * Loads the LINE manifest through the real loader rather than a raw
+ * JSON.parse, so this contract runs against the same validated
+ * `PluginManifest` shape the plugin registry consumes -- a manifest that fails
+ * repo validation fails this test instead of being silently reinterpreted.
+ */
+function readLineManifest(): PluginManifest {
+  const result = loadPluginManifest(LINE_PLUGIN_DIR);
+  if (!result.ok) {
+    throw new Error(`failed to load the LINE plugin manifest: ${result.error}`);
+  }
+  return result.manifest;
 }
 
 /**

@@ -18,7 +18,7 @@ import type { PluginStateKeyedStore } from "openclaw/plugin-sdk/plugin-state-run
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const generateVideoMock = vi.fn();
-const sendMessageLineMock = vi.fn(async () => ({}));
+const sendMessageLineMock = vi.fn(async (..._args: unknown[]) => ({}));
 
 vi.mock("openclaw/plugin-sdk/video-generation-runtime", () => ({
   generateVideo: (...args: unknown[]) => generateVideoMock(...args),
@@ -61,6 +61,12 @@ import type { LineVideoModelPreferenceState } from "./video-model-preference.js"
 const OWNER_REQUEST = "ช่วยทำ วีดีโอ แมวนั่ง อยู่บนม้า ให้หน่อย 5 วิ";
 const OWNER_ID = "U-owner";
 const CTX = { accountId: "acct-1", conversationId: "grp-a" };
+/**
+ * The chat model-switch router keys off the session, not the LINE conversation
+ * scope, so it takes a different before_dispatch context shape than the video
+ * routers (model-switch-router.ts LineBeforeDispatchContext).
+ */
+const CHAT_ROUTER_CTX = { sessionKey: "line:grp-a", agentId: "main" };
 
 function createMemoryStore<T>(): PluginStateKeyedStore<T> {
   const values = new Map<string, T>();
@@ -211,7 +217,7 @@ describe("owner natural-language video request routing", () => {
     const chatRouter = createLineModelSwitchIntentRouter({
       pendingStore: createMemoryStore<never>() as never,
     });
-    expect(await chatRouter(event, CTX)).toBeUndefined();
+    expect(await chatRouter(event, CHAT_ROUTER_CTX)).toBeUndefined();
   });
 
   it("2: line_video_draft is available to an owner LINE session", () => {
