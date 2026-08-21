@@ -1,0 +1,307 @@
+/**
+ * Owner-only "video prompt director" tool (two-stage generation, stage A).
+ *
+ * The chat LLM calls this to turn a user's natural-language video idea into a
+ * final prompt/settings and persist a DRAFT — see video-draft-store.ts. This
+ * tool makes zero calls to OpenRouter's paid video-generation endpoint: it
+ * only reads the live (free) model-catalog endpoint to validate settings and
+ * estimate cost. Nothing is submitted until the owner sends the exact
+ * confirmation code back (video-confirmation.ts), and the confirmed
+ * prompt/settings are exactly what gets frozen and submitted then — this
+ * tool's output is never silently rewritten by a second LLM pass.
+ */
+import fs from "node:fs/promises";
+import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
+import { getRuntimeConfig } from "openclaw/plugin-sdk/runtime-config-snapshot";
+import { jsonResult } from "openclaw/plugin-sdk/tool-results";
+import { Type, type TSchema } from "typebox";
+import { resolveLineAccount } from "./accounts.js";
+import { evaluateLineVideoCostGuard } from "./video-cost-guard.js";
+import { createLineVideoDraft, type LineVideoDraftStore } from "./video-draft-store.js";
+import { loadOpenRouterVideoModels, type OpenRouterVideoModel } from "./video-model-catalog.js";
+import {
+  buildLineVideoConversationKey,
+  resolveLineVideoModelPreference,
+  type LineVideoModelPreferenceStore,
+} from "./video-model-preference.js";
+
+const DEFAULT_DURATION_SECONDS = 8;
+const DEFAULT_ASPECT_RATIO = "16:9";
+const DEFAULT_RESOLUTION = "1080p";
+
+const VideoDraftToolProperties = {
+  prompt: Type.String({
+    description:
+      "Final video prompt, already translated from the user's request. Not shown to the LLM again after confirmation.",
+  }),
+  image: Type.Optional(
+    Type.String({
+      description:
+        "Exact local path of the inbound reference image for image-to-video, if the user attached one. Never substitute a different image.",
+    }),
+  ),
+  durationSeconds: Type.Optional(Type.Integer({ minimum: 1 })),
+  aspectRatio: Type.Optional(Type.String()),
+  resolution: Type.Optional(Type.String()),
+  audio: Type.Optional(Type.Boolean()),
+} satisfies Record<string, TSchema>;
+
+function nearestSupported(values: readonly number[], requested: number): number {
+  if (values.length === 0) {
+    return requested;
+  }
+  return values.reduce((best, current) =>
+    Math.abs(current - requested) < Math.abs(best - requested) ? current : best,
+  );
+}
+
+function resolveDuration(model: OpenRouterVideoModel, requested: number | undefined): number {
+  const supported = model.supportedDurationSeconds;
+  const target = requested ?? DEFAULT_DURATION_SECONDS;
+  return supported.length > 0 ? nearestSupported(supported, target) : target;
+}
+
+function resolveChoice(
+  supported: readonly string[],
+  requested: string | undefined,
+  fallback: string,
+): string {
+  if (requested && (supported.length === 0 || supported.includes(requested))) {
+    return requested;
+  }
+  return supported.length > 0 && supported[0] ? supported[0] : fallback;
+}
+
+function formatDraftPreview(params: {
+  draftId: string;
+  modelName: string;
+  durationSeconds: number;
+  resolution: string;
+  aspectRatio: string;
+  audio: boolean;
+  estimatedCostUsd: number;
+  prompt: string;
+}): string {
+  return [
+    "🎬 Video draft",
+    "",
+    `Model: ${params.modelName}`,
+    `Duration: ${params.durationSeconds} sec`,
+    `Resolution: ${params.resolution}`,
+    `Aspect: ${params.aspectRatio}`,
+    `Audio: ${params.audio ? "On" : "Off"}`,
+    "",
+    `Estimated cost: $${params.estimatedCostUsd.toFixed(2)}`,
+    "",
+    "Prompt:",
+    params.prompt,
+    "",
+    `ยืนยัน VIDEO ${params.draftId}`,
+    "เพื่อเริ่มสร้าง",
+  ].join("\n");
+}
+
+type CreateLineVideoDraftToolParams = {
+  messageChannel?: string;
+  senderIsOwner?: boolean;
+  requesterSenderId?: string;
+  sessionId?: string;
+  accountId?: string;
+  /** LINE-native `to` address for the trusted active delivery route, if known. */
+  deliveryTo?: string;
+  cfg?: OpenClawConfig;
+  draftStore?: LineVideoDraftStore;
+  preferenceStore?: LineVideoModelPreferenceStore;
+  resolveApiKey?: () => Promise<string | undefined>;
+  resolveAccount?: typeof resolveLineAccount;
+  fetchImpl?: typeof fetch;
+  fileExists?: (path: string) => Promise<boolean>;
+  now?: () => number;
+};
+
+export const LINE_VIDEO_DRAFT_TOOL_NAME = "line_video_draft";
+
+export function createLineVideoDraftTool(params: CreateLineVideoDraftToolParams) {
+  if (params.messageChannel !== "line" || params.senderIsOwner !== true) {
+    return null;
+  }
+  const resolveAccount = params.resolveAccount ?? resolveLineAccount;
+  const fileExists =
+    params.fileExists ??
+    (async (path: string) => {
+      try {
+        await fs.access(path);
+        return true;
+      } catch {
+        return false;
+      }
+    });
+
+  return {
+    name: LINE_VIDEO_DRAFT_TOOL_NAME,
+    label: "LINE Video Draft",
+    description:
+      "OWNER-ONLY. Creates a video-generation DRAFT for owner confirmation. Never triggers paid generation — call this whenever the owner asks to make/generate a video, with a finished prompt and settings you have derived from their request. Include `image` with the exact attached image's local path for image-to-video; never invent a different image path.",
+    parameters: Type.Object(VideoDraftToolProperties),
+    execute: async (_toolCallId: string, rawInput: unknown) => {
+      const input =
+        rawInput && typeof rawInput === "object" && !Array.isArray(rawInput)
+          ? (rawInput as Record<string, unknown>)
+          : {};
+      const prompt = typeof input.prompt === "string" ? input.prompt.trim() : "";
+      if (!prompt) {
+        return jsonResult({ resolution: "invalid_input", reason: "prompt is required" });
+      }
+      const sessionId = params.sessionId?.trim();
+      const requesterSenderId = params.requesterSenderId?.trim();
+      const accountId = params.accountId?.trim();
+      if (
+        !sessionId ||
+        !requesterSenderId ||
+        !accountId ||
+        !params.draftStore ||
+        !params.preferenceStore
+      ) {
+        return jsonResult({ resolution: "unavailable" });
+      }
+      const conversationKey = buildLineVideoConversationKey({
+        accountId,
+        conversationId: sessionId,
+      });
+      if (!conversationKey) {
+        return jsonResult({ resolution: "unavailable" });
+      }
+
+      const imagePath = typeof input.image === "string" ? input.image.trim() : undefined;
+      if (imagePath && !(await fileExists(imagePath))) {
+        return jsonResult({ resolution: "image_unavailable", image: imagePath });
+      }
+
+      const apiKey = await params.resolveApiKey?.();
+      if (!apiKey?.trim()) {
+        return jsonResult({ resolution: "auth_unavailable" });
+      }
+
+      let models: OpenRouterVideoModel[];
+      try {
+        models = await loadOpenRouterVideoModels({ apiKey, fetchImpl: params.fetchImpl });
+      } catch {
+        return jsonResult({ resolution: "catalog_unavailable" });
+      }
+
+      const modelId = await resolveLineVideoModelPreference({
+        store: params.preferenceStore,
+        key: conversationKey,
+      });
+      const model = models.find((entry) => entry.id === modelId);
+      if (!model) {
+        return jsonResult({ resolution: "model_unavailable", model: modelId });
+      }
+
+      const durationSeconds = resolveDuration(
+        model,
+        typeof input.durationSeconds === "number" ? input.durationSeconds : undefined,
+      );
+      const aspectRatio = resolveChoice(
+        model.supportedAspectRatios,
+        typeof input.aspectRatio === "string" ? input.aspectRatio : undefined,
+        DEFAULT_ASPECT_RATIO,
+      );
+      const resolution = resolveChoice(
+        model.supportedResolutions,
+        typeof input.resolution === "string" ? input.resolution : undefined,
+        DEFAULT_RESOLUTION,
+      );
+      const audio = typeof input.audio === "boolean" ? input.audio : false;
+
+      const account = resolveAccount({ cfg: params.cfg ?? getRuntimeConfig(), accountId });
+      const costGuard = evaluateLineVideoCostGuard({
+        model,
+        durationSeconds,
+        cfg: { videoGeneration: account.config.videoGeneration },
+      });
+      if (!costGuard.allowed) {
+        return jsonResult({
+          resolution: costGuard.reason,
+          ...(costGuard.reason === "over_limit"
+            ? {
+                estimatedCostUsd: costGuard.estimatedCostUsd,
+                maxAllowedUsd: costGuard.maxAllowedUsd,
+              }
+            : {}),
+        });
+      }
+
+      const draft = await createLineVideoDraft({
+        store: params.draftStore,
+        accountId,
+        conversationKey,
+        ownerSenderId: requesterSenderId,
+        model: model.id,
+        prompt,
+        ...(imagePath ? { sourceImagePath: imagePath } : {}),
+        durationSeconds,
+        aspectRatio,
+        resolution,
+        audio,
+        estimatedCostUsd: costGuard.estimatedCostUsd,
+        ...(params.deliveryTo ? { deliveryTo: params.deliveryTo } : {}),
+        ...(params.now ? { now: params.now } : {}),
+      });
+
+      const preview = formatDraftPreview({
+        draftId: draft.draftId,
+        modelName: model.name,
+        durationSeconds,
+        resolution,
+        aspectRatio,
+        audio,
+        estimatedCostUsd: costGuard.estimatedCostUsd,
+        prompt,
+      });
+      return {
+        content: [{ type: "text" as const, text: preview }],
+        details: {
+          resolution: "draft_created",
+          draftId: draft.draftId,
+          model: model.id,
+          estimatedCostUsd: costGuard.estimatedCostUsd,
+        },
+      };
+    },
+  };
+}
+
+type PluginHookToolContext = { channelId?: string };
+type PluginHookBeforeToolCallEvent = { toolName: string };
+type PluginHookBeforeToolCallResult = { block: boolean; blockReason?: string };
+
+const BLOCKED_VIDEO_GENERATE_TOOL_NAME = "video_generate";
+
+/**
+ * Blocks the core `video_generate` agent tool from ever firing directly
+ * within a LINE-channel agent session. Video generation costs money, so the
+ * only path to an actual paid OpenRouter video request on LINE is the
+ * deterministic owner-only draft/confirm flow above (this tool +
+ * video-confirmation.ts) — the chat LLM must never be able to trigger
+ * generation on its own by calling the generic tool. Lives alongside
+ * createLineVideoDraftTool (the sanctioned path it protects), mirroring
+ * model-catalog-tool.ts's createLineModelSwitchGuard/tool pairing.
+ */
+export function createLineVideoGenerationGuard() {
+  return {
+    beforeToolCall: (
+      event: PluginHookBeforeToolCallEvent,
+      ctx: PluginHookToolContext,
+    ): PluginHookBeforeToolCallResult | undefined => {
+      if (ctx.channelId !== "line" || event.toolName !== BLOCKED_VIDEO_GENERATE_TOOL_NAME) {
+        return undefined;
+      }
+      return {
+        block: true,
+        blockReason:
+          "LINE video generation requires the owner-only draft/confirm flow (create a draft, then send the exact confirmation code); direct video_generate calls are blocked on this channel.",
+      };
+    },
+  };
+}
