@@ -59,6 +59,28 @@ type LineBeforeDispatchContext = {
 
 type LineBeforeDispatchResult = { handled: boolean; text?: string };
 
+function lineVideoDraftsMatch(left: LineVideoDraft, right: LineVideoDraft): boolean {
+  return (
+    left.version === right.version &&
+    left.draftId === right.draftId &&
+    left.accountId === right.accountId &&
+    left.conversationKey === right.conversationKey &&
+    left.ownerSenderId === right.ownerSenderId &&
+    left.model === right.model &&
+    left.prompt === right.prompt &&
+    left.sourceImagePath === right.sourceImagePath &&
+    left.durationSeconds === right.durationSeconds &&
+    left.aspectRatio === right.aspectRatio &&
+    left.resolution === right.resolution &&
+    left.audio === right.audio &&
+    left.estimatedCostUsd === right.estimatedCostUsd &&
+    left.createdAt === right.createdAt &&
+    left.expiresAt === right.expiresAt &&
+    left.status === right.status &&
+    left.deliveryTo === right.deliveryTo
+  );
+}
+
 export function parseLineVideoConfirmationCode(rawText: string): string | null {
   const match = CONFIRMATION_PATTERN.exec(rawText.trim());
   return match?.[1] ?? null;
@@ -239,40 +261,38 @@ export function createLineVideoConfirmationGate(params: {
     if (!draftId) {
       return undefined;
     }
-    // A non-owner's exact confirmation text never submits anything, even if
-    // they somehow know a valid code — it is treated as ordinary chat.
+    // An exact confirmation is executable control, not ordinary discussion.
+    // Claim and deny it here so an unauthorized sender can never hand the
+    // code to the chat model as another route toward paid generation.
     if (event.senderIsOwner !== true) {
-      return undefined;
+      return { handled: true, text: "ไม่มีสิทธิ์ยืนยันการสร้างวิดีโอ" };
     }
 
     const accountId = ctx.accountId?.trim();
     const conversationId = (ctx.conversationId ?? ctx.sessionKey ?? event.sessionKey)?.trim();
     const senderId = event.senderId?.trim();
     if (!accountId || !conversationId || !senderId) {
-      return undefined;
+      return { handled: true, text: "ยืนยันสิทธิ์เจ้าของสำหรับ video draft นี้ไม่ได้" };
     }
     const conversationKey = buildLineVideoConversationKey({ accountId, conversationId });
     if (!conversationKey) {
-      return undefined;
+      return { handled: true, text: "ยืนยันสิทธิ์เจ้าของสำหรับ video draft นี้ไม่ได้" };
     }
 
-    const consumeResult = await consumeLineVideoDraft({
-      store: params.draftStore,
-      draftId,
-      now: params.now,
-    });
-    if (consumeResult.kind === "not_found") {
+    // Read first, validate every authorization/cost invariant, then atomically
+    // consume immediately before job creation. Consuming before these checks
+    // lets another authorized owner invalidate a code that is not theirs.
+    const draft = await params.draftStore.lookup(draftId);
+    if (!draft) {
       return { handled: true, text: "ไม่พบ video draft นี้ หรือถูกใช้ไปแล้ว" };
     }
-    if (consumeResult.kind === "expired") {
+    const confirmationTime = (params.now ?? Date.now)();
+    if (draft.expiresAt <= confirmationTime || draft.status !== "pending") {
       return { handled: true, text: "video draft นี้หมดอายุแล้ว กรุณาสร้างใหม่" };
     }
 
-    const draft = consumeResult.draft;
-    // Defense in depth: consume() already scopes by the globally unique
-    // draftId, but explicitly re-verify the confirming sender/account/
-    // conversation matches the draft's own recorded identity before ever
-    // touching a paid API.
+    // A code is bound to the exact owner, LINE account, and conversation that
+    // created it. A different authorized owner cannot consume or transfer it.
     if (
       draft.accountId !== accountId ||
       draft.conversationKey !== conversationKey ||
@@ -334,14 +354,18 @@ export function createLineVideoConfirmationGate(params: {
             : `ค่าใช้จ่ายโดยประมาณ ($${costGuard.estimatedCostUsd.toFixed(2)}) เกินวงเงินที่ตั้งไว้ ($${costGuard.maxAllowedUsd.toFixed(2)})`,
       };
     }
+    if (costGuard.estimatedCostUsd !== draft.estimatedCostUsd) {
+      return {
+        handled: true,
+        text: "ค่าใช้จ่ายของ video draft เปลี่ยนไป กรุณาสร้าง draft ใหม่ก่อนยืนยัน",
+      };
+    }
 
     // Defense in depth against a lock-claim race (two drafts confirmed for
     // the same conversation before video-draft-tool.ts's own active-lock
     // check ever saw the first one): never start a second background job
-    // while one is still active for this conversation. The draft was already
-    // atomically consumed above, so refusing here still costs nothing extra
-    // -- a fresh draft + confirmation is required either way, matching the
-    // "retry requires a new draft" rule.
+    // while one is still active for this conversation. Refusing here leaves
+    // this valid, owner-bound draft unconsumed.
     const existingLock = await resolveLineVideoActiveJobLock({
       store: params.activeJobLockStore,
       conversationKey,
@@ -352,6 +376,21 @@ export function createLineVideoConfirmationGate(params: {
         handled: true,
         text: "มีงานสร้างวิดีโออื่นกำลังทำงานอยู่ในบทสนทนานี้ กรุณารอให้เสร็จก่อนเริ่มงานใหม่",
       };
+    }
+
+    const consumeResult = await consumeLineVideoDraft({
+      store: params.draftStore,
+      draftId,
+      now: params.now,
+    });
+    if (consumeResult.kind === "not_found") {
+      return { handled: true, text: "ไม่พบ video draft นี้ หรือถูกใช้ไปแล้ว" };
+    }
+    if (consumeResult.kind === "expired") {
+      return { handled: true, text: "video draft นี้หมดอายุแล้ว กรุณาสร้างใหม่" };
+    }
+    if (!lineVideoDraftsMatch(consumeResult.draft, draft)) {
+      return { handled: true, text: "video draft เปลี่ยนแปลง กรุณาสร้างใหม่" };
     }
 
     const job = await createLineVideoJob({
