@@ -111,6 +111,10 @@ function buildFlow() {
   }) as unknown as typeof fetch;
 
   const relay = createLineVideoDraftReplyRelay();
+  relay.beginTurn(
+    { channel: "line", sessionKey: SESSION_KEY },
+    { channelId: "line", sessionKey: SESSION_KEY },
+  );
   /**
    * Mirrors the plugin entrypoint, where the relay is lazily imported and so
    * arming resolves a tick later than the tool's own code. The tool must await
@@ -142,17 +146,25 @@ function buildFlow() {
    * Runs the model's turn through the outbound relay and returns the messages
    * LINE would actually receive, in order.
    */
+  let activeRunId = RUN_ID;
   const deliver = (modelTexts: string[], runId = RUN_ID): string[] => {
+    if (runId !== activeRunId) {
+      relay.beginTurn(
+        { channel: "line", sessionKey: SESSION_KEY },
+        { channelId: "line", sessionKey: SESSION_KEY },
+      );
+      activeRunId = runId;
+    }
     const visible: string[] = [];
     for (const text of modelTexts) {
-      const result = relay.replyPayloadSending(
-        { channel: "line", kind: "final", sessionKey: SESSION_KEY, runId, payload: { text } },
-        {},
+      const result = relay.messageSending(
+        { content: text, metadata: { channel: "line" } },
+        { channelId: "line", sessionKey: SESSION_KEY },
       );
       if (result?.cancel) {
         continue;
       }
-      visible.push((result?.payload?.text as string | undefined) ?? text);
+      visible.push(result?.content ?? text);
     }
     return visible;
   };

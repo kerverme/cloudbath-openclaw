@@ -6,146 +6,130 @@ import {
 } from "./video-draft-reply-relay.js";
 
 const PREVIEW = "🎬 Video draft\n\nEstimated cost: $0.51\n\nยืนยัน VIDEO 5343";
-const LINE_EVENT = { channel: "line", kind: "final", sessionKey: "line:u1", runId: "run-1" };
+const SESSION_KEY = "agent:main:line:group:g1";
+
+function begin(relay: ReturnType<typeof createLineVideoDraftReplyRelay>, key = SESSION_KEY) {
+  relay.beginTurn({ channel: "line", sessionKey: key }, { channelId: "line", sessionKey: key });
+}
+
+function send(
+  relay: ReturnType<typeof createLineVideoDraftReplyRelay>,
+  content: string,
+  key = SESSION_KEY,
+) {
+  return relay.messageSending(
+    { content, metadata: { channel: "line" } },
+    { channelId: "line", sessionKey: key },
+  );
+}
 
 describe("line video draft preview relay", () => {
-  it("replaces the model's outbound text with the tool-owned preview", () => {
+  it("replaces the actual outbound content with the tool-owned preview", () => {
     const relay = createLineVideoDraftReplyRelay();
-    relay.record({ sessionKey: "line:u1", text: PREVIEW });
+    begin(relay);
+    relay.record({ sessionKey: SESSION_KEY, text: PREVIEW });
 
-    const result = relay.replyPayloadSending(
-      { ...LINE_EVENT, payload: { text: "สร้าง draft แล้วนะครับ ยืนยัน VIDEO 5343" } },
-      {},
-    );
-
-    expect(result?.payload?.text).toBe(PREVIEW);
-    expect(result?.cancel).toBeUndefined();
+    expect(send(relay, "สร้าง draft แล้วนะครับ ยืนยัน VIDEO 5343")?.content).toBe(PREVIEW);
   });
 
-  it("preserves other payload fields while replacing text", () => {
+  it("cancels later messages in the same turn so exactly one is visible", () => {
     const relay = createLineVideoDraftReplyRelay();
-    relay.record({ sessionKey: "line:u1", text: PREVIEW });
+    begin(relay);
+    relay.record({ sessionKey: SESSION_KEY, text: PREVIEW });
 
-    const result = relay.replyPayloadSending(
-      { ...LINE_EVENT, payload: { text: "paraphrased", replyToId: "m-9" } },
-      {},
-    );
-
-    expect(result?.payload).toMatchObject({ text: PREVIEW, replyToId: "m-9" });
+    expect(send(relay, "first")?.content).toBe(PREVIEW);
+    expect(send(relay, "second")).toMatchObject({
+      cancel: true,
+      cancelReason: "line_video_draft_reply_already_sent",
+    });
   });
 
-  it("cancels a second payload from the same turn so exactly one message ships", () => {
+  it("resets completed relay state at the next inbound turn", () => {
     const relay = createLineVideoDraftReplyRelay();
-    relay.record({ sessionKey: "line:u1", text: PREVIEW });
+    begin(relay);
+    relay.record({ sessionKey: SESSION_KEY, text: PREVIEW });
+    send(relay, "first");
 
-    const first = relay.replyPayloadSending({ ...LINE_EVENT, payload: { text: "a" } }, {});
-    const second = relay.replyPayloadSending({ ...LINE_EVENT, payload: { text: "b" } }, {});
+    begin(relay);
 
-    expect(first?.payload?.text).toBe(PREVIEW);
-    expect(second?.cancel).toBe(true);
-    expect(second?.payload).toBeUndefined();
+    expect(send(relay, "สวัสดีครับ")).toBeUndefined();
   });
 
-  it("releases a later turn untouched instead of hijacking it", () => {
-    const relay = createLineVideoDraftReplyRelay();
-    relay.record({ sessionKey: "line:u1", text: PREVIEW });
-    relay.replyPayloadSending({ ...LINE_EVENT, payload: { text: "a" } }, {});
+  it("shares state across separate plugin lifecycle facades", () => {
+    const toolLifecycleRelay = createLineVideoDraftReplyRelay();
+    const liveHookRelay = createLineVideoDraftReplyRelay();
+    begin(toolLifecycleRelay);
+    toolLifecycleRelay.record({ sessionKey: SESSION_KEY, text: PREVIEW });
 
-    const laterTurn = relay.replyPayloadSending(
-      { ...LINE_EVENT, runId: "run-2", payload: { text: "สวัสดีครับ" } },
-      {},
-    );
-    const afterThat = relay.replyPayloadSending(
-      { ...LINE_EVENT, runId: "run-3", payload: { text: "ok" } },
-      {},
-    );
-
-    expect(laterTurn).toBeUndefined();
-    expect(afterThat).toBeUndefined();
+    expect(send(liveHookRelay, "model paraphrase")?.content).toBe(PREVIEW);
   });
 
-  it("leaves other channels alone", () => {
+  it("is idempotent when composed registries dispatch the same hook event twice", () => {
+    const firstRegistryRelay = createLineVideoDraftReplyRelay();
+    const secondRegistryRelay = createLineVideoDraftReplyRelay();
+    begin(firstRegistryRelay);
+    firstRegistryRelay.record({ sessionKey: SESSION_KEY, text: PREVIEW });
+    const event = { content: "model paraphrase", metadata: { channel: "line" } };
+    const ctx = { channelId: "line", sessionKey: SESSION_KEY };
+
+    expect(firstRegistryRelay.messageSending(event, ctx)?.content).toBe(PREVIEW);
+    expect(secondRegistryRelay.messageSending(event, ctx)?.content).toBe(PREVIEW);
+  });
+
+  it("leaves other channels and sessions alone", () => {
     const relay = createLineVideoDraftReplyRelay();
-    relay.record({ sessionKey: "line:u1", text: PREVIEW });
+    begin(relay);
+    relay.record({ sessionKey: SESSION_KEY, text: PREVIEW });
 
     expect(
-      relay.replyPayloadSending({ ...LINE_EVENT, channel: "telegram", payload: { text: "x" } }, {}),
-    ).toBeUndefined();
-  });
-
-  it("leaves other sessions alone", () => {
-    const relay = createLineVideoDraftReplyRelay();
-    relay.record({ sessionKey: "line:u1", text: PREVIEW });
-
-    expect(
-      relay.replyPayloadSending(
-        { ...LINE_EVENT, sessionKey: "line:u2", payload: { text: "x" } },
-        {},
+      relay.messageSending(
+        { content: "telegram", metadata: { channel: "telegram" } },
+        { channelId: "telegram", sessionKey: SESSION_KEY },
       ),
     ).toBeUndefined();
+    expect(send(relay, "other session", "agent:main:line:group:g2")).toBeUndefined();
   });
 
-  it("falls back to the context channel and session key", () => {
+  it("does not arm without a session key", () => {
     const relay = createLineVideoDraftReplyRelay();
-    relay.record({ sessionKey: "line:u1", text: PREVIEW });
-
-    const result = relay.replyPayloadSending(
-      { kind: "final", runId: "run-1", payload: { text: "x" } },
-      { channelId: "line", sessionKey: "line:u1" },
-    );
-
-    expect(result?.payload?.text).toBe(PREVIEW);
-  });
-
-  it("does not arm without a session key, since nothing could match it", () => {
-    const relay = createLineVideoDraftReplyRelay();
+    begin(relay);
     relay.record({ text: PREVIEW });
 
-    expect(
-      relay.replyPayloadSending({ ...LINE_EVENT, payload: { text: "untouched" } }, {}),
-    ).toBeUndefined();
+    expect(send(relay, "untouched")).toBeUndefined();
   });
 
-  it("expires an unclaimed preview instead of pinning it to a much later message", () => {
+  it("expires an unclaimed preview", () => {
     let clock = 1_000;
     const relay = createLineVideoDraftReplyRelay({ now: () => clock });
-    relay.record({ sessionKey: "line:u1", text: PREVIEW });
+    begin(relay);
+    relay.record({ sessionKey: SESSION_KEY, text: PREVIEW });
 
     clock += LINE_VIDEO_REPLY_RELAY_TTL_MS + 1;
 
-    expect(
-      relay.replyPayloadSending({ ...LINE_EVENT, payload: { text: "much later" } }, {}),
-    ).toBeUndefined();
+    expect(send(relay, "much later")).toBeUndefined();
   });
 
-  it("supersedes a redraft in the same session with the newer preview", () => {
+  it("supersedes a redraft in the same session", () => {
     const relay = createLineVideoDraftReplyRelay();
-    relay.record({ sessionKey: "line:u1", text: PREVIEW });
-    relay.record({ sessionKey: "line:u1", text: "🎬 newer 7788" });
+    begin(relay);
+    relay.record({ sessionKey: SESSION_KEY, text: PREVIEW });
+    relay.record({ sessionKey: SESSION_KEY, text: "🎬 newer 7788" });
 
-    const result = relay.replyPayloadSending({ ...LINE_EVENT, payload: { text: "x" } }, {});
-
-    expect(result?.payload?.text).toBe("🎬 newer 7788");
+    expect(send(relay, "model text")?.content).toBe("🎬 newer 7788");
   });
 
   it("stays bounded under many concurrent conversations", () => {
     const relay = createLineVideoDraftReplyRelay();
     const overflow = LINE_VIDEO_REPLY_RELAY_MAX_ENTRIES + 50;
     for (let i = 0; i < overflow; i += 1) {
-      relay.record({ sessionKey: `line:u${i}`, text: `p${i}` });
+      const key = `agent:main:line:group:g${i}`;
+      begin(relay, key);
+      relay.record({ sessionKey: key, text: `p${i}` });
     }
 
-    // Newest survives; the oldest was evicted rather than retained forever.
-    const newest = relay.replyPayloadSending(
-      { ...LINE_EVENT, sessionKey: `line:u${overflow - 1}`, payload: { text: "x" } },
-      {},
+    expect(send(relay, "newest", `agent:main:line:group:g${overflow - 1}`)?.content).toBe(
+      `p${overflow - 1}`,
     );
-    const oldest = relay.replyPayloadSending(
-      { ...LINE_EVENT, sessionKey: "line:u0", payload: { text: "x" } },
-      {},
-    );
-
-    expect(newest?.payload?.text).toBe(`p${overflow - 1}`);
-    expect(oldest).toBeUndefined();
+    expect(send(relay, "oldest", "agent:main:line:group:g0")).toBeUndefined();
   });
 });

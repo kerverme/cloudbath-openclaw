@@ -163,7 +163,7 @@ type CreateLineVideoDraftToolParams = {
   sessionId?: string;
   /**
    * Host session key. The one identity shared with the outbound
-   * `reply_payload_sending` hook, so it is what the relay correlates on.
+   * `message_sending` hook, so it is what the relay correlates on.
    */
   sessionKey?: string;
   accountId?: string;

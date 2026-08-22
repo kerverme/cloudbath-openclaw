@@ -122,6 +122,10 @@ function buildFlow(overrides: FlowOverrides = {}) {
   }) as unknown as typeof fetch;
 
   const relay = createLineVideoDraftReplyRelay();
+  relay.beginTurn(
+    { channel: "line", sessionKey: SESSION_KEY },
+    { channelId: "line", sessionKey: SESSION_KEY },
+  );
   /** Async arming, mirroring the entrypoint's lazily-imported relay. */
   const recordDeterministicText = async (entry: { sessionKey?: string; text: string }) => {
     await new Promise<void>((resolve) => {
@@ -147,17 +151,25 @@ function buildFlow(overrides: FlowOverrides = {}) {
     fetchImpl,
   });
 
+  let activeRunId = RUN_ID;
   const deliver = (modelTexts: string[], runId = RUN_ID): string[] => {
+    if (runId !== activeRunId) {
+      relay.beginTurn(
+        { channel: "line", sessionKey: SESSION_KEY },
+        { channelId: "line", sessionKey: SESSION_KEY },
+      );
+      activeRunId = runId;
+    }
     const visible: string[] = [];
     for (const text of modelTexts) {
-      const result = relay.replyPayloadSending(
-        { channel: "line", kind: "final", sessionKey: SESSION_KEY, runId, payload: { text } },
-        {},
+      const result = relay.messageSending(
+        { content: text, metadata: { channel: "line" } },
+        { channelId: "line", sessionKey: SESSION_KEY },
       );
       if (result?.cancel) {
         continue;
       }
-      visible.push((result?.payload?.text as string | undefined) ?? text);
+      visible.push(result?.content ?? text);
     }
     return visible;
   };
