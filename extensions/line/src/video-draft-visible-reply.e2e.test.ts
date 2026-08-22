@@ -111,13 +111,24 @@ function buildFlow() {
   }) as unknown as typeof fetch;
 
   const relay = createLineVideoDraftReplyRelay();
+  /**
+   * Mirrors the plugin entrypoint, where the relay is lazily imported and so
+   * arming resolves a tick later than the tool's own code. The tool must await
+   * it; if it does not, the model's reply reaches the outbound hook first.
+   */
+  const recordDeterministicText = async (entry: { sessionKey?: string; text: string }) => {
+    await new Promise<void>((resolve) => {
+      setTimeout(resolve, 0);
+    });
+    relay.record(entry);
+  };
   const tool = createLineVideoDraftTool({
     messageChannel: "line",
     senderIsOwner: true,
     requesterSenderId: OWNER_ID,
     sessionId: "grp-a",
     sessionKey: SESSION_KEY,
-    recordDeterministicText: relay.record,
+    recordDeterministicText,
     accountId: "acct-1",
     deliveryTo: SESSION_KEY,
     cfg: {},
@@ -274,5 +285,19 @@ describe("LINE-visible reply for 'ช่วยทำ วีดีโอ แม�
   it("does not touch replies for a run that created no draft", () => {
     const flow = buildFlow();
     expect(flow.deliver(["ปกติครับ"])).toEqual(["ปกติครับ"]);
+  });
+
+  it("arms the lazily-loaded relay before execute resolves, leaving no race", async () => {
+    const flow = buildFlow();
+
+    // The instant execute() settles, the relay must already hold the preview:
+    // this is the earliest point the model can emit a reply, so anything
+    // still pending here would ship the paraphrase instead.
+    await flow.tool!.execute("call-1", {
+      prompt: "a cat sitting on water",
+      durationSeconds: 5,
+    });
+
+    expect(flow.deliver([PRODUCTION_PARAPHRASE])[0]).toContain("🎬 Video draft");
   });
 });

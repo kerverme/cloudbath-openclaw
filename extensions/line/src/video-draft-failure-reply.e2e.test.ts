@@ -122,13 +122,20 @@ function buildFlow(overrides: FlowOverrides = {}) {
   }) as unknown as typeof fetch;
 
   const relay = createLineVideoDraftReplyRelay();
+  /** Async arming, mirroring the entrypoint's lazily-imported relay. */
+  const recordDeterministicText = async (entry: { sessionKey?: string; text: string }) => {
+    await new Promise<void>((resolve) => {
+      setTimeout(resolve, 0);
+    });
+    relay.record(entry);
+  };
   const tool = createLineVideoDraftTool({
     messageChannel: "line",
     senderIsOwner: true,
     requesterSenderId: OWNER_ID,
     sessionId: "grp-a",
     sessionKey: SESSION_KEY,
-    recordDeterministicText: relay.record,
+    recordDeterministicText,
     accountId: "acct-1",
     deliveryTo: SESSION_KEY,
     cfg: {},

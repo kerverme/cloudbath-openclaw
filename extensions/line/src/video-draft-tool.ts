@@ -189,7 +189,7 @@ type CreateLineVideoDraftToolParams = {
    * must reach the owner verbatim; as tool content alone it is only a
    * suggestion to the model, which rewrote both in production.
    */
-  recordDeterministicText?: (params: { sessionKey?: string; text: string }) => void;
+  recordDeterministicText?: (params: { sessionKey?: string; text: string }) => void | Promise<void>;
   resolveAccount?: typeof resolveLineAccount;
   fetchImpl?: typeof fetch;
   fileExists?: (path: string) => Promise<boolean>;
@@ -256,19 +256,23 @@ export function createLineVideoDraftTool(params: CreateLineVideoDraftToolParams)
        * deterministic branch routes through here, so the model can never
        * substitute its own wording for a cost or a did-this-happen statement.
        */
-      const recordDeterministicText = (text: string): void => {
-        params.recordDeterministicText?.({
+      const recordDeterministicText = async (text: string): Promise<void> => {
+        // Awaited by every caller below. The relay is lazily loaded by the
+        // plugin entrypoint, so arming can be async; it must COMPLETE before
+        // this tool returns, or the model's reply can reach the outbound hook
+        // first and the paraphrase ships instead of this text.
+        await params.recordDeterministicText?.({
           ...(params.sessionKey ? { sessionKey: params.sessionKey } : {}),
           text,
         });
       };
 
-      const failDeterministic = (
+      const failDeterministic = async (
         resolution: LineVideoDraftResolution,
         details?: Record<string, unknown>,
       ) => {
         const text = DRAFT_FAILURE_TEXT[resolution] ?? "";
-        recordDeterministicText(text);
+        await recordDeterministicText(text);
         return finish(resolution, {
           content: [{ type: "text" as const, text }],
           details: { resolution, ...details },
@@ -452,7 +456,7 @@ export function createLineVideoDraftTool(params: CreateLineVideoDraftToolParams)
         estimatedCostUsd: costGuard.estimatedCostUsd,
         prompt,
       });
-      recordDeterministicText(preview);
+      await recordDeterministicText(preview);
       return finish("draft_created", {
         content: [{ type: "text" as const, text: preview }],
         details: {
