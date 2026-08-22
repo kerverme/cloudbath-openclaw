@@ -21,7 +21,7 @@ import { generateVideo } from "openclaw/plugin-sdk/video-generation-runtime";
 import { resolveLineAccount } from "./accounts.js";
 import { resolveLineProviderApiKey } from "./openrouter-auth.js";
 import { sendMessageLine } from "./send.js";
-import { evaluateLineVideoCostGuard } from "./video-cost-guard.js";
+import { evaluateLineVideoCostGuard, resolveLineVideoOutputSize } from "./video-cost-guard.js";
 import {
   consumeLineVideoDraft,
   type LineVideoDraft,
@@ -307,9 +307,22 @@ export function createLineVideoConfirmationGate(params: {
     }
 
     const account = resolveAccount({ cfg: getRuntimeConfig(), accountId });
+    // Re-estimate against the SAME dimensions the draft froze, so the
+    // pre-submit ceiling check matches what the owner confirmed.
     const costGuard = evaluateLineVideoCostGuard({
       model,
-      durationSeconds: draft.durationSeconds,
+      selector: {
+        durationSeconds: draft.durationSeconds,
+        ...((size) => (size ? { size } : {}))(
+          resolveLineVideoOutputSize({
+            supportedSizes: model.supportedSizes,
+            resolution: draft.resolution,
+            aspectRatio: draft.aspectRatio,
+          }),
+        ),
+        resolution: draft.resolution,
+        audio: draft.audio,
+      },
       cfg: { videoGeneration: account.config.videoGeneration },
     });
     if (!costGuard.allowed) {
