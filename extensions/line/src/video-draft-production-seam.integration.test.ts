@@ -1,4 +1,7 @@
-import { createMessageTool } from "openclaw/plugin-sdk/channel-test-helpers";
+import {
+  createMessageTool,
+  getRequiredHookHandler,
+} from "openclaw/plugin-sdk/channel-test-helpers";
 import type { OpenClawPluginToolFactory } from "openclaw/plugin-sdk/plugin-entry";
 /**
  * Production-seam regression for the exact LINE video-draft failure.
@@ -151,6 +154,19 @@ function createStores() {
   return { stores, openKeyedStore };
 }
 
+function expectCompleteDraftPreview(text: string) {
+  expect(text).toContain("🎬 Video draft");
+  expect(text).toContain("Model: ByteDance: Seedance 2.5");
+  expect(text).toContain("Duration: 5 sec");
+  expect(text).toContain("Resolution: 480p");
+  expect(text).toContain("Aspect: 16:9");
+  expect(text).toContain("Audio: Off");
+  expect(text).toContain("Estimated cost: $0.51");
+  expect(text).toContain("Prompt:\na cat sitting on water");
+  expect(text).toMatch(/ยืนยัน VIDEO \d{4}/u);
+  expect(text).toContain("เพื่อเริ่มสร้าง");
+}
+
 beforeEach(() => {
   generateVideoMock.mockReset();
   resetGlobalHookRunner();
@@ -175,6 +191,7 @@ describe(`LINE production outbound seam for '${PRODUCTION_REQUEST}'`, () => {
     });
     registry.plugins.push(record);
     const toolFactories = new Map<string, OpenClawPluginToolFactory>();
+    const hookHandlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
     lineEntry.register(
       createTestPluginApi({
         id: "line",
@@ -192,6 +209,10 @@ describe(`LINE production outbound seam for '${PRODUCTION_REQUEST}'`, () => {
           }
         },
         on(hookName, handler, options) {
+          hookHandlers.set(
+            hookName,
+            handler as unknown as (event: unknown, ctx: unknown) => unknown,
+          );
           addTestHook({
             registry,
             pluginId: "line",
@@ -272,7 +293,7 @@ describe(`LINE production outbound seam for '${PRODUCTION_REQUEST}'`, () => {
       });
       const content = (result as { content?: Array<{ type: string; text?: string }> }).content;
       const deterministicPreview = content?.find((item) => item.type === "text")?.text ?? "";
-      expect(deterministicPreview).toContain("🎬 Video draft");
+      expectCompleteDraftPreview(deterministicPreview);
 
       const messageTool = createMessageTool({
         config: cfg,
@@ -300,12 +321,7 @@ describe(`LINE production outbound seam for '${PRODUCTION_REQUEST}'`, () => {
 
       expect(visible).toEqual([deterministicPreview]);
       expect(visible[0]).not.toContain("กรุณาส่งข้อความยืนยันนี้");
-      expect(visible[0]).toContain("Model: ByteDance: Seedance 2.5");
-      expect(visible[0]).toContain("Duration: 5 sec");
-      expect(visible[0]).toContain("Resolution: 480p");
-      expect(visible[0]).toContain("Aspect: 16:9");
-      expect(visible[0]).toContain("Estimated cost: $0.51");
-      expect(visible[0]).toContain("a cat sitting on water");
+      expectCompleteDraftPreview(visible[0] ?? "");
 
       expect([...stores.keys()]).toContain(LINE_VIDEO_DRAFT_NAMESPACE);
       const draftStore = stores.get(LINE_VIDEO_DRAFT_NAMESPACE);
@@ -319,6 +335,80 @@ describe(`LINE production outbound seam for '${PRODUCTION_REQUEST}'`, () => {
       expect(persisted).toMatchObject({
         prompt: "a cat sitting on water",
         durationSeconds: 5,
+      });
+
+      // Exercise the other real outbound seam. Provider-native LINE replies
+      // use reply_payload_sending and never enter the durable message tool.
+      const replySessionKey = `${SESSION_KEY}:provider-native`;
+      const replyGroupId = `${GROUP_ID}-provider-native`;
+      const replyToolMaterialized = factory!({
+        config: cfg,
+        agentId: "main",
+        messageChannel: "line",
+        senderIsOwner: true,
+        requesterSenderId: OWNER_ID,
+        sessionId: replyGroupId,
+        sessionKey: replySessionKey,
+        agentAccountId: "acct-1",
+        deliveryContext: { channel: "line", to: replyGroupId, accountId: "acct-1" },
+      });
+      const replyTools = Array.isArray(replyToolMaterialized)
+        ? replyToolMaterialized
+        : [replyToolMaterialized];
+      const replyTool = replyTools.find((entry) => entry?.name === LINE_VIDEO_DRAFT_TOOL_NAME);
+      expect(replyTool).toBeDefined();
+      const replyDraftResult = await replyTool!.execute("call-provider-native-seam", {
+        prompt: "a cat sitting on water",
+        durationSeconds: 5,
+        resolution: "480p",
+        aspectRatio: "16:9",
+      });
+      const replyDraftContent = (
+        replyDraftResult as { content?: Array<{ type: string; text?: string }> }
+      ).content;
+      const replyDraftPreview = replyDraftContent?.find((item) => item.type === "text")?.text ?? "";
+      expectCompleteDraftPreview(replyDraftPreview);
+
+      const replyPayloadSending = getRequiredHookHandler(hookHandlers, "reply_payload_sending");
+      const firstReply = await replyPayloadSending(
+        {
+          payload: { text: PRODUCTION_PARAPHRASE },
+          kind: "final",
+          channel: "line",
+          sessionKey: replySessionKey,
+          runId: "run-provider-native",
+        },
+        {
+          channelId: "line",
+          accountId: "acct-1",
+          conversationId: replyGroupId,
+          sessionKey: replySessionKey,
+          runId: "run-provider-native",
+        },
+      );
+      expect(firstReply).toMatchObject({ payload: { text: replyDraftPreview } });
+      expectCompleteDraftPreview(
+        (firstReply as { payload?: { text?: string } } | undefined)?.payload?.text ?? "",
+      );
+      const duplicateReply = await replyPayloadSending(
+        {
+          payload: { text: "สร้าง draft แล้วครับ" },
+          kind: "final",
+          channel: "line",
+          sessionKey: replySessionKey,
+          runId: "run-provider-native",
+        },
+        {
+          channelId: "line",
+          accountId: "acct-1",
+          conversationId: replyGroupId,
+          sessionKey: replySessionKey,
+          runId: "run-provider-native",
+        },
+      );
+      expect(duplicateReply).toMatchObject({
+        cancel: true,
+        reason: "line_video_draft_reply_already_sent",
       });
 
       expect(

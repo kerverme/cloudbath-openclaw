@@ -242,10 +242,29 @@ describe("createLineVideoConfirmationGate", () => {
       CTX,
     );
 
-    expect(result).toBeUndefined();
+    expect(result).toEqual({ handled: true, text: "ไม่มีสิทธิ์ยืนยันการสร้างวิดีโอ" });
     expect(scheduled.length).toBe(0);
     // The draft must still be usable by the real owner afterward.
     expect(await draftStore.lookup(draft.draftId)).toMatchObject({ draftId: draft.draftId });
+  });
+
+  it("binds a confirmation code to the owner that created it", async () => {
+    const { gate, draft, draftStore, scheduled } = await fixture();
+
+    const transferred = await gate(
+      confirmEvent(draft.draftId, { senderId: MEMBER_ID, senderIsOwner: true }),
+      CTX,
+    );
+
+    expect(transferred).toEqual({
+      handled: true,
+      text: "video draft นี้ไม่ตรงกับบทสนทนานี้",
+    });
+    expect(await draftStore.lookup(draft.draftId)).toMatchObject({ draftId: draft.draftId });
+    expect(scheduled).toHaveLength(0);
+
+    expect((await gate(confirmEvent(draft.draftId), CTX))?.handled).toBe(true);
+    expect(scheduled).toHaveLength(1);
   });
 
   it("3: duplicate/replayed confirmation cannot double-submit", async () => {
@@ -276,6 +295,19 @@ describe("createLineVideoConfirmationGate", () => {
     const result = await gate(confirmEvent(draft.draftId), CTX);
 
     expect(result?.text).toContain("เกินวงเงิน");
+    expect(generateVideoMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects a changed estimate even when the fresh cost remains below the ceiling", async () => {
+    const { gate, draft, draftStore, scheduled } = await fixture({
+      fetchImpl: catalogFetch({ pricingSkus: { "per-video-second": "0.11" } }),
+    });
+
+    const result = await gate(confirmEvent(draft.draftId), CTX);
+
+    expect(result?.text).toContain("ค่าใช้จ่ายของ video draft เปลี่ยนไป");
+    expect(await draftStore.lookup(draft.draftId)).toMatchObject({ draftId: draft.draftId });
+    expect(scheduled).toHaveLength(0);
     expect(generateVideoMock).not.toHaveBeenCalled();
   });
 

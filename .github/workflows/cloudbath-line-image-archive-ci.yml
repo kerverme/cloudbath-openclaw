@@ -108,7 +108,12 @@ jobs:
             extensions/line/src/outbound-media-staging.test.ts \
             extensions/line/src/outbound-media.test.ts \
             extensions/line/src/monitor.lifecycle.test.ts \
+            extensions/line/src/video-confirmation.test.ts \
             extensions/line/src/video-draft-production-seam.integration.test.ts \
+            extensions/line/src/video-draft-reply-relay.test.ts \
+            extensions/line/src/video-draft-tool.test.ts \
+            extensions/line/src/video-model-control.test.ts \
+            extensions/line/src/video-owner-flow.e2e.test.ts \
             extensions/line/src/model-catalog-tool.test.ts \
             src/agents/tools/session-status-tool.line-owner-auth.test.ts \
             extensions/line/src/session-route.test.ts \
@@ -147,6 +152,10 @@ jobs:
             extensions/line/src/outbound-media.test.ts
             extensions/line/src/send.ts
             extensions/line/src/send.test.ts
+            extensions/line/src/video-confirmation.ts
+            extensions/line/src/video-confirmation.test.ts
+            extensions/line/src/video-draft-production-seam.integration.test.ts
+            extensions/line/src/video-owner-flow.e2e.test.ts
             scripts/cloudbath/setup-notion-image-archive.ts
             scripts/cloudbath/setup-notion-image-archive.test.ts
             src/auto-reply/reply/commands-models.ts
@@ -181,7 +190,11 @@ jobs:
             extensions/line/src/outbound-media.ts \
             extensions/line/src/outbound-media.test.ts \
             extensions/line/src/send.ts \
-            extensions/line/src/send.test.ts
+            extensions/line/src/send.test.ts \
+            extensions/line/src/video-confirmation.ts \
+            extensions/line/src/video-confirmation.test.ts \
+            extensions/line/src/video-draft-production-seam.integration.test.ts \
+            extensions/line/src/video-owner-flow.e2e.test.ts
 
       - name: Lint setup script
         if: steps.dependencies.outcome == 'success' && !cancelled()

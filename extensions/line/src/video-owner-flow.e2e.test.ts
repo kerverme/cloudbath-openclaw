@@ -48,7 +48,8 @@ vi.mock("./video-outbound-staging.js", () => ({
   stageLineVideoPreviewImage: async () => ({ url: "https://r2.example/preview.jpg" }),
 }));
 
-const { createLineVideoDraftTool } = await import("./video-draft-tool.js");
+const { createLineVideoDraftTool, createLineVideoGenerationGuard } =
+  await import("./video-draft-tool.js");
 const { createLineVideoConfirmationGate } = await import("./video-confirmation.js");
 const { createLineVideoModelControlRouter } = await import("./video-model-control.js");
 const { createLineModelSwitchIntentRouter } = await import("./model-switch-router.js");
@@ -360,9 +361,71 @@ describe("owner confirmation -> job lifecycle (direct store assertions)", () => 
       CTX,
     );
 
-    expect(result).toBeUndefined();
+    expect(result).toEqual({ handled: true, text: "ไม่มีสิทธิ์ยืนยันการสร้างวิดีโอ" });
     expect(await flow.jobStore.entries()).toStrictEqual([]);
     expect(await flow.activeJobLockStore.entries()).toStrictEqual([]);
+    expect(flow.paidVideoPosts()).toStrictEqual([]);
+    expect(generateVideoMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("unauthorized LINE video operations fail closed", () => {
+  it("denies draft, video-model, confirmation, and generic generation paths without paid work", async () => {
+    const flow = buildFlow();
+    await flow.tool!.execute("call-owner", { prompt: "a cat sitting on water" });
+    const [draftEntry] = await flow.draftStore.entries();
+
+    expect(
+      createLineVideoDraftTool({
+        messageChannel: "line",
+        senderIsOwner: false,
+        requesterSenderId: "U-member",
+      }),
+    ).toBeNull();
+
+    const videoModelRouter = createLineVideoModelControlRouter({
+      preferenceStore: flow.preferenceStore,
+      pendingStore: createMemoryStore<LinePendingVideoModelSelection>(),
+      resolveApiKey: async () => "sk-test",
+    });
+    expect(
+      await videoModelRouter(
+        {
+          content: "เปลี่ยน video model เป็น seedance",
+          body: "เปลี่ยน video model เป็น seedance",
+          channel: "line",
+          senderId: "U-member",
+          senderIsOwner: false,
+        },
+        CTX,
+      ),
+    ).toBeUndefined();
+    expect(await flow.preferenceStore.entries()).toStrictEqual([]);
+
+    expect(
+      await flow.gate(
+        {
+          content: "",
+          body: `ยืนยัน VIDEO ${draftEntry!.value.draftId}`,
+          channel: "line",
+          senderId: "U-member",
+          senderIsOwner: false,
+        },
+        CTX,
+      ),
+    ).toEqual({ handled: true, text: "ไม่มีสิทธิ์ยืนยันการสร้างวิดีโอ" });
+
+    const generationGuard = createLineVideoGenerationGuard();
+    generationGuard.beforeAgentRun({}, { channel: "line", runId: "run-member" });
+    expect(
+      generationGuard.beforeToolCall({ toolName: "video_generate" }, { runId: "run-member" }),
+    ).toMatchObject({ block: true });
+    generationGuard.agentEnd({}, { runId: "run-member" });
+
+    expect(await flow.draftStore.lookup(draftEntry!.value.draftId)).toBeDefined();
+    expect(await flow.jobStore.entries()).toStrictEqual([]);
+    expect(flow.scheduled).toHaveLength(0);
+    expect(flow.paidVideoPosts()).toStrictEqual([]);
     expect(generateVideoMock).not.toHaveBeenCalled();
   });
 });
