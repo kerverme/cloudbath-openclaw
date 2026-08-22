@@ -161,6 +161,11 @@ type CreateLineVideoDraftToolParams = {
   senderIsOwner?: boolean;
   requesterSenderId?: string;
   sessionId?: string;
+  /**
+   * Host session key. The one identity shared with the outbound
+   * `reply_payload_sending` hook, so it is what `recordPreview` correlates on.
+   */
+  sessionKey?: string;
   accountId?: string;
   /** LINE-native `to` address for the trusted active delivery route, if known. */
   deliveryTo?: string;
@@ -178,6 +183,13 @@ type CreateLineVideoDraftToolParams = {
    * without it deciding anything.
    */
   contextApiKeyResolverAvailable?: boolean;
+  /**
+   * Arms the deterministic preview relay (video-draft-preview-relay.ts). The
+   * preview below is the price-bearing text the owner must see verbatim; as
+   * tool content alone it is only a suggestion to the model, which paraphrased
+   * it away in production.
+   */
+  recordPreview?: (params: { sessionKey?: string; text: string; draftId: string }) => void;
   resolveAccount?: typeof resolveLineAccount;
   fetchImpl?: typeof fetch;
   fileExists?: (path: string) => Promise<boolean>;
@@ -428,6 +440,11 @@ export function createLineVideoDraftTool(params: CreateLineVideoDraftToolParams)
         audio,
         estimatedCostUsd: costGuard.estimatedCostUsd,
         prompt,
+      });
+      params.recordPreview?.({
+        ...(params.sessionKey ? { sessionKey: params.sessionKey } : {}),
+        text: preview,
+        draftId: draft.draftId,
       });
       return finish("draft_created", {
         content: [{ type: "text" as const, text: preview }],
