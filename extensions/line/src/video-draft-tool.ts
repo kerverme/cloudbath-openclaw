@@ -18,7 +18,7 @@ import { jsonResult } from "openclaw/plugin-sdk/tool-results";
 import { Type, type TSchema } from "typebox";
 import { resolveLineAccount } from "./accounts.js";
 import { LINE_OPENROUTER_PROVIDER_ID, resolveLineProviderApiKey } from "./openrouter-auth.js";
-import { evaluateLineVideoCostGuard } from "./video-cost-guard.js";
+import { evaluateLineVideoCostGuard, resolveLineVideoOutputSize } from "./video-cost-guard.js";
 import { createLineVideoDraft, type LineVideoDraftStore } from "./video-draft-store.js";
 import {
   resolveLineVideoActiveJobLock,
@@ -143,6 +143,12 @@ const DRAFT_FAILURE_TEXT: Partial<Record<LineVideoDraftResolution, string>> = {
   catalog_unavailable:
     "❌ ยังสร้าง Video Draft ไม่ได้\nสาเหตุ: โหลดรายการ Video Model จาก OpenRouter ไม่สำเร็จ",
   model_unavailable: "❌ ยังสร้าง Video Draft ไม่ได้\nสาเหตุ: ไม่พบ Video Model ที่เลือกไว้ใน OpenRouter",
+  // Says explicitly that NO draft exists. The cost guard runs BEFORE
+  // createLineVideoDraft, so any "draft created" wording here would be false --
+  // which is exactly what the LLM produced in production
+  // ("สร้างคำขอวิดีโอไว้แล้ว...") when it was left to narrate this branch.
+  unknown_cost:
+    "❌ ยังไม่ได้สร้าง Video Draft\nสาเหตุ: ระบบยังคำนวณค่าใช้จ่ายของ Video Model นี้ไม่ได้\nยังไม่มีการส่งคำขอสร้างวิดีโอและยังไม่มีค่าใช้จ่าย",
 };
 
 /** Presence marker for diagnostics; never emits the value itself. */
@@ -345,24 +351,54 @@ export function createLineVideoDraftTool(params: CreateLineVideoDraftToolParams)
       );
       const audio = typeof input.audio === "boolean" ? input.audio : false;
 
+      // Token-priced models bill by output pixel area, so the concrete size --
+      // not just the "720p" label -- is part of the estimate.
+      const outputSize = resolveLineVideoOutputSize({
+        supportedSizes: model.supportedSizes,
+        resolution,
+        aspectRatio,
+      });
+
       const account = resolveAccount({ cfg: params.cfg ?? getRuntimeConfig(), accountId });
       const costGuard = evaluateLineVideoCostGuard({
         model,
-        durationSeconds,
+        selector: {
+          durationSeconds,
+          ...(outputSize ? { size: outputSize } : {}),
+          resolution,
+          audio,
+        },
         cfg: { videoGeneration: account.config.videoGeneration },
       });
       if (!costGuard.allowed) {
+        if (costGuard.reason === "unknown_cost") {
+          // Pricing-shape diagnostics only: SKU KEYS, never values, plus the
+          // request dimensions that select a SKU. Lets an unrecognized future
+          // pricing shape be identified from logs without a repro.
+          logInfo(
+            `[line/video-draft] event=video_cost_unknown model=${model.id} ` +
+              `pricingSkusPresent=${model.pricingSkus !== undefined} ` +
+              `pricingSkuKeys=${
+                Object.keys(model.pricingSkus ?? {})
+                  .toSorted()
+                  .join("|") || "-"
+              } ` +
+              `durationSeconds=${durationSeconds} resolution=${resolution} ` +
+              `size=${outputSize ?? "-"} audio=${audio}`,
+          );
+        }
         return finish(
           costGuard.reason,
-          jsonResult({
-            resolution: costGuard.reason,
-            ...(costGuard.reason === "over_limit"
-              ? {
-                  estimatedCostUsd: costGuard.estimatedCostUsd,
-                  maxAllowedUsd: costGuard.maxAllowedUsd,
-                }
-              : {}),
-          }),
+          costGuard.reason === "unknown_cost"
+            ? {
+                content: [{ type: "text" as const, text: DRAFT_FAILURE_TEXT.unknown_cost ?? "" }],
+                details: { resolution: "unknown_cost", model: model.id },
+              }
+            : jsonResult({
+                resolution: costGuard.reason,
+                estimatedCostUsd: costGuard.estimatedCostUsd,
+                maxAllowedUsd: costGuard.maxAllowedUsd,
+              }),
         );
       }
 

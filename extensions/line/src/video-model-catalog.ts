@@ -20,6 +20,12 @@ export type OpenRouterVideoModel = {
   supportedDurationSeconds: number[];
   supportedAspectRatios: string[];
   supportedResolutions: string[];
+  /**
+   * Concrete output pixel sizes ("1280x720"). Required for token-priced models:
+   * OpenRouter bills those by output pixel area, so a resolution label alone
+   * cannot produce an estimate. See video-cost-guard.ts.
+   */
+  supportedSizes: string[];
   supportsFrameImages: boolean;
   supportsAudio?: boolean;
   /** Raw provider pricing SKUs, e.g. {"per-video-second": "0.50"}. Units vary by model. */
@@ -72,6 +78,7 @@ function toVideoModel(raw: unknown): OpenRouterVideoModel | null {
     supportedDurationSeconds: normalizeNumberArray(item.supported_durations),
     supportedAspectRatios: normalizeStringArray(item.supported_aspect_ratios),
     supportedResolutions: normalizeStringArray(item.supported_resolutions),
+    supportedSizes: normalizeStringArray(item.supported_sizes),
     supportsFrameImages: frameImages.length > 0,
     ...(typeof item.generate_audio === "boolean" ? { supportsAudio: item.generate_audio } : {}),
     ...(normalizePricingSkus(item.pricing_skus)
