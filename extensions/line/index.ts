@@ -16,7 +16,7 @@ import {
   LINE_MODEL_SELECTION_TTL_MS,
   createLineModelSwitchGuard,
 } from "./src/model-catalog-tool.js";
-import { createLineVideoDraftPreviewRelay } from "./src/video-draft-preview-relay.js";
+import { createLineVideoDraftReplyRelay } from "./src/video-draft-reply-relay.js";
 import {
   LINE_VIDEO_DRAFT_MAX_ENTRIES,
   LINE_VIDEO_DRAFT_NAMESPACE,
@@ -167,12 +167,13 @@ export default defineBundledChannelEntry({
       defaultTtlMs: LINE_VIDEO_JOB_STALE_RUNNING_MS,
     });
 
-    // The draft preview carries the price the owner is approving, so it must
-    // reach LINE exactly as the tool wrote it. Tool content alone is only
+    // The draft preview carries the price the owner is approving, and the
+    // failure texts state whether a draft exists at all, so both must reach
+    // LINE exactly as the tool wrote them. Tool content alone is only
     // LLM-facing; the relay pins it onto the outbound payload instead. See
-    // video-draft-preview-relay.ts.
-    const videoDraftPreviewRelay = createLineVideoDraftPreviewRelay();
-    api.on("reply_payload_sending", videoDraftPreviewRelay.replyPayloadSending);
+    // video-draft-reply-relay.ts.
+    const videoDraftReplyRelay = createLineVideoDraftReplyRelay();
+    api.on("reply_payload_sending", videoDraftReplyRelay.replyPayloadSending);
 
     api.registerTool(
       (ctx) =>
@@ -182,7 +183,7 @@ export default defineBundledChannelEntry({
           requesterSenderId: ctx.requesterSenderId,
           sessionId: ctx.sessionId,
           sessionKey: ctx.sessionKey,
-          recordPreview: videoDraftPreviewRelay.record,
+          recordDeterministicText: videoDraftReplyRelay.record,
           accountId: ctx.agentAccountId,
           deliveryTo: ctx.deliveryContext?.to,
           cfg: ctx.config,

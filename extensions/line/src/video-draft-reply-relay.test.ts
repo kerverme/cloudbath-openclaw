@@ -1,17 +1,17 @@
 import { describe, expect, it } from "vitest";
 import {
-  createLineVideoDraftPreviewRelay,
-  LINE_VIDEO_PREVIEW_RELAY_MAX_ENTRIES,
-  LINE_VIDEO_PREVIEW_RELAY_TTL_MS,
-} from "./video-draft-preview-relay.js";
+  createLineVideoDraftReplyRelay,
+  LINE_VIDEO_REPLY_RELAY_MAX_ENTRIES,
+  LINE_VIDEO_REPLY_RELAY_TTL_MS,
+} from "./video-draft-reply-relay.js";
 
 const PREVIEW = "🎬 Video draft\n\nEstimated cost: $0.51\n\nยืนยัน VIDEO 5343";
 const LINE_EVENT = { channel: "line", kind: "final", sessionKey: "line:u1", runId: "run-1" };
 
 describe("line video draft preview relay", () => {
   it("replaces the model's outbound text with the tool-owned preview", () => {
-    const relay = createLineVideoDraftPreviewRelay();
-    relay.record({ sessionKey: "line:u1", text: PREVIEW, draftId: "5343" });
+    const relay = createLineVideoDraftReplyRelay();
+    relay.record({ sessionKey: "line:u1", text: PREVIEW });
 
     const result = relay.replyPayloadSending(
       { ...LINE_EVENT, payload: { text: "สร้าง draft แล้วนะครับ ยืนยัน VIDEO 5343" } },
@@ -23,8 +23,8 @@ describe("line video draft preview relay", () => {
   });
 
   it("preserves other payload fields while replacing text", () => {
-    const relay = createLineVideoDraftPreviewRelay();
-    relay.record({ sessionKey: "line:u1", text: PREVIEW, draftId: "5343" });
+    const relay = createLineVideoDraftReplyRelay();
+    relay.record({ sessionKey: "line:u1", text: PREVIEW });
 
     const result = relay.replyPayloadSending(
       { ...LINE_EVENT, payload: { text: "paraphrased", replyToId: "m-9" } },
@@ -35,8 +35,8 @@ describe("line video draft preview relay", () => {
   });
 
   it("cancels a second payload from the same turn so exactly one message ships", () => {
-    const relay = createLineVideoDraftPreviewRelay();
-    relay.record({ sessionKey: "line:u1", text: PREVIEW, draftId: "5343" });
+    const relay = createLineVideoDraftReplyRelay();
+    relay.record({ sessionKey: "line:u1", text: PREVIEW });
 
     const first = relay.replyPayloadSending({ ...LINE_EVENT, payload: { text: "a" } }, {});
     const second = relay.replyPayloadSending({ ...LINE_EVENT, payload: { text: "b" } }, {});
@@ -47,8 +47,8 @@ describe("line video draft preview relay", () => {
   });
 
   it("releases a later turn untouched instead of hijacking it", () => {
-    const relay = createLineVideoDraftPreviewRelay();
-    relay.record({ sessionKey: "line:u1", text: PREVIEW, draftId: "5343" });
+    const relay = createLineVideoDraftReplyRelay();
+    relay.record({ sessionKey: "line:u1", text: PREVIEW });
     relay.replyPayloadSending({ ...LINE_EVENT, payload: { text: "a" } }, {});
 
     const laterTurn = relay.replyPayloadSending(
@@ -65,8 +65,8 @@ describe("line video draft preview relay", () => {
   });
 
   it("leaves other channels alone", () => {
-    const relay = createLineVideoDraftPreviewRelay();
-    relay.record({ sessionKey: "line:u1", text: PREVIEW, draftId: "5343" });
+    const relay = createLineVideoDraftReplyRelay();
+    relay.record({ sessionKey: "line:u1", text: PREVIEW });
 
     expect(
       relay.replyPayloadSending({ ...LINE_EVENT, channel: "telegram", payload: { text: "x" } }, {}),
@@ -74,8 +74,8 @@ describe("line video draft preview relay", () => {
   });
 
   it("leaves other sessions alone", () => {
-    const relay = createLineVideoDraftPreviewRelay();
-    relay.record({ sessionKey: "line:u1", text: PREVIEW, draftId: "5343" });
+    const relay = createLineVideoDraftReplyRelay();
+    relay.record({ sessionKey: "line:u1", text: PREVIEW });
 
     expect(
       relay.replyPayloadSending(
@@ -86,8 +86,8 @@ describe("line video draft preview relay", () => {
   });
 
   it("falls back to the context channel and session key", () => {
-    const relay = createLineVideoDraftPreviewRelay();
-    relay.record({ sessionKey: "line:u1", text: PREVIEW, draftId: "5343" });
+    const relay = createLineVideoDraftReplyRelay();
+    relay.record({ sessionKey: "line:u1", text: PREVIEW });
 
     const result = relay.replyPayloadSending(
       { kind: "final", runId: "run-1", payload: { text: "x" } },
@@ -98,8 +98,8 @@ describe("line video draft preview relay", () => {
   });
 
   it("does not arm without a session key, since nothing could match it", () => {
-    const relay = createLineVideoDraftPreviewRelay();
-    relay.record({ text: PREVIEW, draftId: "5343" });
+    const relay = createLineVideoDraftReplyRelay();
+    relay.record({ text: PREVIEW });
 
     expect(
       relay.replyPayloadSending({ ...LINE_EVENT, payload: { text: "untouched" } }, {}),
@@ -108,10 +108,10 @@ describe("line video draft preview relay", () => {
 
   it("expires an unclaimed preview instead of pinning it to a much later message", () => {
     let clock = 1_000;
-    const relay = createLineVideoDraftPreviewRelay({ now: () => clock });
-    relay.record({ sessionKey: "line:u1", text: PREVIEW, draftId: "5343" });
+    const relay = createLineVideoDraftReplyRelay({ now: () => clock });
+    relay.record({ sessionKey: "line:u1", text: PREVIEW });
 
-    clock += LINE_VIDEO_PREVIEW_RELAY_TTL_MS + 1;
+    clock += LINE_VIDEO_REPLY_RELAY_TTL_MS + 1;
 
     expect(
       relay.replyPayloadSending({ ...LINE_EVENT, payload: { text: "much later" } }, {}),
@@ -119,9 +119,9 @@ describe("line video draft preview relay", () => {
   });
 
   it("supersedes a redraft in the same session with the newer preview", () => {
-    const relay = createLineVideoDraftPreviewRelay();
-    relay.record({ sessionKey: "line:u1", text: PREVIEW, draftId: "5343" });
-    relay.record({ sessionKey: "line:u1", text: "🎬 newer 7788", draftId: "7788" });
+    const relay = createLineVideoDraftReplyRelay();
+    relay.record({ sessionKey: "line:u1", text: PREVIEW });
+    relay.record({ sessionKey: "line:u1", text: "🎬 newer 7788" });
 
     const result = relay.replyPayloadSending({ ...LINE_EVENT, payload: { text: "x" } }, {});
 
@@ -129,10 +129,10 @@ describe("line video draft preview relay", () => {
   });
 
   it("stays bounded under many concurrent conversations", () => {
-    const relay = createLineVideoDraftPreviewRelay();
-    const overflow = LINE_VIDEO_PREVIEW_RELAY_MAX_ENTRIES + 50;
+    const relay = createLineVideoDraftReplyRelay();
+    const overflow = LINE_VIDEO_REPLY_RELAY_MAX_ENTRIES + 50;
     for (let i = 0; i < overflow; i += 1) {
-      relay.record({ sessionKey: `line:u${i}`, text: `p${i}`, draftId: "1" });
+      relay.record({ sessionKey: `line:u${i}`, text: `p${i}` });
     }
 
     // Newest survives; the oldest was evicted rather than retained forever.

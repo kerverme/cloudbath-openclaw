@@ -40,7 +40,7 @@ vi.mock("./accounts.js", () => ({
 vi.mock("./send.js", () => ({ sendMessageLine: async (..._args: unknown[]) => ({}) }));
 
 const { createLineVideoDraftTool } = await import("./video-draft-tool.js");
-const { createLineVideoDraftPreviewRelay } = await import("./video-draft-preview-relay.js");
+const { createLineVideoDraftReplyRelay } = await import("./video-draft-reply-relay.js");
 import type { LineVideoDraft } from "./video-draft-store.js";
 import type { LineVideoActiveJobLock } from "./video-job-store.js";
 import type { LineVideoModelPreferenceState } from "./video-model-preference.js";
@@ -110,14 +110,14 @@ function buildFlow() {
     return new Response(JSON.stringify({ data: [SEEDANCE_25_LIVE] }), { status: 200 });
   }) as unknown as typeof fetch;
 
-  const relay = createLineVideoDraftPreviewRelay();
+  const relay = createLineVideoDraftReplyRelay();
   const tool = createLineVideoDraftTool({
     messageChannel: "line",
     senderIsOwner: true,
     requesterSenderId: OWNER_ID,
     sessionId: "grp-a",
     sessionKey: SESSION_KEY,
-    recordPreview: relay.record,
+    recordDeterministicText: relay.record,
     accountId: "acct-1",
     deliveryTo: SESSION_KEY,
     cfg: {},
