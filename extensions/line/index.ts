@@ -177,10 +177,15 @@ export default defineBundledChannelEntry({
       defaultTtlMs: LINE_VIDEO_JOB_STALE_RUNNING_MS,
     });
 
-    // Both automatic source replies and model-driven `message` tool sends pass
-    // through message_sending. reply_payload_sending covers only the former,
-    // so it cannot guarantee the production-visible message is rewritten.
+    // LINE reply-token sends stay provider-native and reach only
+    // reply_payload_sending; durable and model-driven `message` tool sends
+    // reach message_sending. The shared relay handles both without allowing a
+    // second model-authored gloss through after the deterministic preview.
     const loadVideoDraftReplyRelay = createLineVideoDraftReplyRelayLoader();
+    api.on("reply_payload_sending", async (event, ctx) => {
+      const relay = await loadVideoDraftReplyRelay();
+      return relay.replyPayloadSending(event, ctx);
+    });
     api.on("message_sending", async (event, ctx) => {
       const relay = await loadVideoDraftReplyRelay();
       return relay.messageSending(event, ctx);

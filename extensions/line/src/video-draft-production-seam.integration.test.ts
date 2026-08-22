@@ -1,4 +1,4 @@
-import { deliverOutboundPayloads } from "openclaw/plugin-sdk/channel-test-helpers";
+import { createMessageTool } from "openclaw/plugin-sdk/channel-test-helpers";
 import type { OpenClawPluginToolFactory } from "openclaw/plugin-sdk/plugin-entry";
 /**
  * Production-seam regression for the exact LINE video-draft failure.
@@ -6,14 +6,13 @@ import type { OpenClawPluginToolFactory } from "openclaw/plugin-sdk/plugin-entry
  * Unlike the older relay-only acceptance test, this registers the real bundled
  * LINE entry, materializes its real `line_video_draft` tool, initializes the
  * host hook runner from that registry, and sends the model's production
- * paraphrase through the durable outbound delivery path used by `message`.
+ * paraphrase through the real agent `message` tool and LINE adapter selection.
  */
 import type { PluginStateKeyedStore } from "openclaw/plugin-sdk/plugin-state-runtime";
 import { createTestPluginApi } from "openclaw/plugin-sdk/plugin-test-api";
 import {
   addTestHook,
   createEmptyPluginRegistry,
-  createOutboundTestPlugin,
   createPluginRecord,
   createPluginRuntimeMock,
   createTestRegistry,
@@ -23,6 +22,9 @@ import {
   setActivePluginRegistry,
 } from "openclaw/plugin-sdk/plugin-test-runtime";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { OpenClawConfig, PluginRuntime } from "../api.js";
+import { linePlugin } from "./channel.js";
+import { setLineRuntime } from "./runtime.js";
 
 const generateVideoMock = vi.fn();
 
@@ -64,6 +66,8 @@ vi.mock("openclaw/plugin-sdk/provider-auth-runtime", () => ({
   resolveApiKeyForProvider: async () => ({ apiKey: "test-openrouter-key" }),
 }));
 vi.mock("./accounts.js", () => ({
+  listLineAccountIds: () => ["acct-1"],
+  resolveDefaultLineAccountId: () => "acct-1",
   resolveLineAccount: () => ({
     accountId: "acct-1",
     enabled: true,
@@ -79,9 +83,9 @@ const { LINE_VIDEO_DRAFT_TOOL_NAME } = await import("./video-draft-tool.js");
 const { LINE_VIDEO_DRAFT_NAMESPACE } = await import("./video-draft-store.js");
 
 const OWNER_ID = "U-owner-production-seam";
-const GROUP_ID = "C-production-seam";
-const SESSION_KEY = `agent:main:line:group:${GROUP_ID}`;
-const PRODUCTION_REQUEST = "ช่วยทำ วีดีโอ แมวนั่ง อยู่บนน้ำ ให้หน่อย 5 วิ";
+const GROUP_ID = "C11111111111111111111111111111111";
+const SESSION_KEY = `agent:main:line:group:${GROUP_ID.toLowerCase()}`;
+const PRODUCTION_REQUEST = "ช่วยทำวิดีโอแมวนั่งอยู่บนน้ำให้หน่อย 5 วิ";
 const PRODUCTION_PARAPHRASE = "กรุณาส่งข้อความยืนยันนี้เพื่อเริ่มสร้างวิดีโอ:\nยืนยัน VIDEO 5343";
 
 const SEEDANCE_25_LIVE = {
@@ -201,26 +205,35 @@ describe(`LINE production outbound seam for '${PRODUCTION_REQUEST}'`, () => {
     initializeGlobalHookRunner(registry);
 
     const visible: string[] = [];
+    const cfg = { channels: { line: { enabled: true } } } as OpenClawConfig;
+    setLineRuntime({
+      channel: {
+        line: {
+          resolveLineAccount: () => ({
+            accountId: "acct-1",
+            enabled: true,
+            channelAccessToken: "test-token",
+            channelSecret: "test-secret",
+            tokenSource: "config" as const,
+            config: {},
+          }),
+          pushMessageLine: async (_to: string, text: string) => {
+            visible.push(text);
+            return { messageId: `m-${visible.length}`, chatId: GROUP_ID };
+          },
+        },
+        text: {
+          chunkMarkdownText: (text: string) => [text],
+          resolveTextChunkLimit: () => 5000,
+        },
+      },
+    } as unknown as PluginRuntime);
     setActivePluginRegistry(
       createTestRegistry([
         {
           pluginId: "line-delivery-test",
           source: "test",
-          plugin: createOutboundTestPlugin({
-            id: "line",
-            capabilities: { chatTypes: ["group"] },
-            outbound: {
-              deliveryMode: "direct",
-              sendText: async ({ text }) => {
-                visible.push(text);
-                return { channel: "line", messageId: `m-${visible.length}` };
-              },
-              sendMedia: async ({ text }) => {
-                visible.push(text);
-                return { channel: "line", messageId: `m-${visible.length}` };
-              },
-            },
-          }),
+          plugin: linePlugin,
         },
       ]),
     );
@@ -228,7 +241,7 @@ describe(`LINE production outbound seam for '${PRODUCTION_REQUEST}'`, () => {
     const factory = toolFactories.get(LINE_VIDEO_DRAFT_TOOL_NAME);
     expect(factory).toBeDefined();
     const materialized = factory!({
-      config: { channels: { line: { enabled: true } } },
+      config: cfg,
       agentId: "main",
       messageChannel: "line",
       senderIsOwner: true,
@@ -261,23 +274,28 @@ describe(`LINE production outbound seam for '${PRODUCTION_REQUEST}'`, () => {
       const deterministicPreview = content?.find((item) => item.type === "text")?.text ?? "";
       expect(deterministicPreview).toContain("🎬 Video draft");
 
-      await deliverOutboundPayloads({
-        cfg: { channels: { line: { enabled: true } } },
-        channel: "line",
-        to: GROUP_ID,
-        accountId: "acct-1",
-        payloads: [{ text: PRODUCTION_PARAPHRASE }],
-        session: { key: SESSION_KEY },
-        skipQueue: true,
+      const messageTool = createMessageTool({
+        config: cfg,
+        agentId: "main",
+        agentSessionKey: SESSION_KEY,
+        sessionId: GROUP_ID,
+        agentAccountId: "acct-1",
+        currentChannelProvider: "line",
+        currentChannelId: GROUP_ID,
+        currentChatType: "group",
+        currentMessagingTarget: GROUP_ID,
+        requesterSenderId: OWNER_ID,
+        senderIsOwner: true,
+        sourceReplyDeliveryMode: "message_tool_only",
+        conversationReadOrigin: "direct-operator",
       });
-      await deliverOutboundPayloads({
-        cfg: { channels: { line: { enabled: true } } },
-        channel: "line",
-        to: GROUP_ID,
-        accountId: "acct-1",
-        payloads: [{ text: "สร้าง draft แล้วครับ" }],
-        session: { key: SESSION_KEY },
-        skipQueue: true,
+      await messageTool.execute("message-production-seam", {
+        action: "send",
+        message: PRODUCTION_PARAPHRASE,
+      });
+      await messageTool.execute("message-production-seam-duplicate", {
+        action: "send",
+        message: "สร้าง draft แล้วครับ",
       });
 
       expect(visible).toEqual([deterministicPreview]);

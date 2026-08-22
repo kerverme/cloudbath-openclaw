@@ -50,9 +50,10 @@ const BUNDLED_TYPED_HOOK_REGISTRATION_GUARDS = {
     "before_dispatch",
     "before_tool_call",
     "before_tool_call",
-    // Pins the tool-owned video-draft text onto every LINE send path so the
-    // model cannot paraphrase a price or a did-this-happen statement.
+    // Provider-native reply-token delivery and durable/message-tool delivery
+    // use different host seams; both pin the same tool-owned video-draft text.
     "message_sending",
+    "reply_payload_sending",
   ],
   "extensions/matrix/subagent-hooks-api.ts": ["subagent_delivery_target", "subagent_ended"],
   "extensions/memory-core/src/dreaming.ts": ["before_agent_reply", "gateway_start", "gateway_stop"],
