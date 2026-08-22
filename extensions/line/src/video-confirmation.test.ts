@@ -223,6 +223,7 @@ describe("createLineVideoConfirmationGate", () => {
       modelOverride: "openrouter/bytedance/seedance-2.5",
       autoProviderFallback: false,
     });
+    expect(stageLineOutboundVideoMock).toHaveBeenCalledWith(expect.any(Buffer));
     expect(sendMessageLineMock).toHaveBeenCalledWith(
       "line:group:grp-a",
       expect.stringContaining("วิดีโอเสร็จแล้ว"),
@@ -233,6 +234,35 @@ describe("createLineVideoConfirmationGate", () => {
     expect(job?.value.actualCostUsd).toBe(0.79);
     // running -> completed released the lock: a new draft is immediately allowed.
     expect((await activeJobLockStore.entries()).length).toBe(0);
+  });
+
+  it("archives a provider URL to R2 and delivers only the staged R2 URL to LINE", async () => {
+    const providerUrl = "https://provider.example/transient-output.mp4";
+    generateVideoMock.mockResolvedValueOnce({
+      videos: [{ url: providerUrl, mimeType: "video/mp4" }],
+      provider: "openrouter",
+      model: "bytedance/seedance-2.5",
+      attempts: [],
+      ignoredOverrides: [],
+      metadata: { usage: { cost: 0.79 } },
+    });
+    const { gate, draft, scheduled, jobStore } = await fixture();
+
+    await gate(confirmEvent(draft.draftId), CTX);
+    await scheduled[0]?.();
+
+    expect(stageLineOutboundVideoMock).toHaveBeenCalledWith(providerUrl);
+    expect(sendMessageLineMock).toHaveBeenCalledWith(
+      "line:group:grp-a",
+      expect.stringContaining("วิดีโอเสร็จแล้ว"),
+      expect.objectContaining({
+        mediaKind: "video",
+        mediaUrl: "https://r2.example/video.mp4",
+      }),
+    );
+    const [job] = await jobStore.entries();
+    expect(job?.value.videoUrl).toBe("https://r2.example/video.mp4");
+    expect(job?.value.videoUrl).not.toBe(providerUrl);
   });
 
   it("2: non-owner confirmation never submits, even with a valid code", async () => {

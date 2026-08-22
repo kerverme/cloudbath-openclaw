@@ -70,7 +70,10 @@ function toolFixture(params?: { models?: unknown; fileExists?: () => Promise<boo
     messageChannel: "line",
     senderIsOwner: true,
     requesterSenderId: "U-owner",
-    sessionId: "grp-a",
+    // Physical session generations are deliberately unrelated to the stable
+    // native LINE group identity.
+    sessionId: "ephemeral-session-uuid",
+    nativeConversationId: "grp-a",
     accountId: "acct-1",
     deliveryTo: "line:group:grp-a",
     cfg: {},
@@ -121,6 +124,38 @@ describe("createLineVideoDraftTool", () => {
     expect(text).toContain("8 sec");
     expect(text).toContain("Estimated cost: $0.80");
     expect(text).toMatch(/ยืนยัน VIDEO \d{4}/u);
+  });
+
+  it("preserves an explicitly requested supported duration exactly", async () => {
+    const { tool, draftStore } = toolFixture();
+    const result = await tool!.execute("call-supported-duration", {
+      prompt: "a cat riding a skateboard",
+      durationSeconds: 6,
+    });
+
+    expect((result as { details?: { resolution?: string } }).details?.resolution).toBe(
+      "draft_created",
+    );
+    const [entry] = await draftStore.entries();
+    expect(entry?.value.durationSeconds).toBe(6);
+  });
+
+  it("rejects an explicit unsupported duration instead of rounding or creating a draft", async () => {
+    const { tool, draftStore, requestedUrls } = toolFixture();
+    const result = await tool!.execute("call-unsupported-duration", {
+      prompt: "a cat riding a skateboard",
+      durationSeconds: 5,
+    });
+    const text = (result as { content: Array<{ text: string }> }).content[0]?.text ?? "";
+
+    expect((result as { details?: { resolution?: string } }).details?.resolution).toBe(
+      "unsupported_duration",
+    );
+    expect(text).toContain("ระยะเวลา 5 วินาทีไม่รองรับ");
+    expect(text).toContain("4, 6, 8");
+    expect(text).toContain("สูงสุด 8 วินาที");
+    expect((await draftStore.entries()).length).toBe(0);
+    expect(requestedUrls.some((url) => url.endsWith("/videos"))).toBe(false);
   });
 
   it("5: preserves the exact inbound image path for image-to-video, never substituting another image", async () => {

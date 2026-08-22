@@ -52,6 +52,15 @@ describe("buildLineVideoConversationKey", () => {
     expect(buildLineVideoConversationKey({ accountId: "acct-1", conversationId: "  " })).toBeNull();
   });
 
+  it("normalizes raw and prefixed LINE group identities to one canonical key", () => {
+    const raw = buildLineVideoConversationKey({ accountId: "acct-1", conversationId: "C123" });
+    const delivery = buildLineVideoConversationKey({
+      accountId: "acct-1",
+      conversationId: "line:group:C123",
+    });
+    expect(delivery).toBe(raw);
+  });
+
   it("keeps different accounts and conversations fully isolated", () => {
     const a = buildLineVideoConversationKey({ accountId: "acct-1", conversationId: "grp-a" });
     const b = buildLineVideoConversationKey({ accountId: "acct-2", conversationId: "grp-a" });

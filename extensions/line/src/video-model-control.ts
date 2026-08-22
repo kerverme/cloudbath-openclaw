@@ -213,7 +213,10 @@ export function createLineVideoModelControlRouter(params: {
     }
 
     const accountId = ctx.accountId?.trim();
-    const conversationId = (ctx.conversationId ?? ctx.sessionKey ?? event.sessionKey)?.trim();
+    // Model preference shares the same native LINE conversation key as video
+    // drafts, confirmations, jobs, and delivery ownership. Never fall back to
+    // ephemeral OpenClaw session identities here.
+    const conversationId = ctx.conversationId?.trim();
     if (!accountId || !conversationId) {
       return undefined;
     }

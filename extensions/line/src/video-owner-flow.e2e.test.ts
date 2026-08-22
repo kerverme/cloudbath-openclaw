@@ -231,14 +231,14 @@ describe("owner natural-language video request routing", () => {
     const { tool, draftStore, paidVideoPosts } = buildFlow();
     const result = await tool!.execute("call-1", {
       prompt: "a cat sitting on water",
-      durationSeconds: 5,
+      durationSeconds: 4,
     });
     const text = (result as { content: Array<{ text: string }> }).content[0]?.text ?? "";
 
     expect(text).toContain("🎬 Video draft");
     expect(text).toContain("ByteDance: Seedance 2.5");
     expect(text).toMatch(/ยืนยัน VIDEO \d{4}/u);
-    // 5s snaps to the nearest supported duration (4s), never an unsupported value.
+    // The explicit supported duration is preserved exactly.
     expect(text).toContain("Duration: 4 sec");
 
     expect(paidVideoPosts()).toStrictEqual([]);
