@@ -23,6 +23,18 @@ function send(
   );
 }
 
+function reply(
+  relay: ReturnType<typeof createLineVideoDraftReplyRelay>,
+  text: string,
+  key = SESSION_KEY,
+  runId = "run-1",
+) {
+  return relay.replyPayloadSending(
+    { payload: { text }, channel: "line", sessionKey: key, runId },
+    { channelId: "line", sessionKey: key },
+  );
+}
+
 describe("line video draft preview relay", () => {
   it("replaces the actual outbound content with the tool-owned preview", () => {
     const relay = createLineVideoDraftReplyRelay();
@@ -30,6 +42,39 @@ describe("line video draft preview relay", () => {
     relay.record({ sessionKey: SESSION_KEY, text: PREVIEW });
 
     expect(send(relay, "สร้าง draft แล้วนะครับ ยืนยัน VIDEO 5343")?.content).toBe(PREVIEW);
+  });
+
+  it("replaces provider-native reply-token payloads that never reach message_sending", () => {
+    const relay = createLineVideoDraftReplyRelay();
+    begin(relay);
+    relay.record({ sessionKey: SESSION_KEY, text: PREVIEW });
+
+    expect(reply(relay, "ส่งข้อความนี้เพื่อเริ่มสร้างวิดีโอ")?.payload).toMatchObject({
+      text: PREVIEW,
+    });
+  });
+
+  it("allows one durable send after reply_payload_sending prepared the same preview", () => {
+    const relay = createLineVideoDraftReplyRelay();
+    begin(relay);
+    relay.record({ sessionKey: SESSION_KEY, text: PREVIEW });
+
+    const prepared = reply(relay, "model paraphrase");
+    expect(prepared?.payload).toMatchObject({ text: PREVIEW });
+    expect(send(relay, PREVIEW)?.content).toBe(PREVIEW);
+    expect(send(relay, "second")).toMatchObject({ cancel: true });
+  });
+
+  it("cancels a second provider-native payload in the same dispatch", () => {
+    const relay = createLineVideoDraftReplyRelay();
+    begin(relay);
+    relay.record({ sessionKey: SESSION_KEY, text: PREVIEW });
+
+    expect(reply(relay, "first", SESSION_KEY, "run-1")?.payload).toMatchObject({ text: PREVIEW });
+    expect(reply(relay, "second", SESSION_KEY, "run-1")).toMatchObject({
+      cancel: true,
+      reason: "line_video_draft_reply_already_sent",
+    });
   });
 
   it("cancels later messages in the same turn so exactly one is visible", () => {

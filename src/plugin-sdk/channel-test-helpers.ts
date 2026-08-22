@@ -53,3 +53,5 @@ export {
 } from "./test-helpers/envelope-timestamp.js";
 export { expectPairingReplyText, extractPairingCode } from "./test-helpers/pairing-reply.js";
 export { stripAnsi } from "../../packages/terminal-core/src/ansi.js";
+/** Executes the production agent message tool from plugin integration tests. */
+export { createMessageTool } from "../agents/tools/message-tool.js";

@@ -3,9 +3,11 @@
  *
  * `line_video_draft` returns its outcome as tool-result content, which is
  * LLM-facing. The visible LINE message can instead be sent by either the
- * automatic source-reply dispatcher or the model's `message` tool. Both paths
- * pass through `message_sending`; only the automatic path carries the
- * narrower `reply_payload_sending` metadata.
+ * automatic source-reply dispatcher or the model's `message` tool. LINE's
+ * reply-token delivery deliberately stays on the provider-native reply path
+ * and reaches `reply_payload_sending` without reaching `message_sending`.
+ * Durable and message-tool delivery reaches `message_sending` (and durable
+ * automatic delivery reaches both), so both hooks share one state machine.
  *
  * Relay state is process-global rather than plugin-lifecycle-local. Agent tool
  * discovery may evaluate the LINE entry in a separate runtime registry from
@@ -15,9 +17,10 @@
 import { resolveGlobalSingleton } from "openclaw/plugin-sdk/global-singleton";
 
 type PendingReply = {
-  phase: "armed" | "delivered";
+  phase: "armed" | "prepared" | "delivered";
   text: string;
   expiresAt: number;
+  preparedRunId?: string;
 };
 
 type MessageSendingResult = {
@@ -26,9 +29,16 @@ type MessageSendingResult = {
   cancelReason?: string;
 };
 
+type ReplyPayloadSendingResult = {
+  payload?: Record<string, unknown>;
+  cancel?: boolean;
+  reason?: string;
+};
+
 type RelayState = {
   pending: Map<string, PendingReply>;
   handledEvents: WeakMap<object, MessageSendingResult>;
+  handledReplyPayloadEvents: WeakMap<object, ReplyPayloadSendingResult>;
 };
 
 const LINE_VIDEO_REPLY_RELAY_STATE = Symbol.for("openclaw.line.videoDraftReplyRelay");
@@ -39,6 +49,13 @@ export const LINE_VIDEO_REPLY_RELAY_MAX_ENTRIES = 512;
 type BeforeDispatchEvent = {
   channel?: string;
   sessionKey?: string;
+};
+
+type ReplyPayloadSendingEvent = {
+  payload?: { text?: string } & Record<string, unknown>;
+  channel?: string;
+  sessionKey?: string;
+  runId?: string;
 };
 
 type MessageSendingEvent = {
@@ -56,6 +73,11 @@ export type LineVideoDraftReplyRelay = {
   beginTurn: (event: BeforeDispatchEvent, ctx: MessageSendingContext) => void;
   /** Arms this session's deterministic text from the tool result. */
   record: (params: { sessionKey?: string; text: string }) => void;
+  /** Rewrites provider-native LINE automatic replies before platform delivery. */
+  replyPayloadSending: (
+    event: ReplyPayloadSendingEvent,
+    ctx: MessageSendingContext,
+  ) => ReplyPayloadSendingResult | undefined;
   /** Rewrites/cancels the LINE send shared by source and message-tool replies. */
   messageSending: (
     event: MessageSendingEvent,
@@ -67,6 +89,7 @@ function getRelayState(): RelayState {
   return resolveGlobalSingleton<RelayState>(LINE_VIDEO_REPLY_RELAY_STATE, () => ({
     pending: new Map(),
     handledEvents: new WeakMap(),
+    handledReplyPayloadEvents: new WeakMap(),
   }));
 }
 
@@ -119,6 +142,54 @@ export function createLineVideoDraftReplyRelay(deps?: {
       });
     },
 
+    replyPayloadSending: (event, ctx) => {
+      if ((event.channel ?? ctx.channelId) !== "line") {
+        return undefined;
+      }
+      const cached = state.handledReplyPayloadEvents.get(event);
+      if (cached) {
+        return cached;
+      }
+      const key = resolveSessionKey(event, ctx);
+      if (!key) {
+        return undefined;
+      }
+      dropExpired(now());
+      const entry = state.pending.get(key);
+      if (!entry) {
+        return undefined;
+      }
+
+      if (entry.phase === "armed") {
+        entry.phase = "prepared";
+        entry.preparedRunId = event.runId;
+        const result: ReplyPayloadSendingResult = {
+          payload: { ...event.payload, text: entry.text },
+        };
+        state.handledReplyPayloadEvents.set(event, result);
+        return result;
+      }
+
+      // A second payload in the same dispatch must not add an LLM gloss after
+      // the deterministic preview. A later inbound turn is cleared by beginTurn.
+      if (
+        entry.phase === "delivered" ||
+        !entry.preparedRunId ||
+        !event.runId ||
+        entry.preparedRunId === event.runId
+      ) {
+        const result: ReplyPayloadSendingResult = {
+          cancel: true,
+          reason: "line_video_draft_reply_already_sent",
+        };
+        state.handledReplyPayloadEvents.set(event, result);
+        return result;
+      }
+
+      state.pending.delete(key);
+      return undefined;
+    },
+
     messageSending: (event, ctx) => {
       const channel =
         typeof event.metadata?.channel === "string" ? event.metadata.channel : ctx.channelId;
@@ -146,12 +217,19 @@ export function createLineVideoDraftReplyRelay(deps?: {
 
       if (entry.phase === "armed") {
         entry.phase = "delivered";
-        const result = { content: entry.text };
+        const result: MessageSendingResult = { content: entry.text };
         state.handledEvents.set(event, result);
         return result;
       }
 
-      const result = {
+      if (entry.phase === "prepared" && event.content === entry.text) {
+        entry.phase = "delivered";
+        const result: MessageSendingResult = { content: entry.text };
+        state.handledEvents.set(event, result);
+        return result;
+      }
+
+      const result: MessageSendingResult = {
         cancel: true,
         cancelReason: "line_video_draft_reply_already_sent",
       };
