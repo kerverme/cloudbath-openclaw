@@ -96,13 +96,7 @@ function createLineVideoConfirmationGateLoader(deps: {
   });
 }
 
-/**
- * One relay per plugin lifecycle: createLazyRuntimeModule memoizes the
- * resolved value, so the outbound hook and the draft tool below share a single
- * instance. Lazy for the same reason as the routers above — this bundled
- * entrypoint must not statically import ./src/ (see the shape guard in
- * src/channels/plugins/bundled.shape-guard.test.ts).
- */
+/** Lazy facade over process-global relay state; see video-draft-reply-relay.ts. */
 function createLineVideoDraftReplyRelayLoader() {
   return createLazyRuntimeModule<LineVideoDraftReplyRelay>(async () => {
     const { createLineVideoDraftReplyRelay } = await import("./src/video-draft-reply-relay.js");
@@ -183,15 +177,17 @@ export default defineBundledChannelEntry({
       defaultTtlMs: LINE_VIDEO_JOB_STALE_RUNNING_MS,
     });
 
-    // The draft preview carries the price the owner is approving, and the
-    // failure texts state whether a draft exists at all, so both must reach
-    // LINE exactly as the tool wrote them. Tool content alone is only
-    // LLM-facing; the relay pins it onto the outbound payload instead. See
-    // video-draft-reply-relay.ts.
+    // Both automatic source replies and model-driven `message` tool sends pass
+    // through message_sending. reply_payload_sending covers only the former,
+    // so it cannot guarantee the production-visible message is rewritten.
     const loadVideoDraftReplyRelay = createLineVideoDraftReplyRelayLoader();
-    api.on("reply_payload_sending", async (event, ctx) => {
+    api.on("message_sending", async (event, ctx) => {
       const relay = await loadVideoDraftReplyRelay();
-      return relay.replyPayloadSending(event, ctx);
+      return relay.messageSending(event, ctx);
+    });
+    api.on("before_dispatch", async (event, ctx) => {
+      const relay = await loadVideoDraftReplyRelay();
+      relay.beginTurn(event, ctx);
     });
 
     api.registerTool(

@@ -1,151 +1,162 @@
 /**
  * Deterministic relay for the owner-facing video-draft result text.
  *
- * `line_video_draft` returns its outcome text — the success preview, or the
- * deterministic Thai reason for a failed branch — as agent tool-result
- * content, which is LLM-facing only: the LINE-visible message is whatever the
- * model writes on the following turn. In production that turn paraphrased the
- * preview down to the confirmation code alone, dropping the model, settings
- * and — critically — the estimated price the owner is being asked to approve.
- * The same turn also narrated a failed `unknown_cost` branch as if a draft had
- * been created, which was simply false. Tool-description prose cannot fix
- * either: text that states what a paid action will cost, or whether it
- * happened at all, has to be tool-owned.
+ * `line_video_draft` returns its outcome as tool-result content, which is
+ * LLM-facing. The visible LINE message can instead be sent by either the
+ * automatic source-reply dispatcher or the model's `message` tool. Both paths
+ * pass through `message_sending`; only the automatic path carries the
+ * narrower `reply_payload_sending` metadata.
  *
- * So the text is pinned onto the outbound payload instead, through the host's
- * `reply_payload_sending` hook (src/auto-reply/reply/route-reply.ts populates
- * it; src/infra/outbound/deliver.ts runs it), which may rewrite or cancel each
- * payload before it reaches the channel. The model's text for that turn is
- * replaced wholesale, so no paraphrase, omission or invented claim can survive
- * to LINE.
- *
- * `sessionKey` is the correlation key because it is the one identity present
- * on BOTH sides — `OpenClawPluginToolContext` (tool) and the hook event
- * (outbound). `runId` exists only on the hook side and is used for the
- * same-turn cancel window below.
+ * Relay state is process-global rather than plugin-lifecycle-local. Agent tool
+ * discovery may evaluate the LINE entry in a separate runtime registry from
+ * the live channel hook registry, but both registries share this host process.
+ * This keeps the tool-side arm and channel-side send on one state machine.
  */
+import { resolveGlobalSingleton } from "openclaw/plugin-sdk/global-singleton";
 
-/** Tool-owned text awaiting its outbound payload, plus the turn that consumed it. */
 type PendingReply = {
+  phase: "armed" | "delivered";
   text: string;
   expiresAt: number;
-  /**
-   * Set once the text has been pinned onto a payload. Further payloads from
-   * that same turn are cancelled so one tool call yields exactly one LINE
-   * message; a payload from any later turn releases the entry untouched.
-   */
-  deliveredRunId?: string;
-  delivered?: boolean;
 };
 
-/**
- * Entries live only between the tool call and the payload it belongs to, so a
- * run that never emits a payload cannot leave text armed against some
- * unrelated later message. Matches the draft's own 15-minute lifetime.
- */
-export const LINE_VIDEO_REPLY_RELAY_TTL_MS = 15 * 60 * 1000;
+type MessageSendingResult = {
+  content?: string;
+  cancel?: boolean;
+  cancelReason?: string;
+};
 
-/** Bounds the map for a gateway serving many LINE conversations at once. */
+type RelayState = {
+  pending: Map<string, PendingReply>;
+  handledEvents: WeakMap<object, MessageSendingResult>;
+};
+
+const LINE_VIDEO_REPLY_RELAY_STATE = Symbol.for("openclaw.line.videoDraftReplyRelay");
+
+export const LINE_VIDEO_REPLY_RELAY_TTL_MS = 15 * 60 * 1000;
 export const LINE_VIDEO_REPLY_RELAY_MAX_ENTRIES = 512;
 
-type ReplyPayloadSendingEvent = {
-  payload?: { text?: string } & Record<string, unknown>;
-  kind?: string;
+type BeforeDispatchEvent = {
   channel?: string;
   sessionKey?: string;
-  runId?: string;
 };
 
-type ReplyPayloadSendingContext = {
+type MessageSendingEvent = {
+  content: string;
+  metadata?: Record<string, unknown>;
+};
+
+type MessageSendingContext = {
   channelId?: string;
   sessionKey?: string;
 };
 
-type ReplyPayloadSendingResult = {
-  payload?: Record<string, unknown>;
-  cancel?: boolean;
-  reason?: string;
+export type LineVideoDraftReplyRelay = {
+  /** Clears any completed/crashed prior turn before the next model dispatch. */
+  beginTurn: (event: BeforeDispatchEvent, ctx: MessageSendingContext) => void;
+  /** Arms this session's deterministic text from the tool result. */
+  record: (params: { sessionKey?: string; text: string }) => void;
+  /** Rewrites/cancels the LINE send shared by source and message-tool replies. */
+  messageSending: (
+    event: MessageSendingEvent,
+    ctx: MessageSendingContext,
+  ) => MessageSendingResult | undefined;
 };
 
-export type LineVideoDraftReplyRelay = {
-  /** Arms this session's text. Called once per deterministic tool outcome. */
-  record: (params: { sessionKey?: string; text: string }) => void;
-  /** `reply_payload_sending` handler. Registered for the LINE plugin only. */
-  replyPayloadSending: (
-    event: ReplyPayloadSendingEvent,
-    ctx: ReplyPayloadSendingContext,
-  ) => ReplyPayloadSendingResult | undefined;
-};
+function getRelayState(): RelayState {
+  return resolveGlobalSingleton<RelayState>(LINE_VIDEO_REPLY_RELAY_STATE, () => ({
+    pending: new Map(),
+    handledEvents: new WeakMap(),
+  }));
+}
+
+function resolveSessionKey(event: BeforeDispatchEvent, ctx: MessageSendingContext): string {
+  return (event.sessionKey ?? ctx.sessionKey)?.trim() ?? "";
+}
 
 export function createLineVideoDraftReplyRelay(deps?: {
   now?: () => number;
 }): LineVideoDraftReplyRelay {
   const now = deps?.now ?? (() => Date.now());
-  const pending = new Map<string, PendingReply>();
+  const state = getRelayState();
 
   const dropExpired = (at: number): void => {
-    for (const [key, entry] of pending) {
+    for (const [key, entry] of state.pending) {
       if (entry.expiresAt <= at) {
-        pending.delete(key);
+        state.pending.delete(key);
       }
     }
   };
 
   return {
+    beginTurn: (event, ctx) => {
+      if ((event.channel ?? ctx.channelId) !== "line") {
+        return;
+      }
+      const key = resolveSessionKey(event, ctx);
+      if (key) {
+        state.pending.delete(key);
+      }
+    },
+
     record: ({ sessionKey, text }) => {
       const key = sessionKey?.trim();
-      // No sessionKey means no way to match the outbound payload. Leaving the
-      // entry out keeps the model's text in place rather than pinning this
-      // text onto some other conversation's message.
       if (!key || !text) {
         return;
       }
       const at = now();
       dropExpired(at);
-      if (pending.size >= LINE_VIDEO_REPLY_RELAY_MAX_ENTRIES && !pending.has(key)) {
-        const oldest = pending.keys().next();
+      if (state.pending.size >= LINE_VIDEO_REPLY_RELAY_MAX_ENTRIES && !state.pending.has(key)) {
+        const oldest = state.pending.keys().next();
         if (!oldest.done) {
-          pending.delete(oldest.value);
+          state.pending.delete(oldest.value);
         }
       }
-      // Single slot per session: a repeated request supersedes the previous
-      // text, matching the one-live-draft-per-conversation flow.
-      pending.set(key, { text, expiresAt: at + LINE_VIDEO_REPLY_RELAY_TTL_MS });
+      state.pending.set(key, {
+        phase: "armed",
+        text,
+        expiresAt: at + LINE_VIDEO_REPLY_RELAY_TTL_MS,
+      });
     },
 
-    replyPayloadSending: (event, ctx) => {
-      const channel = event.channel ?? ctx.channelId;
+    messageSending: (event, ctx) => {
+      const channel =
+        typeof event.metadata?.channel === "string" ? event.metadata.channel : ctx.channelId;
       if (channel !== "line") {
         return undefined;
       }
-      const key = (event.sessionKey ?? ctx.sessionKey)?.trim();
+
+      // A composed runner can expose this plugin from multiple live registries.
+      // Reuse the first decision for this exact dispatch event rather than
+      // treating the second registration as another LINE message.
+      const cached = state.handledEvents.get(event);
+      if (cached) {
+        return cached;
+      }
+
+      const key = ctx.sessionKey?.trim();
       if (!key) {
         return undefined;
       }
-      const at = now();
-      dropExpired(at);
-      const entry = pending.get(key);
+      dropExpired(now());
+      const entry = state.pending.get(key);
       if (!entry) {
         return undefined;
       }
 
-      if (!entry.delivered) {
-        entry.delivered = true;
-        entry.deliveredRunId = event.runId;
-        // Replace the whole text rather than appending: the model's own
-        // wording for this turn is exactly what must not reach the owner.
-        return { payload: { ...event.payload, text: entry.text } };
+      if (entry.phase === "armed") {
+        entry.phase = "delivered";
+        const result = { content: entry.text };
+        state.handledEvents.set(event, result);
+        return result;
       }
 
-      // Same turn, second payload: the text already went out, so anything
-      // further would be a duplicate or a model gloss on top of it.
-      if (entry.deliveredRunId && event.runId === entry.deliveredRunId) {
-        return { cancel: true, reason: "line_video_draft_reply_already_sent" };
-      }
-
-      // A later turn: the tool's turn is over, release and stay out of the way.
-      pending.delete(key);
-      return undefined;
+      const result = {
+        cancel: true,
+        cancelReason: "line_video_draft_reply_already_sent",
+      };
+      state.handledEvents.set(event, result);
+      return result;
     },
   };
 }

@@ -108,6 +108,7 @@ jobs:
             extensions/line/src/outbound-media-staging.test.ts \
             extensions/line/src/outbound-media.test.ts \
             extensions/line/src/monitor.lifecycle.test.ts \
+            extensions/line/src/video-draft-production-seam.integration.test.ts \
             extensions/line/src/model-catalog-tool.test.ts \
             src/agents/tools/session-status-tool.line-owner-auth.test.ts \
             extensions/line/src/session-route.test.ts \
