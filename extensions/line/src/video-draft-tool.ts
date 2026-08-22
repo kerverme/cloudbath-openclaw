@@ -161,6 +161,11 @@ type CreateLineVideoDraftToolParams = {
   senderIsOwner?: boolean;
   requesterSenderId?: string;
   sessionId?: string;
+  /**
+   * Host session key. The one identity shared with the outbound
+   * `reply_payload_sending` hook, so it is what the relay correlates on.
+   */
+  sessionKey?: string;
   accountId?: string;
   /** LINE-native `to` address for the trusted active delivery route, if known. */
   deliveryTo?: string;
@@ -178,6 +183,13 @@ type CreateLineVideoDraftToolParams = {
    * without it deciding anything.
    */
   contextApiKeyResolverAvailable?: boolean;
+  /**
+   * Arms the deterministic reply relay (video-draft-reply-relay.ts). Every
+   * text below that states a price, or states whether a draft exists at all,
+   * must reach the owner verbatim; as tool content alone it is only a
+   * suggestion to the model, which rewrote both in production.
+   */
+  recordDeterministicText?: (params: { sessionKey?: string; text: string }) => void | Promise<void>;
   resolveAccount?: typeof resolveLineAccount;
   fetchImpl?: typeof fetch;
   fileExists?: (path: string) => Promise<boolean>;
@@ -239,13 +251,30 @@ export function createLineVideoDraftTool(params: CreateLineVideoDraftToolParams)
        * text so the model relays it verbatim, plus structured details naming
        * the provider so "auth" can never be read as LINE owner authorization.
        */
-      const failDeterministic = (
+      /**
+       * Pins tool-owned text onto this turn's outbound LINE payload. Every
+       * deterministic branch routes through here, so the model can never
+       * substitute its own wording for a cost or a did-this-happen statement.
+       */
+      const recordDeterministicText = async (text: string): Promise<void> => {
+        // Awaited by every caller below. The relay is lazily loaded by the
+        // plugin entrypoint, so arming can be async; it must COMPLETE before
+        // this tool returns, or the model's reply can reach the outbound hook
+        // first and the paraphrase ships instead of this text.
+        await params.recordDeterministicText?.({
+          ...(params.sessionKey ? { sessionKey: params.sessionKey } : {}),
+          text,
+        });
+      };
+
+      const failDeterministic = async (
         resolution: LineVideoDraftResolution,
         details?: Record<string, unknown>,
       ) => {
-        const text = DRAFT_FAILURE_TEXT[resolution];
+        const text = DRAFT_FAILURE_TEXT[resolution] ?? "";
+        await recordDeterministicText(text);
         return finish(resolution, {
-          content: [{ type: "text" as const, text: text ?? "" }],
+          content: [{ type: "text" as const, text }],
           details: { resolution, ...details },
         });
       };
@@ -387,18 +416,16 @@ export function createLineVideoDraftTool(params: CreateLineVideoDraftToolParams)
               `size=${outputSize ?? "-"} audio=${audio}`,
           );
         }
+        if (costGuard.reason === "unknown_cost") {
+          return failDeterministic("unknown_cost", { model: model.id });
+        }
         return finish(
           costGuard.reason,
-          costGuard.reason === "unknown_cost"
-            ? {
-                content: [{ type: "text" as const, text: DRAFT_FAILURE_TEXT.unknown_cost ?? "" }],
-                details: { resolution: "unknown_cost", model: model.id },
-              }
-            : jsonResult({
-                resolution: costGuard.reason,
-                estimatedCostUsd: costGuard.estimatedCostUsd,
-                maxAllowedUsd: costGuard.maxAllowedUsd,
-              }),
+          jsonResult({
+            resolution: costGuard.reason,
+            estimatedCostUsd: costGuard.estimatedCostUsd,
+            maxAllowedUsd: costGuard.maxAllowedUsd,
+          }),
         );
       }
 
@@ -429,6 +456,7 @@ export function createLineVideoDraftTool(params: CreateLineVideoDraftToolParams)
         estimatedCostUsd: costGuard.estimatedCostUsd,
         prompt,
       });
+      await recordDeterministicText(preview);
       return finish("draft_created", {
         content: [{ type: "text" as const, text: preview }],
         details: {

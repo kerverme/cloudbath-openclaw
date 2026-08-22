@@ -62,6 +62,9 @@ type LineVideoModelControlRouter = ReturnType<
 type LineVideoConfirmationGate = ReturnType<
   typeof import("./src/video-confirmation.js").createLineVideoConfirmationGate
 >;
+type LineVideoDraftReplyRelay = ReturnType<
+  typeof import("./src/video-draft-reply-relay.js").createLineVideoDraftReplyRelay
+>;
 
 function createLineModelSwitchIntentRouterLoader(
   pendingStore: PluginStateKeyedStore<LinePendingModelSelection>,
@@ -90,6 +93,20 @@ function createLineVideoConfirmationGateLoader(deps: {
   return createLazyRuntimeModule<LineVideoConfirmationGate>(async () => {
     const { createLineVideoConfirmationGate } = await import("./src/video-confirmation.js");
     return createLineVideoConfirmationGate(deps);
+  });
+}
+
+/**
+ * One relay per plugin lifecycle: createLazyRuntimeModule memoizes the
+ * resolved value, so the outbound hook and the draft tool below share a single
+ * instance. Lazy for the same reason as the routers above — this bundled
+ * entrypoint must not statically import ./src/ (see the shape guard in
+ * src/channels/plugins/bundled.shape-guard.test.ts).
+ */
+function createLineVideoDraftReplyRelayLoader() {
+  return createLazyRuntimeModule<LineVideoDraftReplyRelay>(async () => {
+    const { createLineVideoDraftReplyRelay } = await import("./src/video-draft-reply-relay.js");
+    return createLineVideoDraftReplyRelay();
   });
 }
 
@@ -166,6 +183,17 @@ export default defineBundledChannelEntry({
       defaultTtlMs: LINE_VIDEO_JOB_STALE_RUNNING_MS,
     });
 
+    // The draft preview carries the price the owner is approving, and the
+    // failure texts state whether a draft exists at all, so both must reach
+    // LINE exactly as the tool wrote them. Tool content alone is only
+    // LLM-facing; the relay pins it onto the outbound payload instead. See
+    // video-draft-reply-relay.ts.
+    const loadVideoDraftReplyRelay = createLineVideoDraftReplyRelayLoader();
+    api.on("reply_payload_sending", async (event, ctx) => {
+      const relay = await loadVideoDraftReplyRelay();
+      return relay.replyPayloadSending(event, ctx);
+    });
+
     api.registerTool(
       (ctx) =>
         createLineVideoDraftTool({
@@ -173,6 +201,14 @@ export default defineBundledChannelEntry({
           senderIsOwner: ctx.senderIsOwner,
           requesterSenderId: ctx.requesterSenderId,
           sessionId: ctx.sessionId,
+          sessionKey: ctx.sessionKey,
+          // Awaited inside execute(): the relay must hold the text before the
+          // tool returns, or the model's reply could reach the outbound hook
+          // first and ship the paraphrase.
+          recordDeterministicText: async (entry) => {
+            const relay = await loadVideoDraftReplyRelay();
+            relay.record(entry);
+          },
           accountId: ctx.agentAccountId,
           deliveryTo: ctx.deliveryContext?.to,
           cfg: ctx.config,
