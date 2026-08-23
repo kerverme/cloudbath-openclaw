@@ -4,19 +4,24 @@ import {
   LINE_VIDEO_LIBRARY_SCHEMA,
   LineVideoLibraryNotionError,
 } from "./video-library-notion.js";
+import type { LineVideoUgcScope } from "./video-ugc-scope.js";
 
 const DATABASE_ID = "11111111-1111-4111-8111-111111111111";
 const DATA_SOURCE_ID = "22222222-2222-4222-8222-222222222222";
 const PAGE_ID = "33333333-3333-4333-8333-333333333333";
 const TOKEN = "unit-notion-token-never-log";
+const TARGET = { databaseId: DATABASE_ID, dataSourceId: DATA_SOURCE_ID };
+const UGC_PROJECT_DATA_SOURCE_ID = "27452a84-24c5-4651-93e4-8bdbf3772f53";
 
 const ENV = {
   OPENCLAW_NOTION_WRITE_TOKEN: TOKEN,
-  NOTION_VIDEO_LIBRARY_DATABASE_ID: DATABASE_ID,
-  NOTION_VIDEO_LIBRARY_DATA_SOURCE_ID: DATA_SOURCE_ID,
 };
 
-function sourceResponse(overrides?: { statusOptions?: string[]; removeProperty?: string }) {
+function sourceResponse(overrides?: {
+  statusOptions?: string[];
+  removeProperty?: string;
+  extraProperties?: Record<string, unknown>;
+}) {
   const properties = Object.fromEntries(
     Object.entries(LINE_VIDEO_LIBRARY_SCHEMA.properties)
       .filter(([name]) => name !== overrides?.removeProperty)
@@ -38,9 +43,35 @@ function sourceResponse(overrides?: { statusOptions?: string[]; removeProperty?:
     object: "data_source",
     id: DATA_SOURCE_ID,
     parent: { type: "database_id", database_id: DATABASE_ID },
-    properties,
+    properties: { ...properties, ...overrides?.extraProperties },
   };
 }
+
+const UGC_SCOPE: LineVideoUgcScope = {
+  version: 1,
+  policyId: "UGC",
+  accountId: "line-account",
+  lineGroupId: "line-group",
+  ownerSenderId: "line-owner",
+  productPageId: "product-page",
+  projectPageId: "ugc-project-page",
+  shotPageIds: ["shot-page-1"],
+  referenceAssets: [],
+  frozenPrompt: "a cat sitting on water",
+  capabilities: {
+    PRODUCT_LIBRARY: { databaseId: "a".repeat(32), dataSourceId: "1".repeat(32) },
+    CHARACTER_LIBRARY: { databaseId: "b".repeat(32), dataSourceId: "2".repeat(32) },
+    UGC_PROJECTS: {
+      databaseId: "c".repeat(32),
+      dataSourceId: UGC_PROJECT_DATA_SOURCE_ID,
+    },
+    UGC_SHOTS: { databaseId: "d".repeat(32), dataSourceId: "4".repeat(32) },
+    AI_VIDEO_LIBRARY: { databaseId: DATABASE_ID, dataSourceId: DATA_SOURCE_ID },
+    AI_IMAGE_LIBRARY: { databaseId: "e".repeat(32), dataSourceId: "5".repeat(32) },
+  },
+  r2Prefix: "outbound/line-video",
+  createdAt: "2026-08-23T00:00:00.000Z",
+};
 
 function pageResponse() {
   return {
@@ -55,6 +86,17 @@ function jsonResponse(body: unknown, status = 200): Response {
     status,
     headers: { "content-type": "application/json" },
   });
+}
+
+function requestUrl(input: string | URL | Request): string {
+  return typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+}
+
+function requestBody(body: BodyInit | null | undefined): string {
+  if (typeof body !== "string") {
+    throw new TypeError("Expected a JSON request body");
+  }
+  return body;
 }
 
 function job() {
@@ -80,6 +122,7 @@ describe("LINE video library Notion writer", () => {
       jsonResponse(sourceResponse()),
     );
     const library = createLineVideoLibraryNotion({
+      target: TARGET,
       env: ENV,
       fetchImpl: fetchImpl as unknown as typeof fetch,
     });
@@ -98,7 +141,7 @@ describe("LINE video library Notion writer", () => {
   it("creates one Processing record before later updates and never creates a database", async () => {
     const requests: Array<{ url: string; init?: RequestInit }> = [];
     const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
-      const url = String(input);
+      const url = requestUrl(input);
       requests.push({ url, init });
       if (url.includes("/v1/data_sources/") && !url.endsWith("/query")) {
         return jsonResponse(sourceResponse());
@@ -109,6 +152,7 @@ describe("LINE video library Notion writer", () => {
       return jsonResponse(pageResponse());
     });
     const library = createLineVideoLibraryNotion({
+      target: TARGET,
       env: ENV,
       fetchImpl: fetchImpl as unknown as typeof fetch,
     });
@@ -121,7 +165,7 @@ describe("LINE video library Notion writer", () => {
       `/v1/data_sources/${DATA_SOURCE_ID.replaceAll("-", "")}/query`,
       "/v1/pages",
     ]);
-    const createBody = JSON.parse(String(requests[2]?.init?.body)) as {
+    const createBody = JSON.parse(requestBody(requests[2]?.init?.body)) as {
       parent: { data_source_id: string };
       properties: Record<string, unknown>;
     };
@@ -141,33 +185,75 @@ describe("LINE video library Notion writer", () => {
     expect(requests.some((request) => request.url.endsWith("/v1/databases"))).toBe(false);
   });
 
+  it("accepts safe extra columns and links a UGC video to its configured Project relation", async () => {
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = requestUrl(input);
+      requests.push({ url, init });
+      if (url.endsWith("/query")) {
+        return jsonResponse({ results: [], has_more: false });
+      }
+      if (url.includes("/v1/data_sources/")) {
+        return jsonResponse(
+          sourceResponse({
+            extraProperties: {
+              "UGC Project": {
+                type: "relation",
+                relation: { data_source_id: UGC_PROJECT_DATA_SOURCE_ID },
+              },
+              "Safe Extra Column": { type: "checkbox" },
+            },
+          }),
+        );
+      }
+      return jsonResponse(pageResponse());
+    });
+    const library = createLineVideoLibraryNotion({
+      target: TARGET,
+      env: ENV,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+
+    await library.createProcessing({ ...job(), ugcScope: UGC_SCOPE });
+
+    const createRequest = requests.find((request) => request.url.endsWith("/v1/pages"));
+    const createBody = JSON.parse(requestBody(createRequest?.init?.body)) as {
+      properties: Record<string, unknown>;
+    };
+    expect(createBody.properties).toMatchObject({
+      "UGC Project": { relation: [{ id: "ugc-project-page" }] },
+    });
+  });
+
   it("reuses the existing page for an immutable Video Job ID instead of creating a duplicate", async () => {
     const fetchImpl = vi.fn(async (input: string | URL | Request) => {
-      const url = String(input);
+      const url = requestUrl(input);
       return url.endsWith("/query")
         ? jsonResponse({ results: [pageResponse()], has_more: false })
         : jsonResponse(sourceResponse());
     });
     const library = createLineVideoLibraryNotion({
+      target: TARGET,
       env: ENV,
       fetchImpl: fetchImpl as unknown as typeof fetch,
     });
 
     await expect(library.createProcessing(job())).resolves.toEqual({ pageId: PAGE_ID });
-    expect(fetchImpl.mock.calls.some(([url]) => String(url).endsWith("/v1/pages"))).toBe(false);
+    expect(fetchImpl.mock.calls.some(([url]) => requestUrl(url).endsWith("/v1/pages"))).toBe(false);
   });
 
   it("updates the same record Completed and strips signed query credentials from the stored URL", async () => {
     const bodies: unknown[] = [];
     const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
-      const url = String(input);
+      const url = requestUrl(input);
       if (url.includes("/v1/data_sources/")) {
         return jsonResponse(sourceResponse());
       }
-      bodies.push(JSON.parse(String(init?.body)));
+      bodies.push(JSON.parse(requestBody(init?.body)));
       return jsonResponse(pageResponse());
     });
     const library = createLineVideoLibraryNotion({
+      target: TARGET,
       env: ENV,
       fetchImpl: fetchImpl as unknown as typeof fetch,
     });
@@ -203,14 +289,15 @@ describe("LINE video library Notion writer", () => {
   it("updates the same record Failed with only the supplied sanitized reason", async () => {
     const bodies: unknown[] = [];
     const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
-      const url = String(input);
+      const url = requestUrl(input);
       if (url.includes("/v1/data_sources/")) {
         return jsonResponse(sourceResponse());
       }
-      bodies.push(JSON.parse(String(init?.body)));
+      bodies.push(JSON.parse(requestBody(init?.body)));
       return jsonResponse(pageResponse());
     });
     const library = createLineVideoLibraryNotion({
+      target: TARGET,
       env: ENV,
       fetchImpl: fetchImpl as unknown as typeof fetch,
     });
@@ -228,12 +315,15 @@ describe("LINE video library Notion writer", () => {
   });
 
   it("fails safely when configuration is missing or schema is incompatible", async () => {
-    expect(() => createLineVideoLibraryNotion({ env: {} })).toThrow(LineVideoLibraryNotionError);
+    expect(() => createLineVideoLibraryNotion({ target: TARGET, env: {} })).toThrow(
+      LineVideoLibraryNotionError,
+    );
 
     const fetchImpl = vi.fn(async () =>
       jsonResponse(sourceResponse({ removeProperty: "R2 Object Key" })),
     );
     const library = createLineVideoLibraryNotion({
+      target: TARGET,
       env: ENV,
       fetchImpl: fetchImpl as unknown as typeof fetch,
     });
@@ -245,6 +335,7 @@ describe("LINE video library Notion writer", () => {
       jsonResponse({ message: `Authorization Bearer ${TOKEN}` }, 403),
     );
     const library = createLineVideoLibraryNotion({
+      target: TARGET,
       env: ENV,
       fetchImpl: fetchImpl as unknown as typeof fetch,
     });

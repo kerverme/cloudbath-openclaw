@@ -6,13 +6,13 @@
  * creates/updates video-job pages; it never creates or mutates schema and it
  * never exposes a generic Notion request surface to the model.
  */
+import type { LineVideoNotionTarget, LineVideoUgcScope } from "./video-ugc-scope.js";
+
 const NOTION_BASE_URL = "https://api.notion.com";
 const NOTION_API_VERSION = "2026-03-11";
 // All OpenClaw Notion writers use the canonical write credential. Runtime
 // never falls back to a legacy or read-only Notion token.
 const NOTION_TOKEN_ENV = "OPENCLAW_NOTION_WRITE_TOKEN";
-const NOTION_DATABASE_ID_ENV = "NOTION_VIDEO_LIBRARY_DATABASE_ID";
-const NOTION_DATA_SOURCE_ID_ENV = "NOTION_VIDEO_LIBRARY_DATA_SOURCE_ID";
 const REQUEST_TIMEOUT_MS = 15_000;
 const NOTION_ID_PATTERN = /^[0-9a-f]{32}$/u;
 const MAX_RICH_TEXT_CHUNK_LENGTH = 1_900;
@@ -51,6 +51,7 @@ type NotionParent = {
 type NotionPropertySchema = {
   type?: string;
   select?: { options?: Array<{ name?: string }> };
+  relation?: { data_source_id?: string };
 };
 
 type NotionDataSource = {
@@ -94,6 +95,7 @@ export type LineVideoLibraryJob = {
   estimatedCostUsd: number;
   actualCostUsd?: number;
   createdAt: number;
+  ugcScope?: LineVideoUgcScope;
 };
 
 export type LineVideoLibraryCompletion = {
@@ -111,6 +113,9 @@ export type LineVideoLibrary = {
     completion: LineVideoLibraryCompletion,
   ): Promise<void>;
   markFailed(record: LineVideoLibraryRecord, reason: string): Promise<void>;
+  markUgcProcessing?(scope: LineVideoUgcScope): Promise<void>;
+  markUgcCompleted?(scope: LineVideoUgcScope, actualCostUsd?: number): Promise<void>;
+  markUgcFailed?(scope: LineVideoUgcScope, reason: string): Promise<void>;
 };
 
 export class LineVideoLibraryNotionError extends Error {
@@ -134,7 +139,10 @@ function sameNotionId(left: string | undefined, right: string): boolean {
     return false;
   }
   try {
-    return canonicalNotionId(left, "target_identity_invalid") === right;
+    return (
+      canonicalNotionId(left, "target_identity_invalid") ===
+      canonicalNotionId(right, "target_identity_invalid")
+    );
   } catch {
     return false;
   }
@@ -145,14 +153,11 @@ function requiredEnv(env: NodeJS.ProcessEnv, name: string): string {
   return value || fail("not_configured");
 }
 
-function resolveConfig(env: NodeJS.ProcessEnv): VideoLibraryConfig {
+function resolveConfig(env: NodeJS.ProcessEnv, target: LineVideoNotionTarget): VideoLibraryConfig {
   return {
     token: requiredEnv(env, NOTION_TOKEN_ENV),
-    databaseId: canonicalNotionId(requiredEnv(env, NOTION_DATABASE_ID_ENV), "database_id_invalid"),
-    dataSourceId: canonicalNotionId(
-      requiredEnv(env, NOTION_DATA_SOURCE_ID_ENV),
-      "data_source_id_invalid",
-    ),
+    databaseId: canonicalNotionId(target.databaseId, "database_id_invalid"),
+    dataSourceId: canonicalNotionId(target.dataSourceId, "data_source_id_invalid"),
   };
 }
 
@@ -323,7 +328,22 @@ class VideoLibraryNotionClient implements LineVideoLibrary {
       "LINE Account": richText(job.accountId),
       "LINE Conversation ID": richText(job.conversationId),
       "Created At": date(job.createdAt),
+      ...(job.ugcScope
+        ? { "UGC Project": { relation: [{ id: job.ugcScope.projectPageId }] } }
+        : {}),
     };
+    if (job.ugcScope) {
+      const projectRelation = (await this.validateSource()).properties?.["UGC Project"];
+      if (
+        projectRelation?.type !== "relation" ||
+        !sameNotionId(
+          projectRelation.relation?.data_source_id,
+          job.ugcScope.capabilities.UGC_PROJECTS.dataSourceId,
+        )
+      ) {
+        fail("ugc_project_relation_incompatible");
+      }
+    }
     try {
       const page = await this.request<NotionPage>("/v1/pages", {
         method: "POST",
@@ -376,17 +396,86 @@ class VideoLibraryNotionClient implements LineVideoLibrary {
       "Failure Reason": richText(reason),
     });
   }
+
+  private async validateSource(): Promise<NotionDataSource> {
+    await this.validate();
+    return await this.request<NotionDataSource>(
+      `/v1/data_sources/${encodeURIComponent(this.config.dataSourceId)}`,
+    );
+  }
+
+  private async updateScopedPage(params: {
+    pageId: string;
+    target: LineVideoNotionTarget;
+    properties: Record<string, unknown>;
+  }): Promise<void> {
+    const page = await this.request<NotionPage>(`/v1/pages/${encodeURIComponent(params.pageId)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ properties: params.properties }),
+    });
+    if (
+      page.object !== "page" ||
+      page.id !== params.pageId ||
+      page.parent?.type !== "data_source_id" ||
+      !sameNotionId(page.parent.data_source_id, params.target.dataSourceId)
+    ) {
+      fail("ugc_record_scope_mismatch");
+    }
+  }
+
+  private async updateUgcStatus(params: {
+    scope: LineVideoUgcScope;
+    status: "Processing" | "Completed" | "Failed";
+    actualCostUsd?: number;
+  }): Promise<void> {
+    await this.updateScopedPage({
+      pageId: params.scope.projectPageId,
+      target: params.scope.capabilities.UGC_PROJECTS,
+      properties: {
+        Status: { select: { name: params.status } },
+        ...(params.actualCostUsd !== undefined
+          ? { "Actual Cost USD": { number: params.actualCostUsd } }
+          : {}),
+      },
+    });
+    await Promise.all(
+      params.scope.shotPageIds.map(
+        async (pageId) =>
+          await this.updateScopedPage({
+            pageId,
+            target: params.scope.capabilities.UGC_SHOTS,
+            properties: { Status: { select: { name: params.status } } },
+          }),
+      ),
+    );
+  }
+
+  async markUgcProcessing(scope: LineVideoUgcScope): Promise<void> {
+    await this.updateUgcStatus({ scope, status: "Processing" });
+  }
+
+  async markUgcCompleted(scope: LineVideoUgcScope, actualCostUsd?: number): Promise<void> {
+    await this.updateUgcStatus({
+      scope,
+      status: "Completed",
+      ...(actualCostUsd !== undefined ? { actualCostUsd } : {}),
+    });
+  }
+
+  async markUgcFailed(scope: LineVideoUgcScope, reason: string): Promise<void> {
+    void reason;
+    await this.updateUgcStatus({ scope, status: "Failed" });
+  }
 }
 
-export function createLineVideoLibraryNotion(
-  params: {
-    env?: NodeJS.ProcessEnv;
-    fetchImpl?: typeof fetch;
-    requestTimeoutMs?: number;
-  } = {},
-): LineVideoLibrary {
+export function createLineVideoLibraryNotion(params: {
+  target: LineVideoNotionTarget;
+  env?: NodeJS.ProcessEnv;
+  fetchImpl?: typeof fetch;
+  requestTimeoutMs?: number;
+}): LineVideoLibrary {
   return new VideoLibraryNotionClient(
-    resolveConfig(params.env ?? process.env),
+    resolveConfig(params.env ?? process.env, params.target),
     params.fetchImpl ?? fetch,
     params.requestTimeoutMs ?? REQUEST_TIMEOUT_MS,
   );

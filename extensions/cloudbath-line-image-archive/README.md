@@ -9,8 +9,7 @@ This additive OpenClaw plugin separates permanent image assets from configurable
 5. Optional model extraction produces fields defined by that schema.
 6. A profile-scoped Notion record references the shared R2 object.
 
-It targets OpenClaw `2026.7.2`, uses the supported `message_received` hook, and does not patch
-OpenClaw core or `extensions/line`.
+It targets OpenClaw `2026.7.2` and uses supported plugin hooks and SQLite-backed plugin state.
 
 ## LINE group workspace policies
 
@@ -33,8 +32,12 @@ properties: `Name` (title), `Captured At` (date), `Source` (rich text), `Sender`
 `Status` (select), and `Record ID` (rich text). Successful ingestion never replies to the watched
 group; failures remain in durable job state and use sanitized diagnostics.
 
-`UGC` is a capability foundation only in this change. It exposes no unrestricted Notion tool and no
-automatic UGC workflow. All six capability targets must be explicitly configured:
+`UGC` exposes no unrestricted Notion tool. The verified owner prepares a product-review workflow
+with `cloudbath_ugc_video_prepare`; the tool resolves Product and optional Character records only
+inside the configured libraries, creates or reuses one UGC Project, creates an idempotent three-shot
+plan, freezes references and targets, then hands the exact prompt/settings to the existing
+owner-confirmed `line_video_draft` flow. Paid generation remains impossible until the exact owner
+confirmation. All six capability targets must be explicitly configured:
 
 - `PRODUCT_LIBRARY`: read
 - `CHARACTER_LIBRARY`: read
@@ -43,44 +46,54 @@ automatic UGC workflow. All six capability targets must be explicitly configured
 - `AI_VIDEO_LIBRARY`: read/write
 - `AI_IMAGE_LIBRARY`: read/write
 
-Example non-secret configuration shape:
+Exact non-secret `OPENCLAW_CONFIG_PATH` patch shape (merge this entry without replacing unrelated
+plugin configuration):
 
 ```json5
 {
-  groupWorkspacePolicies: {
-    pairingTtlMs: 600000,
-    keepWatching: {
-      notion: {
-        databaseId: "<KEEP_WATCHING_DATABASE_ID>",
-        dataSourceId: "<KEEP_WATCHING_DATA_SOURCE_ID>",
-      },
-      r2Prefix: "workspace/keep-watching",
-    },
-    ugc: {
-      capabilities: {
-        PRODUCT_LIBRARY: {
-          databaseId: "<PRODUCT_LIBRARY_DATABASE_ID>",
-          dataSourceId: "<PRODUCT_LIBRARY_DATA_SOURCE_ID>",
-        },
-        CHARACTER_LIBRARY: {
-          databaseId: "<CHARACTER_LIBRARY_DATABASE_ID>",
-          dataSourceId: "<CHARACTER_LIBRARY_DATA_SOURCE_ID>",
-        },
-        UGC_PROJECTS: {
-          databaseId: "<UGC_PROJECTS_DATABASE_ID>",
-          dataSourceId: "<UGC_PROJECTS_DATA_SOURCE_ID>",
-        },
-        UGC_SHOTS: {
-          databaseId: "<UGC_SHOTS_DATABASE_ID>",
-          dataSourceId: "<UGC_SHOTS_DATA_SOURCE_ID>",
-        },
-        AI_VIDEO_LIBRARY: {
-          databaseId: "<AI_VIDEO_LIBRARY_DATABASE_ID>",
-          dataSourceId: "<AI_VIDEO_LIBRARY_DATA_SOURCE_ID>",
-        },
-        AI_IMAGE_LIBRARY: {
-          databaseId: "<AI_IMAGE_LIBRARY_DATABASE_ID>",
-          dataSourceId: "<AI_IMAGE_LIBRARY_DATA_SOURCE_ID>",
+  plugins: {
+    entries: {
+      "cloudbath-line-image-archive": {
+        enabled: true,
+        config: {
+          groupWorkspacePolicies: {
+            pairingTtlMs: 600000,
+            keepWatching: {
+              notion: {
+                databaseId: "22f2a9c709cb4baa8d41e5988e98f105",
+                dataSourceId: "14b2be8ee32d49bb85098530d82b3de2",
+              },
+              r2Prefix: "workspace/keep-watching/construction",
+            },
+            ugc: {
+              capabilities: {
+                PRODUCT_LIBRARY: {
+                  databaseId: "3338128fbb6345a9b2a92389ad070ac2",
+                  dataSourceId: "7342057309e74999a5a3813afa27d396",
+                },
+                CHARACTER_LIBRARY: {
+                  databaseId: "c9b716a9a305425d89c25254d837ac79",
+                  dataSourceId: "e27e904b17bf4a349f11dd6eab57041c",
+                },
+                UGC_PROJECTS: {
+                  databaseId: "4a583619ec254b61acd4c2b87812f95b",
+                  dataSourceId: "27452a8424c5465193e48bdbf3772f53",
+                },
+                UGC_SHOTS: {
+                  databaseId: "42d421b1258942b5aa26ef3093ce635e",
+                  dataSourceId: "d35ccd4ba44b4ac798e9b3647b201b55",
+                },
+                AI_VIDEO_LIBRARY: {
+                  databaseId: "3d309900f0a2466480b2a98fbae3e206",
+                  dataSourceId: "9305e95bdc2d4ed9bd001cd661e3807d",
+                },
+                AI_IMAGE_LIBRARY: {
+                  databaseId: "82d3bf66801a48f79482a71d18dce4e8",
+                  dataSourceId: "5438e9ffd76f4d5e870df260a3940b3c",
+                },
+              },
+            },
+          },
         },
       },
     },
@@ -91,6 +104,14 @@ Example non-secret configuration shape:
 Missing targets or runtime credentials fail closed. Every ingest job freezes its group, policy,
 workflow type, source capabilities, Notion target, and R2 prefix before processing. UGC cannot use a
 KEEP_WATCHING target and KEEP_WATCHING cannot resolve UGC capability slots.
+
+Database IDs are deployment configuration, not Railway environment variables. The only Notion
+write credential is `OPENCLAW_NOTION_WRITE_TOKEN`.
+
+UGC schema validation requires the documented production fields but permits unrelated additional
+properties. In particular, the live relations `Product`, `Character`, `Project`, and `UGC Project`
+are validated against their configured data-source IDs and are never created, renamed, deleted, or
+retargeted by runtime.
 
 ## Universal asset identity
 
@@ -360,7 +381,7 @@ LINE group allowlists and Notion database IDs are no longer global environment v
 
 ## Scoped Wellness and Construction tools
 
-The plugin also registers five optional agent tools. They are unavailable to agents until each
+The plugin also registers scoped optional agent tools. They are unavailable to agents until each
 tool is explicitly allowlisted:
 
 - `wellness_notion_query`, `wellness_notion_get_record`, and `wellness_notion_search` are
@@ -371,6 +392,8 @@ tool is explicitly allowlisted:
   properties in the Construction Upload Inbox. Creation always uses the fixed data source, and
   updates resolve a page by its `Record ID` inside that data source rather than accepting a page
   or database target from the model.
+- `cloudbath_ugc_video_prepare` exists only for a verified owner in a LINE group paired to UGC. It
+  reads/writes only the six configured capability targets and never calls a paid provider.
 
 Read and write access remain independently authenticated. Wellness tools use only
 `NOTION_WELLNESS_READ_TOKEN`; Construction writes use only `OPENCLAW_NOTION_WRITE_TOKEN`. The Wellness
@@ -380,7 +403,7 @@ insert, and update-content capabilities on the Upload Inbox so the plugin can va
 prevent duplicate Record IDs, and update an existing row. Neither integration needs schema-update,
 comment, or delete capabilities.
 
-All five tools are registered as optional. Enable only the intended tools on the LINE agent, for
+All tools are registered as optional. Enable only the intended tools on the LINE agent, for
 example:
 
 ```json5
@@ -396,6 +419,7 @@ example:
             "wellness_notion_search",
             "construction_upload_create",
             "construction_upload_update",
+            "cloudbath_ugc_video_prepare",
           ],
         },
       },

@@ -47,6 +47,17 @@ import {
   normalizeLineVideoConversationId,
 } from "./video-model-preference.js";
 import { stageLineOutboundVideo, stageLineVideoPreviewImage } from "./video-outbound-staging.js";
+import {
+  lineVideoUgcDraftScopeKey,
+  lineGroupPolicyBindingKey,
+  materializeLineVideoUgcReferences,
+  resolveCloudbathUgcCapabilities,
+  validateLineVideoUgcScope,
+  type LineGroupPolicyBindingStore,
+  type LineVideoNotionTarget,
+  type LineVideoUgcScope,
+  type LineVideoUgcScopeStore,
+} from "./video-ugc-scope.js";
 
 const CONFIRMATION_PATTERN = /^ยืนยัน\s+VIDEO\s+(\d{4})$/iu;
 
@@ -154,18 +165,13 @@ async function executeConfirmedLineVideoJob(params: {
   jobId: string;
   jobCreatedAt: number;
   account: ReturnType<typeof resolveLineAccount>;
-  createNotionLibrary: () => LineVideoLibrary;
+  createNotionLibrary: (target: LineVideoNotionTarget) => LineVideoLibrary;
+  videoLibraryTarget: LineVideoNotionTarget;
+  ugcScope?: LineVideoUgcScope;
   now: () => number;
 }): Promise<void> {
   const cfg = getRuntimeConfig();
   const account = params.account;
-  const inputImages: VideoGenerationSourceAsset[] = [];
-  if (params.draft.sourceImagePath) {
-    const asset = await loadSourceImageAsset(params.draft.sourceImagePath);
-    if (asset) {
-      inputImages.push(asset);
-    }
-  }
 
   // Whatever happens below -- success, provider rejection, or a polling
   // failure -- the job reaches a terminal state and the active-job lock is
@@ -174,6 +180,16 @@ async function executeConfirmedLineVideoJob(params: {
   let notionLibrary: LineVideoLibrary | undefined;
   let notionRecord: LineVideoLibraryRecord | undefined;
   try {
+    const inputImages: VideoGenerationSourceAsset[] = [];
+    if (params.ugcScope) {
+      inputImages.push(...(await materializeLineVideoUgcReferences(params.ugcScope)));
+    }
+    if (params.draft.sourceImagePath) {
+      const asset = await loadSourceImageAsset(params.draft.sourceImagePath);
+      if (asset) {
+        inputImages.push(asset);
+      }
+    }
     const conversationId = normalizeLineVideoConversationId(params.draft.deliveryTo);
     if (!conversationId) {
       throw new Error("LINE video conversation identity is unavailable");
@@ -181,8 +197,14 @@ async function executeConfirmedLineVideoJob(params: {
     // Validate the one-time administrator-provisioned database before the
     // paid provider call. A missing or incompatible Notion target therefore
     // fails closed without spending money or weakening confirmation policy.
-    notionLibrary = params.createNotionLibrary();
+    notionLibrary = params.createNotionLibrary(params.videoLibraryTarget);
     await notionLibrary.validate();
+    if (params.ugcScope) {
+      if (!notionLibrary.markUgcProcessing) {
+        throw new Error("UGC video library workflow is unavailable");
+      }
+      await notionLibrary.markUgcProcessing(params.ugcScope);
+    }
 
     const result = await generateVideo({
       cfg,
@@ -221,6 +243,7 @@ async function executeConfirmedLineVideoJob(params: {
       estimatedCostUsd: params.draft.estimatedCostUsd,
       ...(actualCostUsd !== undefined ? { actualCostUsd } : {}),
       createdAt: params.jobCreatedAt,
+      ...(params.ugcScope ? { ugcScope: params.ugcScope } : {}),
     });
     await updateLineVideoJob({
       store: params.jobStore,
@@ -247,6 +270,12 @@ async function executeConfirmedLineVideoJob(params: {
       ...(actualCostUsd !== undefined ? { actualCostUsd } : {}),
       completedAt: params.now(),
     });
+    if (params.ugcScope) {
+      if (!notionLibrary.markUgcCompleted) {
+        throw new Error("UGC video library workflow is unavailable");
+      }
+      await notionLibrary.markUgcCompleted(params.ugcScope, actualCostUsd);
+    }
 
     if (params.draft.deliveryTo) {
       const preview = await stageLineVideoPreviewImage();
@@ -276,6 +305,9 @@ async function executeConfirmedLineVideoJob(params: {
     if (notionLibrary && notionRecord) {
       await notionLibrary.markFailed(notionRecord, reason).catch(() => {});
     }
+    if (notionLibrary?.markUgcFailed && params.ugcScope) {
+      await notionLibrary.markUgcFailed(params.ugcScope, reason).catch(() => {});
+    }
     await updateLineVideoJob({
       store: params.jobStore,
       jobId: params.jobId,
@@ -303,16 +335,20 @@ export function createLineVideoConfirmationGate(params: {
   draftStore: LineVideoDraftStore;
   jobStore: LineVideoJobStore;
   activeJobLockStore: LineVideoActiveJobLockStore;
+  ugcScopeStore?: LineVideoUgcScopeStore;
+  groupBindingStore?: LineGroupPolicyBindingStore;
   resolveApiKey?: () => Promise<string | undefined>;
   fetchImpl?: typeof fetch;
-  createNotionLibrary?: () => LineVideoLibrary;
+  createNotionLibrary?: (target: LineVideoNotionTarget) => LineVideoLibrary;
   scheduleBackgroundWork?: (run: () => Promise<void>) => void;
   resolveAccount?: typeof resolveLineAccount;
   now?: () => number;
 }) {
   const resolveApiKey = params.resolveApiKey ?? (() => resolveLineProviderApiKey());
   const resolveAccount = params.resolveAccount ?? resolveLineAccount;
-  const createNotionLibrary = params.createNotionLibrary ?? (() => createLineVideoLibraryNotion());
+  const createNotionLibrary =
+    params.createNotionLibrary ??
+    ((target: LineVideoNotionTarget) => createLineVideoLibraryNotion({ target }));
   const now = params.now ?? Date.now;
   const scheduleBackgroundWork =
     params.scheduleBackgroundWork ?? ((run: () => Promise<void>) => void run());
@@ -377,6 +413,43 @@ export function createLineVideoConfirmationGate(params: {
       return { handled: true, text: "video draft นี้ไม่ตรงกับบทสนทนานี้" };
     }
 
+    const cfg = getRuntimeConfig();
+    const configuredCapabilities = resolveCloudbathUgcCapabilities(cfg);
+    const videoLibraryTarget =
+      configuredCapabilities?.AI_VIDEO_LIBRARY ??
+      (params.createNotionLibrary
+        ? { databaseId: "0".repeat(32), dataSourceId: "1".repeat(32) }
+        : undefined);
+    if (!videoLibraryTarget) {
+      return { handled: true, text: "ยังไม่ได้ตั้งค่า AI Video Library" };
+    }
+    const ugcScope = await params.ugcScopeStore?.lookup(lineVideoUgcDraftScopeKey(draftId));
+    const groupId = conversationId.replace(/^line:group:/u, "");
+    const groupBinding = await params.groupBindingStore?.lookup(
+      lineGroupPolicyBindingKey(accountId, groupId),
+    );
+    if (groupBinding?.policyId === "KEEP_WATCHING") {
+      return { handled: true, text: "กลุ่มนี้ไม่อนุญาตให้สร้างวิดีโอ" };
+    }
+    if (groupBinding?.policyId === "UGC" && !ugcScope) {
+      return { handled: true, text: "UGC video draft นี้ไม่มี workspace scope ที่ยืนยันแล้ว" };
+    }
+    const ugcScopeValid =
+      !ugcScope ||
+      (params.groupBindingStore !== undefined &&
+        (await validateLineVideoUgcScope({
+          scope: ugcScope,
+          cfg,
+          bindingStore: params.groupBindingStore,
+          accountId,
+          groupId,
+          ownerSenderId: senderId,
+          frozenPrompt: draft.prompt,
+        })));
+    if (!ugcScopeValid) {
+      return { handled: true, text: "UGC video draft scope ไม่ถูกต้องหรือถูกเปลี่ยน" };
+    }
+
     const apiKey = await resolveApiKey();
     if (!apiKey?.trim()) {
       return { handled: true, text: "ยังไม่ได้ตั้งค่า OpenRouter API key" };
@@ -402,7 +475,7 @@ export function createLineVideoConfirmationGate(params: {
       return { handled: true, text: "การตั้งค่าของ draft นี้ไม่รองรับแล้ว กรุณาสร้าง draft ใหม่" };
     }
 
-    const account = resolveAccount({ cfg: getRuntimeConfig(), accountId });
+    const account = resolveAccount({ cfg, accountId });
     // Re-estimate against the SAME dimensions the draft froze, so the
     // pre-submit ceiling check matches what the owner confirmed.
     const costGuard = evaluateLineVideoCostGuard({
@@ -468,6 +541,12 @@ export function createLineVideoConfirmationGate(params: {
     if (!lineVideoDraftsMatch(consumeResult.draft, draft)) {
       return { handled: true, text: "video draft เปลี่ยนแปลง กรุณาสร้างใหม่" };
     }
+    if (ugcScope) {
+      const consumedScope = await params.ugcScopeStore!.consume(lineVideoUgcDraftScopeKey(draftId));
+      if (!consumedScope || JSON.stringify(consumedScope) !== JSON.stringify(ugcScope)) {
+        return { handled: true, text: "UGC video draft scope เปลี่ยนแปลง กรุณาสร้างใหม่" };
+      }
+    }
 
     const job = await createLineVideoJob({
       store: params.jobStore,
@@ -500,6 +579,8 @@ export function createLineVideoConfirmationGate(params: {
         jobCreatedAt: job.submittedAt,
         account,
         createNotionLibrary,
+        videoLibraryTarget,
+        ...(ugcScope ? { ugcScope } : {}),
         now,
       }),
     );

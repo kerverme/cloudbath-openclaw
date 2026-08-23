@@ -45,6 +45,11 @@ import {
   LINE_VIDEO_MODEL_PREFERENCE_NAMESPACE,
   type LineVideoModelPreferenceState,
 } from "./src/video-model-preference.js";
+import type { LineGroupPolicyBinding, LineVideoUgcScope } from "./src/video-ugc-scope.js";
+
+const CLOUDBATH_GROUP_BINDING_NAMESPACE = "line-group-policy-bindings-v1";
+const CLOUDBATH_UGC_DRAFT_SCOPE_NAMESPACE = "ugc-video-draft-scopes-v1";
+const CLOUDBATH_UGC_SCOPE_MAX_ENTRIES = 20_000;
 
 type RegisteredLineCardCommand = OpenClawPluginCommandDefinition;
 // Inline `import(...)` type (no top-level `./src/` import statement) keeps this
@@ -89,6 +94,8 @@ function createLineVideoConfirmationGateLoader(deps: {
   draftStore: PluginStateKeyedStore<LineVideoDraft>;
   jobStore: PluginStateKeyedStore<LineVideoJob>;
   activeJobLockStore: PluginStateKeyedStore<LineVideoActiveJobLock>;
+  ugcScopeStore: PluginStateKeyedStore<LineVideoUgcScope>;
+  groupBindingStore: PluginStateKeyedStore<LineGroupPolicyBinding>;
 }) {
   return createLazyRuntimeModule<LineVideoConfirmationGate>(async () => {
     const { createLineVideoConfirmationGate } = await import("./src/video-confirmation.js");
@@ -176,6 +183,16 @@ export default defineBundledChannelEntry({
       maxEntries: LINE_VIDEO_ACTIVE_JOB_MAX_ENTRIES,
       defaultTtlMs: LINE_VIDEO_JOB_STALE_RUNNING_MS,
     });
+    const ugcScopeStore = api.runtime.state.openKeyedStore<LineVideoUgcScope>({
+      namespace: CLOUDBATH_UGC_DRAFT_SCOPE_NAMESPACE,
+      maxEntries: CLOUDBATH_UGC_SCOPE_MAX_ENTRIES,
+      overflowPolicy: "evict-oldest",
+    });
+    const groupBindingStore = api.runtime.state.openKeyedStore<LineGroupPolicyBinding>({
+      namespace: CLOUDBATH_GROUP_BINDING_NAMESPACE,
+      maxEntries: 10_000,
+      overflowPolicy: "reject-new",
+    });
 
     // LINE reply-token sends stay provider-native and reach only
     // reply_payload_sending; durable and model-driven `message` tool sends
@@ -246,6 +263,8 @@ export default defineBundledChannelEntry({
       draftStore: videoDraftStore,
       jobStore: videoJobStore,
       activeJobLockStore: videoActiveJobLockStore,
+      ugcScopeStore,
+      groupBindingStore,
     });
     api.on("before_dispatch", async (event, ctx) => {
       const gate = await loadVideoConfirmationGate();

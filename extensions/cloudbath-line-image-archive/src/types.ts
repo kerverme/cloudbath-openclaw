@@ -230,6 +230,43 @@ export type KeepWatchingJobRecord = {
   error?: string;
 };
 
+export type UgcReferenceAsset = Readonly<{
+  kind: "identity" | "product" | "style";
+  source: "r2" | "https";
+  locator: string;
+}>;
+
+export type FrozenUgcVideoScope = Readonly<{
+  version: 1;
+  policyId: "UGC";
+  accountId: string;
+  lineGroupId: string;
+  ownerSenderId: string;
+  productPageId: string;
+  characterPageId?: string;
+  projectPageId: string;
+  shotPageIds: readonly string[];
+  referenceAssets: readonly UgcReferenceAsset[];
+  frozenPrompt: string;
+  durationSeconds?: number;
+  aspectRatio?: string;
+  resolution?: string;
+  audio?: boolean;
+  capabilities: Readonly<Record<UgcCapabilityId, NotionTarget>>;
+  r2Prefix: "outbound/line-video";
+  createdAt: string;
+}>;
+
+export type PendingUgcVideoScope = FrozenUgcVideoScope & {
+  sessionKeyHash: string;
+};
+
+export type ActiveUgcLineSession = Readonly<{
+  accountId: string;
+  lineGroupId: string;
+  ownerSenderId: string;
+}>;
+
 export type InboundImageJob = {
   accountId?: string;
   groupId: string;

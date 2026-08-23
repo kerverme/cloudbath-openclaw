@@ -16,6 +16,7 @@ import { resolveSchemaForAgent } from "./src/profiles.js";
 import { R2ArchiveClient } from "./src/r2.js";
 import type {
   AgentProfile,
+  ActiveUgcLineSession,
   ArchiveConfig,
   InboundImageJob,
   PersistedArchiveRecord,
@@ -24,7 +25,18 @@ import type {
   LineGroupPolicyBinding,
   SafeLogger,
   SchemaProfile,
+  FrozenUgcVideoScope,
+  PendingUgcVideoScope,
 } from "./src/types.js";
+import {
+  CLOUDBATH_UGC_DRAFT_SCOPE_NAMESPACE,
+  CLOUDBATH_UGC_ACTIVE_SESSION_NAMESPACE,
+  CLOUDBATH_UGC_PENDING_NAMESPACE,
+  CLOUDBATH_UGC_SCOPE_MAX_ENTRIES,
+  CLOUDBATH_UGC_VIDEO_PREPARE_TOOL_NAME,
+  CloudbathUgcVideoWorkflow,
+  UgcNotionWorkflowClient,
+} from "./src/ugc-workflow.js";
 
 function structuredLogger(logger: PluginLogger): SafeLogger {
   const write =
@@ -75,12 +87,25 @@ export default definePluginEntry({
     let pipeline: ArchivePipeline | undefined;
     let keepWatchingPipeline: KeepWatchingPipeline | undefined;
     let workspaceRegistry: LineGroupWorkspacePolicyRegistry | undefined;
+    let ugcWorkflow: CloudbathUgcVideoWorkflow | undefined;
     let activeConfig: ArchiveConfig | undefined;
 
     api.registerTool(() => createCloudbathNotionTools(), {
       names: [...CLOUDBATH_NOTION_TOOL_NAMES],
       optional: true,
     });
+    api.registerTool(
+      (ctx) =>
+        ugcWorkflow?.createTool({
+          messageChannel: ctx.messageChannel,
+          senderIsOwner: ctx.senderIsOwner,
+          requesterSenderId: ctx.requesterSenderId,
+          sessionKey: ctx.sessionKey,
+          accountId: ctx.agentAccountId,
+          nativeConversationId: ctx.nativeChannelId ?? ctx.deliveryContext?.to,
+        }) ?? null,
+      { names: [CLOUDBATH_UGC_VIDEO_PREPARE_TOOL_NAME], optional: true },
+    );
 
     api.registerService({
       id: "cloudbath-line-image-archive",
@@ -102,6 +127,35 @@ export default definePluginEntry({
           bindings,
           pairingGrants,
         );
+
+        if (workspaceConfig.ugc) {
+          if (!config.notion.apiKey) {
+            throw new Error("UGC is configured but OPENCLAW_NOTION_WRITE_TOKEN is missing");
+          }
+          const pending = api.runtime.state.openKeyedStore<PendingUgcVideoScope>({
+            namespace: CLOUDBATH_UGC_PENDING_NAMESPACE,
+            maxEntries: CLOUDBATH_UGC_SCOPE_MAX_ENTRIES,
+            overflowPolicy: "evict-oldest",
+          });
+          const draftScopes = api.runtime.state.openKeyedStore<FrozenUgcVideoScope>({
+            namespace: CLOUDBATH_UGC_DRAFT_SCOPE_NAMESPACE,
+            maxEntries: CLOUDBATH_UGC_SCOPE_MAX_ENTRIES,
+            overflowPolicy: "evict-oldest",
+          });
+          const activeSessions = api.runtime.state.openKeyedStore<ActiveUgcLineSession>({
+            namespace: CLOUDBATH_UGC_ACTIVE_SESSION_NAMESPACE,
+            maxEntries: CLOUDBATH_UGC_SCOPE_MAX_ENTRIES,
+            overflowPolicy: "evict-oldest",
+          });
+          ugcWorkflow = new CloudbathUgcVideoWorkflow(
+            workspaceConfig.ugc,
+            workspaceRegistry,
+            new UgcNotionWorkflowClient(config.notion.apiKey, config.retry, logger),
+            pending,
+            draftScopes,
+            activeSessions,
+          );
+        }
 
         if (workspaceConfig.keepWatching) {
           const requiredRuntimeValues = {
@@ -193,6 +247,7 @@ export default definePluginEntry({
         pipeline = undefined;
         keepWatchingPipeline = undefined;
         workspaceRegistry = undefined;
+        ugcWorkflow = undefined;
         activeConfig = undefined;
         logger.info("archive_stopped");
       },
@@ -205,7 +260,31 @@ export default definePluginEntry({
           ? { handled: true, text: "Workspace policy service is unavailable." }
           : undefined;
       }
+      await ugcWorkflow?.observeTurn({
+        channelId: ctx.channelId,
+        accountId: ctx.accountId,
+        conversationId: ctx.conversationId,
+        sessionKey: ctx.sessionKey,
+        senderId: event.senderId,
+        senderIsOwner: event.senderIsOwner,
+      });
       return await registry.handleBeforeDispatch(event, ctx);
+    });
+
+    api.on("before_tool_call", async (event, ctx) => {
+      return await ugcWorkflow?.beforeToolCall({
+        toolName: event.toolName,
+        toolParams: event.params,
+        sessionKey: ctx.sessionKey,
+      });
+    });
+
+    api.on("after_tool_call", async (event, ctx) => {
+      await ugcWorkflow?.afterToolCall({
+        toolName: event.toolName,
+        result: event.result,
+        sessionKey: ctx.sessionKey,
+      });
     });
 
     api.on(

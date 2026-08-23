@@ -72,6 +72,7 @@ jobs:
             extensions/cloudbath-line-image-archive/src/profiles.test.ts \
             extensions/cloudbath-line-image-archive/src/r2.test.ts \
             extensions/cloudbath-line-image-archive/src/retry.test.ts \
+            extensions/cloudbath-line-image-archive/src/ugc-workflow.test.ts
 
       - name: Run setup-script Vitest suite
         if: steps.dependencies.outcome == 'success' && !cancelled()
@@ -118,6 +119,7 @@ jobs:
             extensions/line/src/video-model-preference.test.ts \
             extensions/line/src/video-outbound-staging.test.ts \
             extensions/line/src/video-owner-flow.e2e.test.ts \
+            extensions/line/src/video-ugc-scope.test.ts \
             extensions/line/src/model-catalog-tool.test.ts \
             src/agents/tools/session-status-tool.line-owner-auth.test.ts \
             extensions/line/src/session-route.test.ts \
@@ -253,6 +255,7 @@ jobs:
               test -f /app/extensions/cloudbath-line-image-archive/src/notion-tools.ts
               test -f /app/extensions/cloudbath-line-image-archive/src/group-workspace-policy.ts
               test -f /app/extensions/cloudbath-line-image-archive/src/keep-watching.ts
+              test -f /app/extensions/cloudbath-line-image-archive/src/ugc-workflow.ts
               test -f /app/extensions/cloudbath-line-image-archive/profiles/construction-site-progress.v1.json
               test -f /app/extensions/line/index.ts
               test -f /app/extensions/line/openclaw.plugin.json
@@ -262,6 +265,7 @@ jobs:
               test -f /app/dist/extensions/line/package.json
               test -f /app/extensions/line/src/outbound-media-staging.ts
               test -f /app/extensions/line/src/model-catalog-tool.ts
+              test -f /app/extensions/line/src/video-ugc-scope.ts
               test ! -f /app/extensions/line/src/natural-language-model.ts
               grep -q openrouter_account_models /app/extensions/line/src/model-catalog-tool.ts
               ! grep -q resolveAuthorizedLineNaturalModelAction /app/extensions/line/src/bot-handlers.ts
