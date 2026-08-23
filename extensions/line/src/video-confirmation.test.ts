@@ -25,6 +25,19 @@ const stageLineVideoPreviewImageMock = vi.fn(async (..._args: unknown[]) => ({
   contentLength: 10,
   sha256: "def",
 }));
+const notionValidateMock = vi.fn(async () => {});
+const notionCreateProcessingMock = vi.fn(async () => ({ pageId: "notion-page-1" }));
+const notionMarkCompletedMock = vi.fn(async () => {});
+const notionMarkFailedMock = vi.fn(async () => {});
+
+function createNotionLibraryMock() {
+  return {
+    validate: notionValidateMock,
+    createProcessing: notionCreateProcessingMock,
+    markCompleted: notionMarkCompletedMock,
+    markFailed: notionMarkFailedMock,
+  };
+}
 
 vi.mock("openclaw/plugin-sdk/video-generation-runtime", () => ({
   generateVideo: (...args: unknown[]) => generateVideoMock(...args),
@@ -138,6 +151,7 @@ async function fixture(params?: { fetchImpl?: typeof fetch; now?: () => number }
     jobStore,
     activeJobLockStore,
     resolveApiKey: async () => "sk-test",
+    createNotionLibrary: createNotionLibraryMock,
     fetchImpl: params?.fetchImpl ?? catalogFetch(),
     scheduleBackgroundWork: (run) => {
       scheduled.push(run);
@@ -179,6 +193,10 @@ beforeEach(() => {
   sendMessageLineMock.mockClear();
   stageLineOutboundVideoMock.mockClear();
   stageLineVideoPreviewImageMock.mockClear();
+  notionValidateMock.mockReset().mockResolvedValue(undefined);
+  notionCreateProcessingMock.mockReset().mockResolvedValue({ pageId: "notion-page-1" });
+  notionMarkCompletedMock.mockReset().mockResolvedValue(undefined);
+  notionMarkFailedMock.mockReset().mockResolvedValue(undefined);
   generateVideoMock.mockResolvedValue({
     videos: [{ buffer: Buffer.from("fake-video-bytes"), mimeType: "video/mp4" }],
     provider: "openrouter",
@@ -224,6 +242,33 @@ describe("createLineVideoConfirmationGate", () => {
       autoProviderFallback: false,
     });
     expect(stageLineOutboundVideoMock).toHaveBeenCalledWith(expect.any(Buffer));
+    expect(notionCreateProcessingMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        jobId: expect.any(String),
+        accountId: "acct-1",
+        conversationId: "grp-a",
+        model: "bytedance/seedance-2.5",
+        prompt: "a cat riding a skateboard",
+        actualCostUsd: 0.79,
+      }),
+    );
+    expect(generateVideoMock.mock.invocationCallOrder[0]).toBeLessThan(
+      notionCreateProcessingMock.mock.invocationCallOrder[0]!,
+    );
+    expect(notionCreateProcessingMock.mock.invocationCallOrder[0]).toBeLessThan(
+      stageLineOutboundVideoMock.mock.invocationCallOrder[0]!,
+    );
+    expect(notionMarkCompletedMock).toHaveBeenCalledWith(
+      { pageId: "notion-page-1" },
+      expect.objectContaining({
+        r2Url: "https://r2.example/video.mp4",
+        r2ObjectKey: "outbound/line-video/x.mp4",
+        actualCostUsd: 0.79,
+      }),
+    );
+    expect(notionMarkCompletedMock.mock.invocationCallOrder[0]).toBeLessThan(
+      sendMessageLineMock.mock.invocationCallOrder[0]!,
+    );
     expect(sendMessageLineMock).toHaveBeenCalledWith(
       "line:group:grp-a",
       expect.stringContaining("วิดีโอเสร็จแล้ว"),
@@ -232,6 +277,8 @@ describe("createLineVideoConfirmationGate", () => {
     const [job] = await jobStore.entries();
     expect(job?.value.status).toBe("completed");
     expect(job?.value.actualCostUsd).toBe(0.79);
+    expect(job?.value.notionPageId).toBe("notion-page-1");
+    expect(job?.value.r2ObjectKey).toBe("outbound/line-video/x.mp4");
     // running -> completed released the lock: a new draft is immediately allowed.
     expect((await activeJobLockStore.entries()).length).toBe(0);
   });
@@ -394,6 +441,55 @@ describe("createLineVideoConfirmationGate", () => {
     // running -> failed is terminal and releases the active-job lock, so it
     // never remains an active blocker for the conversation.
     expect((await activeJobLockStore.entries()).length).toBe(0);
+    expect(notionCreateProcessingMock).not.toHaveBeenCalled();
+  });
+
+  it("marks the same Notion record Failed when R2 archival fails", async () => {
+    stageLineOutboundVideoMock.mockRejectedValueOnce(new Error("R2_ACCESS_KEY_ID=secret-value"));
+    const { gate, draft, scheduled, jobStore } = await fixture();
+
+    await gate(confirmEvent(draft.draftId), CTX);
+    await scheduled[0]?.();
+
+    expect(notionCreateProcessingMock).toHaveBeenCalledTimes(1);
+    expect(notionMarkCompletedMock).not.toHaveBeenCalled();
+    expect(notionMarkFailedMock).toHaveBeenCalledWith(
+      { pageId: "notion-page-1" },
+      expect.not.stringContaining("secret-value"),
+    );
+    const [job] = await jobStore.entries();
+    expect(job?.value.status).toBe("failed");
+    expect(sendMessageLineMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("changes the same Notion record from Completed to Failed when LINE delivery fails", async () => {
+    sendMessageLineMock.mockRejectedValueOnce(new Error("LINE delivery failed"));
+    const { gate, draft, scheduled, jobStore } = await fixture();
+
+    await gate(confirmEvent(draft.draftId), CTX);
+    await scheduled[0]?.();
+
+    expect(notionMarkCompletedMock).toHaveBeenCalledTimes(1);
+    expect(notionMarkFailedMock).toHaveBeenCalledWith(
+      { pageId: "notion-page-1" },
+      "LINE delivery failed",
+    );
+    const [job] = await jobStore.entries();
+    expect(job?.value.status).toBe("failed");
+  });
+
+  it("validates Notion before the paid provider call and fails closed when unavailable", async () => {
+    notionValidateMock.mockRejectedValueOnce(new Error("Notion not configured"));
+    const { gate, draft, scheduled, jobStore } = await fixture();
+
+    await gate(confirmEvent(draft.draftId), CTX);
+    await scheduled[0]?.();
+
+    expect(generateVideoMock).not.toHaveBeenCalled();
+    expect(stageLineOutboundVideoMock).not.toHaveBeenCalled();
+    expect(notionCreateProcessingMock).not.toHaveBeenCalled();
+    const [job] = await jobStore.entries();
+    expect(job?.value.status).toBe("failed");
   });
 
   it("9: a polling/timeout failure is equally terminal and releases the lock", async () => {
