@@ -1,10 +1,25 @@
 import { validateProfileConfiguration } from "./profiles.js";
-import type { ArchiveConfig } from "./types.js";
+import type {
+  ArchiveConfig,
+  NotionTarget,
+  UgcCapabilityId,
+  WorkspacePolicyConfig,
+} from "./types.js";
 
 const DEFAULT_IMAGE_MAX_MB = 10;
 const DEFAULT_RETRY_ATTEMPTS = 4;
 const DEFAULT_RETRY_BASE_DELAY_MS = 500;
 const DEFAULT_RETRY_MAX_DELAY_MS = 8_000;
+const DEFAULT_PAIRING_TTL_MS = 10 * 60 * 1_000;
+const NOTION_ID_PATTERN = /^[0-9a-f]{32}$/;
+const UGC_CAPABILITY_IDS = [
+  "PRODUCT_LIBRARY",
+  "CHARACTER_LIBRARY",
+  "UGC_PROJECTS",
+  "UGC_SHOTS",
+  "AI_VIDEO_LIBRARY",
+  "AI_IMAGE_LIBRARY",
+] as const satisfies readonly UgcCapabilityId[];
 
 function readBoolean(value: string | undefined, fallback: boolean): boolean {
   const normalized = value?.trim().toLowerCase();
@@ -66,6 +81,86 @@ function normalizeKeyPrefix(value: string | undefined): string {
     .join("/");
 }
 
+function objectValue(value: unknown, label: string): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${label} must be an object`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function normalizedNotionId(value: unknown, label: string): string {
+  if (typeof value !== "string") {
+    throw new Error(`${label} must be a Notion ID`);
+  }
+  const normalized = value.trim().toLowerCase().replace(/-/g, "");
+  if (!NOTION_ID_PATTERN.test(normalized)) {
+    throw new Error(`${label} must be a valid Notion ID`);
+  }
+  return normalized;
+}
+
+function notionTarget(value: unknown, label: string): NotionTarget {
+  const input = objectValue(value, label);
+  return {
+    databaseId: normalizedNotionId(input.databaseId, `${label}.databaseId`),
+    dataSourceId: normalizedNotionId(input.dataSourceId, `${label}.dataSourceId`),
+  };
+}
+
+export function resolveWorkspacePolicyConfig(
+  pluginConfig: Record<string, unknown> = {},
+): WorkspacePolicyConfig {
+  const raw = pluginConfig.groupWorkspacePolicies;
+  if (raw === undefined) {
+    return { pairingTtlMs: DEFAULT_PAIRING_TTL_MS };
+  }
+  const input = objectValue(raw, "groupWorkspacePolicies");
+  const pairingTtlMs = readPositiveNumber(
+    typeof input.pairingTtlMs === "number" ? String(input.pairingTtlMs) : undefined,
+    DEFAULT_PAIRING_TTL_MS,
+    "groupWorkspacePolicies.pairingTtlMs",
+  );
+  if (pairingTtlMs > 24 * 60 * 60 * 1_000) {
+    throw new Error("groupWorkspacePolicies.pairingTtlMs must not exceed 24 hours");
+  }
+
+  let keepWatching: WorkspacePolicyConfig["keepWatching"];
+  if (input.keepWatching !== undefined) {
+    const keepWatchingInput = objectValue(
+      input.keepWatching,
+      "groupWorkspacePolicies.keepWatching",
+    );
+    const r2Prefix = normalizeKeyPrefix(
+      typeof keepWatchingInput.r2Prefix === "string" ? keepWatchingInput.r2Prefix : undefined,
+    );
+    if (!r2Prefix) {
+      throw new Error("groupWorkspacePolicies.keepWatching.r2Prefix is required");
+    }
+    keepWatching = {
+      notion: notionTarget(keepWatchingInput.notion, "groupWorkspacePolicies.keepWatching.notion"),
+      r2Prefix,
+    };
+  }
+
+  let ugc: WorkspacePolicyConfig["ugc"];
+  if (input.ugc !== undefined) {
+    const ugcInput = objectValue(input.ugc, "groupWorkspacePolicies.ugc");
+    const capabilitiesInput = objectValue(
+      ugcInput.capabilities,
+      "groupWorkspacePolicies.ugc.capabilities",
+    );
+    const capabilities = Object.fromEntries(
+      UGC_CAPABILITY_IDS.map((id) => [
+        id,
+        notionTarget(capabilitiesInput[id], `groupWorkspacePolicies.ugc.capabilities.${id}`),
+      ]),
+    ) as Record<UgcCapabilityId, NotionTarget>;
+    ugc = { capabilities };
+  }
+
+  return { pairingTtlMs, keepWatching, ugc };
+}
+
 export function resolveArchiveConfig(
   env: NodeJS.ProcessEnv = process.env,
   pluginConfig: Record<string, unknown> = {},
@@ -77,10 +172,11 @@ export function resolveArchiveConfig(
     throw new Error("IMAGE_MAX_MB must not exceed 100");
   }
 
-  const profileInput =
-    !enabled && Object.keys(pluginConfig).length === 0
-      ? { version: 1, agentProfiles: [], schemaProfiles: [] }
-      : pluginConfig;
+  const profileInput = {
+    version: pluginConfig.version ?? 1,
+    agentProfiles: pluginConfig.agentProfiles ?? [],
+    schemaProfiles: pluginConfig.schemaProfiles ?? [],
+  };
   const profiles = validateProfileConfiguration(profileInput);
   if (enabled && profiles.activeProfilesByGroupId.size === 0) {
     throw new Error("At least one active Agent Profile is required when archiving is enabled");

@@ -12,6 +12,86 @@ This additive OpenClaw plugin separates permanent image assets from configurable
 It targets OpenClaw `2026.7.2`, uses the supported `message_received` hook, and does not patch
 OpenClaw core or `extensions/line`.
 
+## LINE group workspace policies
+
+The plugin also owns a durable, model-independent registry from native LINE group ID to one of two
+initial workspace policies: `UGC` or `KEEP_WATCHING`. Bindings and one-time pairing grants use the
+existing SQLite-backed plugin state under `OPENCLAW_STATE_DIR`; the model cannot infer or mutate
+them.
+
+Only the resolved LINE owner may request a code with the exact text `สร้าง pairing UGC` or
+`สร้าง pairing KEEP_WATCHING`. The same owner redeems the short-lived code inside the target LINE
+group. Codes are account-bound, owner-bound, single-use, and expire after ten minutes by default.
+Changing policy requires a fresh code. `ยกเลิก pairing` or `unpair group` removes the binding only
+when sent by the owner inside that group.
+
+`KEEP_WATCHING` is silent: ordinary text is claimed without an assistant reply, and supported image
+events are safely read from managed inbound media, content-addressed in the existing R2 bucket, and
+written to the one configured Notion data source. Its Notion schema must contain these exact
+properties: `Name` (title), `Captured At` (date), `Source` (rich text), `Sender` (rich text),
+`Media Type` (rich text), `File Size` (number), `R2 Object Key` (rich text), `SHA-256` (rich text),
+`Status` (select), and `Record ID` (rich text). Successful ingestion never replies to the watched
+group; failures remain in durable job state and use sanitized diagnostics.
+
+`UGC` is a capability foundation only in this change. It exposes no unrestricted Notion tool and no
+automatic UGC workflow. All six capability targets must be explicitly configured:
+
+- `PRODUCT_LIBRARY`: read
+- `CHARACTER_LIBRARY`: read
+- `UGC_PROJECTS`: read/write
+- `UGC_SHOTS`: read/write
+- `AI_VIDEO_LIBRARY`: read/write
+- `AI_IMAGE_LIBRARY`: read/write
+
+Example non-secret configuration shape:
+
+```json5
+{
+  groupWorkspacePolicies: {
+    pairingTtlMs: 600000,
+    keepWatching: {
+      notion: {
+        databaseId: "<KEEP_WATCHING_DATABASE_ID>",
+        dataSourceId: "<KEEP_WATCHING_DATA_SOURCE_ID>",
+      },
+      r2Prefix: "workspace/keep-watching",
+    },
+    ugc: {
+      capabilities: {
+        PRODUCT_LIBRARY: {
+          databaseId: "<PRODUCT_LIBRARY_DATABASE_ID>",
+          dataSourceId: "<PRODUCT_LIBRARY_DATA_SOURCE_ID>",
+        },
+        CHARACTER_LIBRARY: {
+          databaseId: "<CHARACTER_LIBRARY_DATABASE_ID>",
+          dataSourceId: "<CHARACTER_LIBRARY_DATA_SOURCE_ID>",
+        },
+        UGC_PROJECTS: {
+          databaseId: "<UGC_PROJECTS_DATABASE_ID>",
+          dataSourceId: "<UGC_PROJECTS_DATA_SOURCE_ID>",
+        },
+        UGC_SHOTS: {
+          databaseId: "<UGC_SHOTS_DATABASE_ID>",
+          dataSourceId: "<UGC_SHOTS_DATA_SOURCE_ID>",
+        },
+        AI_VIDEO_LIBRARY: {
+          databaseId: "<AI_VIDEO_LIBRARY_DATABASE_ID>",
+          dataSourceId: "<AI_VIDEO_LIBRARY_DATA_SOURCE_ID>",
+        },
+        AI_IMAGE_LIBRARY: {
+          databaseId: "<AI_IMAGE_LIBRARY_DATABASE_ID>",
+          dataSourceId: "<AI_IMAGE_LIBRARY_DATA_SOURCE_ID>",
+        },
+      },
+    },
+  },
+}
+```
+
+Missing targets or runtime credentials fail closed. Every ingest job freezes its group, policy,
+workflow type, source capabilities, Notion target, and R2 prefix before processing. UGC cannot use a
+KEEP_WATCHING target and KEEP_WATCHING cannot resolve UGC capability slots.
+
 ## Universal asset identity
 
 R2 is the permanent, shared asset archive. Keys are content-addressed:

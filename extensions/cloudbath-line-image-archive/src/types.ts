@@ -162,6 +162,74 @@ export type ArchiveConfig = {
   };
 };
 
+export type LineGroupWorkspacePolicyId = "UGC" | "KEEP_WATCHING";
+
+export type UgcCapabilityId =
+  | "PRODUCT_LIBRARY"
+  | "CHARACTER_LIBRARY"
+  | "UGC_PROJECTS"
+  | "UGC_SHOTS"
+  | "AI_VIDEO_LIBRARY"
+  | "AI_IMAGE_LIBRARY";
+
+export type UgcCapabilityAccess = "READ" | "READ_WRITE";
+
+export type NotionTarget = {
+  databaseId: string;
+  dataSourceId: string;
+};
+
+export type WorkspacePolicyConfig = {
+  pairingTtlMs: number;
+  keepWatching?: {
+    notion: NotionTarget;
+    r2Prefix: string;
+  };
+  ugc?: {
+    capabilities: Readonly<Record<UgcCapabilityId, NotionTarget>>;
+  };
+};
+
+export type LineGroupPolicyBinding = {
+  accountId: string;
+  groupId: string;
+  policyId: LineGroupWorkspacePolicyId;
+  boundByOwnerId: string;
+  boundAt: string;
+};
+
+export type LineGroupPairingGrant = {
+  accountId: string;
+  policyId: LineGroupWorkspacePolicyId;
+  ownerId: string;
+  createdAt: string;
+  expiresAt: string;
+};
+
+export type FrozenWorkspaceJobScope = Readonly<{
+  lineGroupId: string;
+  policyId: LineGroupWorkspacePolicyId;
+  jobType: "KEEP_WATCHING_MEDIA" | "UGC_WORKFLOW";
+  sourceCapabilityIds: readonly UgcCapabilityId[];
+  targetDatabaseId: string;
+  targetDataSourceId: string;
+  r2Prefix: string;
+}>;
+
+export type KeepWatchingJobRecord = {
+  key: string;
+  status: "NEW" | "PROCESSED" | "ERROR";
+  scope: FrozenWorkspaceJobScope;
+  job: InboundImageJob;
+  attempts: number;
+  updatedAt: string;
+  sha256?: string;
+  objectKey?: string;
+  fileSize?: number;
+  notionPageId?: string;
+  error?: string;
+};
+
 export type InboundImageJob = {
   accountId?: string;
   groupId: string;

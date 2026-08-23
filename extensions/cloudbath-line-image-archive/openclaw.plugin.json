@@ -50,6 +50,15 @@
         "items": {
           "type": "object"
         }
+      },
+      "groupWorkspacePolicies": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "pairingTtlMs": { "type": "number", "minimum": 1, "maximum": 86400000 },
+          "keepWatching": { "type": "object" },
+          "ugc": { "type": "object" }
+        }
       }
     }
   }
