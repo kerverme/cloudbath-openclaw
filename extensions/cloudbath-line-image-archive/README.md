@@ -216,7 +216,7 @@ pnpm exec tsx scripts/cloudbath/setup-notion-image-archive.ts \
 Review the proposal, then explicitly approve its exact `proposalId`:
 
 ```bash
-NOTION_API_KEY="$NOTION_API_KEY" \
+OPENCLAW_NOTION_WRITE_TOKEN="$OPENCLAW_NOTION_WRITE_TOKEN" \
 NOTION_PARENT_PAGE_ID="$NOTION_PARENT_PAGE_ID" \
 pnpm exec tsx scripts/cloudbath/setup-notion-image-archive.ts \
   --mode create \
@@ -229,7 +229,7 @@ pnpm exec tsx scripts/cloudbath/setup-notion-image-archive.ts \
 Bind or validate an existing database without changing it:
 
 ```bash
-NOTION_API_KEY="$NOTION_API_KEY" \
+OPENCLAW_NOTION_WRITE_TOKEN="$OPENCLAW_NOTION_WRITE_TOKEN" \
 NOTION_DATABASE_ID="$NOTION_DATABASE_ID" \
 pnpm exec tsx scripts/cloudbath/setup-notion-image-archive.ts \
   --mode bind \
@@ -241,7 +241,7 @@ pnpm exec tsx scripts/cloudbath/setup-notion-image-archive.ts \
 Create a migration proposal:
 
 ```bash
-NOTION_API_KEY="$NOTION_API_KEY" \
+OPENCLAW_NOTION_WRITE_TOKEN="$OPENCLAW_NOTION_WRITE_TOKEN" \
 NOTION_DATABASE_ID="$NOTION_DATABASE_ID" \
 pnpm exec tsx scripts/cloudbath/setup-notion-image-archive.ts \
   --mode migration-plan \
@@ -255,27 +255,26 @@ A migration proposal reports missing, incompatible, possible-rename, and unrelat
 It never applies them. Administrators must review and make any schema changes separately.
 
 `NOTION_PARENT_PAGE_ID` and `NOTION_DATABASE_ID` are setup inputs. Runtime reads only
-`NOTION_API_KEY`; each runtime database ID comes from its Agent Profile. After setup, copy the
+`OPENCLAW_NOTION_WRITE_TOKEN`; each runtime database ID comes from its Agent Profile. After setup, copy the
 reported database ID into that Agent Profile's `notionDatabaseId` configuration field. Add only
-`NOTION_API_KEY` to Railway for Notion runtime access; do not create a global
+`OPENCLAW_NOTION_WRITE_TOKEN` to Railway for Notion runtime write access; do not create a global
 `NOTION_DATABASE_ID` runtime variable.
 
 ## Environment variables
 
-| Variable                           | Runtime purpose                                               |
-| ---------------------------------- | ------------------------------------------------------------- |
-| `CLOUDBATH_IMAGE_ARCHIVE_ENABLED`  | Master switch; defaults to `false`.                           |
-| `CLOUDBATH_IMAGE_ANALYSIS_ENABLED` | Enables schema-based extraction; defaults to `false`.         |
-| `IMAGE_MAX_MB`                     | Archive limit, default `10`, maximum `100`.                   |
-| `R2_ACCOUNT_ID`                    | Cloudflare account ID.                                        |
-| `R2_ACCESS_KEY_ID`                 | Bucket-scoped S3 access key ID.                               |
-| `R2_SECRET_ACCESS_KEY`             | Bucket-scoped S3 secret.                                      |
-| `R2_BUCKET_NAME`                   | Existing private bucket.                                      |
-| `R2_ENDPOINT`                      | Optional HTTPS S3 endpoint.                                   |
-| `R2_KEY_PREFIX`                    | Optional prefix before `assets/`.                             |
-| `NOTION_API_KEY`                   | Notion integration credential shared by configured databases. |
-| `NOTION_WELLNESS_READ_TOKEN`       | Read-only Wellness tool credential.                           |
-| `NOTION_CONSTRUCTION_WRITE_TOKEN`  | Construction Upload Inbox tool credential.                    |
+| Variable                           | Runtime purpose                                              |
+| ---------------------------------- | ------------------------------------------------------------ |
+| `CLOUDBATH_IMAGE_ARCHIVE_ENABLED`  | Master switch; defaults to `false`.                          |
+| `CLOUDBATH_IMAGE_ANALYSIS_ENABLED` | Enables schema-based extraction; defaults to `false`.        |
+| `IMAGE_MAX_MB`                     | Archive limit, default `10`, maximum `100`.                  |
+| `R2_ACCOUNT_ID`                    | Cloudflare account ID.                                       |
+| `R2_ACCESS_KEY_ID`                 | Bucket-scoped S3 access key ID.                              |
+| `R2_SECRET_ACCESS_KEY`             | Bucket-scoped S3 secret.                                     |
+| `R2_BUCKET_NAME`                   | Existing private bucket.                                     |
+| `R2_ENDPOINT`                      | Optional HTTPS S3 endpoint.                                  |
+| `R2_KEY_PREFIX`                    | Optional prefix before `assets/`.                            |
+| `OPENCLAW_NOTION_WRITE_TOKEN`      | Canonical credential for allowlisted OpenClaw Notion writes. |
+| `NOTION_WELLNESS_READ_TOKEN`       | Read-only Wellness tool credential.                          |
 
 LINE group allowlists and Notion database IDs are no longer global environment variables.
 
@@ -293,8 +292,8 @@ tool is explicitly allowlisted:
   updates resolve a page by its `Record ID` inside that data source rather than accepting a page
   or database target from the model.
 
-Both connections are independently authenticated. The tools read their credentials only from
-`NOTION_WELLNESS_READ_TOKEN` and `NOTION_CONSTRUCTION_WRITE_TOKEN`, respectively. The Wellness
+Read and write access remain independently authenticated. Wellness tools use only
+`NOTION_WELLNESS_READ_TOKEN`; Construction writes use only `OPENCLAW_NOTION_WRITE_TOKEN`. The Wellness
 integration should have read-content capability only and must be shared with the configured
 Wellness root page so its direct child databases are visible. The Construction integration needs read,
 insert, and update-content capabilities on the Upload Inbox so the plugin can validate its schema,

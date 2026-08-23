@@ -96,7 +96,7 @@ describe("generic Notion Schema Profile setup", () => {
     const reads: string[] = [];
     const env = new Proxy(
       {
-        NOTION_API_KEY: "token-placeholder",
+        OPENCLAW_NOTION_WRITE_TOKEN: "token-placeholder",
         NOTION_PARENT_PAGE_ID: "parent-1",
         NOTION_DATABASE_ID: undefined,
       },
@@ -114,7 +114,11 @@ describe("generic Notion Schema Profile setup", () => {
       parentPageId: "parent-1",
       databaseId: undefined,
     });
-    expect(reads).toEqual(["NOTION_API_KEY", "NOTION_PARENT_PAGE_ID", "NOTION_DATABASE_ID"]);
+    expect(reads).toEqual([
+      "OPENCLAW_NOTION_WRITE_TOKEN",
+      "NOTION_PARENT_PAGE_ID",
+      "NOTION_DATABASE_ID",
+    ]);
     const fetchImpl = vi.fn();
     const result = await runNotionSetup(
       { mode: "plan", schemaProfile: schemaProfile() },

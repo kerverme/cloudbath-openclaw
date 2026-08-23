@@ -104,7 +104,9 @@ export function resolveArchiveConfig(
       keyPrefix: normalizeKeyPrefix(env.R2_KEY_PREFIX),
     },
     notion: {
-      apiKey: enabled ? readRequired(env, "NOTION_API_KEY") : env.NOTION_API_KEY?.trim() || "",
+      apiKey: enabled
+        ? readRequired(env, "OPENCLAW_NOTION_WRITE_TOKEN")
+        : env.OPENCLAW_NOTION_WRITE_TOKEN?.trim() || "",
     },
     retry: {
       maxAttempts: DEFAULT_RETRY_ATTEMPTS,

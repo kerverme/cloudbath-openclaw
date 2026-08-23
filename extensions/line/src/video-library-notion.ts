@@ -8,10 +8,9 @@
  */
 const NOTION_BASE_URL = "https://api.notion.com";
 const NOTION_API_VERSION = "2026-03-11";
-// Reuse the existing profile-scoped archive integration. The separate
-// NOTION_CONSTRUCTION_WRITE_TOKEN remains exclusive to its hardcoded Upload
-// Inbox tool and is never broadened to this database.
-const NOTION_TOKEN_ENV = "NOTION_API_KEY";
+// All OpenClaw Notion writers use the canonical write credential. Runtime
+// never falls back to a legacy or read-only Notion token.
+const NOTION_TOKEN_ENV = "OPENCLAW_NOTION_WRITE_TOKEN";
 const NOTION_DATABASE_ID_ENV = "NOTION_VIDEO_LIBRARY_DATABASE_ID";
 const NOTION_DATA_SOURCE_ID_ENV = "NOTION_VIDEO_LIBRARY_DATA_SOURCE_ID";
 const REQUEST_TIMEOUT_MS = 15_000;
