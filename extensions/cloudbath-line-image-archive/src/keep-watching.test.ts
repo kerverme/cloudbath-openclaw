@@ -226,7 +226,10 @@ describe("KEEP_WATCHING fixed Notion target", () => {
       { id: "page-1" },
     ];
     const fetchImpl = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
-      requests.push({ url: String(url), init });
+      requests.push({
+        url: typeof url === "string" ? url : url instanceof URL ? url.href : url.url,
+        init,
+      });
       return new Response(JSON.stringify(responses.shift()), {
         status: 200,
         headers: { "Content-Type": "application/json" },
@@ -255,7 +258,12 @@ describe("KEEP_WATCHING fixed Notion target", () => {
       `https://api.notion.com/v1/data_sources/${dataSourceId}/query`,
       "https://api.notion.com/v1/pages",
     ]);
-    expect(JSON.parse(String(requests[3]!.init?.body))).toMatchObject({
+    const createBody = requests[3]!.init?.body;
+    expect(typeof createBody).toBe("string");
+    if (typeof createBody !== "string") {
+      throw new Error("Expected the Notion create body to be JSON text");
+    }
+    expect(JSON.parse(createBody)).toMatchObject({
       parent: { type: "data_source_id", data_source_id: dataSourceId },
     });
   });
