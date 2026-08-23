@@ -157,6 +157,12 @@ function buildFlow() {
     activeJobLockStore,
     resolveApiKey: async () => "sk-test",
     fetchImpl,
+    createNotionLibrary: () => ({
+      validate: async () => {},
+      createProcessing: async () => ({ pageId: "notion-page-1" }),
+      markCompleted: async () => {},
+      markFailed: async () => {},
+    }),
     scheduleBackgroundWork: (run) => {
       scheduled.push(run);
     },
