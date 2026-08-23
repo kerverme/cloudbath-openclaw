@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { resolveArchiveConfig } from "./config.js";
+import { resolveArchiveConfig, resolveWorkspacePolicyConfig } from "./config.js";
 
 function pluginConfig() {
   return {
@@ -77,7 +77,7 @@ function enabledEnv(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
     R2_SECRET_ACCESS_KEY: "secret-placeholder",
     R2_BUCKET_NAME: "bucket-placeholder",
     R2_KEY_PREFIX: "cloudbath/images",
-    NOTION_API_KEY: "notion-placeholder",
+    OPENCLAW_NOTION_WRITE_TOKEN: "notion-placeholder",
     ...overrides,
   };
 }
@@ -97,9 +97,61 @@ describe("resolveArchiveConfig", () => {
     expect(config.r2.keyPrefix).toBe("cloudbath/images");
   });
 
+  it("fails closed without the canonical Notion write credential when enabled", () => {
+    expect(() =>
+      resolveArchiveConfig(enabledEnv({ OPENCLAW_NOTION_WRITE_TOKEN: "" }), pluginConfig()),
+    ).toThrow("OPENCLAW_NOTION_WRITE_TOKEN is required");
+  });
+
   it("rejects non-HTTPS R2 endpoints", () => {
     expect(() =>
       resolveArchiveConfig(enabledEnv({ R2_ENDPOINT: "http://example.invalid" }), pluginConfig()),
     ).toThrow("HTTPS");
+  });
+});
+
+describe("resolveWorkspacePolicyConfig", () => {
+  it("accepts only explicit fixed KEEP_WATCHING and UGC targets", () => {
+    const target = (value: string) => ({
+      databaseId: value.repeat(32),
+      dataSourceId: value.toUpperCase().repeat(32),
+    });
+    const config = resolveWorkspacePolicyConfig({
+      groupWorkspacePolicies: {
+        keepWatching: { notion: target("a"), r2Prefix: "watch/media" },
+        ugc: {
+          capabilities: {
+            PRODUCT_LIBRARY: target("1"),
+            CHARACTER_LIBRARY: target("2"),
+            UGC_PROJECTS: target("3"),
+            UGC_SHOTS: target("4"),
+            AI_VIDEO_LIBRARY: target("5"),
+            AI_IMAGE_LIBRARY: target("6"),
+          },
+        },
+      },
+    });
+    expect(config.keepWatching).toEqual({
+      notion: { databaseId: "a".repeat(32), dataSourceId: "a".repeat(32) },
+      r2Prefix: "watch/media",
+    });
+    expect(config.ugc?.capabilities.PRODUCT_LIBRARY.databaseId).toBe("1".repeat(32));
+  });
+
+  it("fails closed when a required UGC capability target is missing", () => {
+    expect(() =>
+      resolveWorkspacePolicyConfig({
+        groupWorkspacePolicies: { ugc: { capabilities: {} } },
+      }),
+    ).toThrow("PRODUCT_LIBRARY");
+  });
+
+  it("does not let policy configuration replace Agent Profile validation input", () => {
+    expect(() =>
+      resolveArchiveConfig(enabledEnv(), {
+        ...pluginConfig(),
+        groupWorkspacePolicies: { pairingTtlMs: 60_000 },
+      }),
+    ).not.toThrow();
   });
 });

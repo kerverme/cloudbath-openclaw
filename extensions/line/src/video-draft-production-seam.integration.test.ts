@@ -356,6 +356,12 @@ describe(`LINE production outbound seam for '${PRODUCTION_REQUEST}'`, () => {
         ) as PluginStateKeyedStore<LineVideoActiveJobLock>,
         resolveApiKey: async () => "test-openrouter-key",
         fetchImpl: globalThis.fetch,
+        createNotionLibrary: () => ({
+          validate: async () => {},
+          createProcessing: async () => ({ pageId: "notion-test-page" }),
+          markCompleted: async () => {},
+          markFailed: async () => {},
+        }),
         scheduleBackgroundWork: (run) => scheduled.push(run),
       });
       const confirmEvent = {

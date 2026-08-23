@@ -33,7 +33,9 @@ export type LineVideoJob = {
   submittedAt: number;
   estimatedCostUsd: number;
   actualCostUsd?: number;
+  notionPageId?: string;
   videoUrl?: string;
+  r2ObjectKey?: string;
   error?: string;
 };
 
@@ -79,7 +81,16 @@ export async function updateLineVideoJob(params: {
   store: LineVideoJobStore;
   jobId: string;
   patch: Partial<
-    Pick<LineVideoJob, "status" | "openRouterJobId" | "actualCostUsd" | "videoUrl" | "error">
+    Pick<
+      LineVideoJob,
+      | "status"
+      | "openRouterJobId"
+      | "actualCostUsd"
+      | "notionPageId"
+      | "videoUrl"
+      | "r2ObjectKey"
+      | "error"
+    >
   >;
 }): Promise<LineVideoJob | undefined> {
   if (!params.store.update) {

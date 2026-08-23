@@ -121,7 +121,7 @@ function config() {
       R2_ACCESS_KEY_ID: "access",
       R2_SECRET_ACCESS_KEY: "secret",
       R2_BUCKET_NAME: "bucket",
-      NOTION_API_KEY: "notion",
+      OPENCLAW_NOTION_WRITE_TOKEN: "notion",
     },
     rawProfiles(),
   );

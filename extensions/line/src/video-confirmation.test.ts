@@ -25,12 +25,32 @@ const stageLineVideoPreviewImageMock = vi.fn(async (..._args: unknown[]) => ({
   contentLength: 10,
   sha256: "def",
 }));
+const notionValidateMock = vi.fn(async () => {});
+const notionCreateProcessingMock = vi.fn(async () => ({ pageId: "notion-page-1" }));
+const notionMarkCompletedMock = vi.fn(async () => {});
+const notionMarkFailedMock = vi.fn(async () => {});
+const notionMarkUgcProcessingMock = vi.fn(async () => {});
+const notionMarkUgcCompletedMock = vi.fn(async () => {});
+const notionMarkUgcFailedMock = vi.fn(async () => {});
+const runtimeConfigMock = vi.hoisted(() => ({ current: {} as Record<string, unknown> }));
+
+function createNotionLibraryMock() {
+  return {
+    validate: notionValidateMock,
+    createProcessing: notionCreateProcessingMock,
+    markCompleted: notionMarkCompletedMock,
+    markFailed: notionMarkFailedMock,
+    markUgcProcessing: notionMarkUgcProcessingMock,
+    markUgcCompleted: notionMarkUgcCompletedMock,
+    markUgcFailed: notionMarkUgcFailedMock,
+  };
+}
 
 vi.mock("openclaw/plugin-sdk/video-generation-runtime", () => ({
   generateVideo: (...args: unknown[]) => generateVideoMock(...args),
 }));
 vi.mock("openclaw/plugin-sdk/runtime-config-snapshot", () => ({
-  getRuntimeConfig: () => ({}),
+  getRuntimeConfig: () => runtimeConfigMock.current,
 }));
 vi.mock("openclaw/plugin-sdk/provider-auth", () => ({
   resolveOpenClawAgentDir: () => "/agent-dir",
@@ -54,6 +74,8 @@ const { createLineVideoConfirmationGate, parseLineVideoConfirmationCode } =
 const { createLineVideoDraft } = await import("./video-draft-store.js");
 import type { LineVideoDraft } from "./video-draft-store.js";
 import type { LineVideoActiveJobLock, LineVideoJob } from "./video-job-store.js";
+import type { LineGroupPolicyBinding, LineVideoUgcScope } from "./video-ugc-scope.js";
+import type { LineVideoWorkspaceRuntime } from "./video-workspace-runtime.js";
 
 function createMemoryStore<T>(): PluginStateKeyedStore<T> {
   const values = new Map<string, T>();
@@ -127,8 +149,20 @@ function catalogFetch(
 
 const OWNER_ID = "U-owner";
 const MEMBER_ID = "U-member";
+const UGC_CAPABILITIES = {
+  PRODUCT_LIBRARY: { databaseId: "a".repeat(32), dataSourceId: "1".repeat(32) },
+  CHARACTER_LIBRARY: { databaseId: "b".repeat(32), dataSourceId: "2".repeat(32) },
+  UGC_PROJECTS: { databaseId: "c".repeat(32), dataSourceId: "3".repeat(32) },
+  UGC_SHOTS: { databaseId: "d".repeat(32), dataSourceId: "4".repeat(32) },
+  AI_VIDEO_LIBRARY: { databaseId: "e".repeat(32), dataSourceId: "5".repeat(32) },
+  AI_IMAGE_LIBRARY: { databaseId: "f".repeat(32), dataSourceId: "6".repeat(32) },
+} as const;
 
-async function fixture(params?: { fetchImpl?: typeof fetch; now?: () => number }) {
+async function fixture(params?: {
+  fetchImpl?: typeof fetch;
+  now?: () => number;
+  workspaceRuntime?: LineVideoWorkspaceRuntime;
+}) {
   const draftStore = createMemoryStore<LineVideoDraft>();
   const jobStore = createMemoryStore<LineVideoJob>();
   const activeJobLockStore = createMemoryStore<LineVideoActiveJobLock>();
@@ -138,6 +172,8 @@ async function fixture(params?: { fetchImpl?: typeof fetch; now?: () => number }
     jobStore,
     activeJobLockStore,
     resolveApiKey: async () => "sk-test",
+    createNotionLibrary: createNotionLibraryMock,
+    ...(params?.workspaceRuntime ? { workspaceRuntime: params.workspaceRuntime } : {}),
     fetchImpl: params?.fetchImpl ?? catalogFetch(),
     scheduleBackgroundWork: (run) => {
       scheduled.push(run);
@@ -162,6 +198,24 @@ async function fixture(params?: { fetchImpl?: typeof fetch; now?: () => number }
   return { gate, draftStore, jobStore, activeJobLockStore, draft, scheduled };
 }
 
+function createWorkspaceRuntime(params: {
+  binding?: LineGroupPolicyBinding;
+  scopeStore?: PluginStateKeyedStore<LineVideoUgcScope>;
+}): LineVideoWorkspaceRuntime {
+  return {
+    async lookupBinding(accountId, groupId) {
+      const binding = params.binding;
+      return binding?.accountId === accountId && binding.groupId === groupId ? binding : undefined;
+    },
+    async lookupUgcDraftScope(draftId) {
+      return await params.scopeStore?.lookup(draftId);
+    },
+    async consumeUgcDraftScope(draftId) {
+      return await params.scopeStore?.consume(draftId);
+    },
+  };
+}
+
 const CTX = { accountId: "acct-1", conversationId: "grp-a" };
 
 function confirmEvent(draftId: string, overrides?: { senderId?: string; senderIsOwner?: boolean }) {
@@ -179,6 +233,14 @@ beforeEach(() => {
   sendMessageLineMock.mockClear();
   stageLineOutboundVideoMock.mockClear();
   stageLineVideoPreviewImageMock.mockClear();
+  notionValidateMock.mockReset().mockResolvedValue(undefined);
+  notionCreateProcessingMock.mockReset().mockResolvedValue({ pageId: "notion-page-1" });
+  notionMarkCompletedMock.mockReset().mockResolvedValue(undefined);
+  notionMarkFailedMock.mockReset().mockResolvedValue(undefined);
+  notionMarkUgcProcessingMock.mockReset().mockResolvedValue(undefined);
+  notionMarkUgcCompletedMock.mockReset().mockResolvedValue(undefined);
+  notionMarkUgcFailedMock.mockReset().mockResolvedValue(undefined);
+  runtimeConfigMock.current = {};
   generateVideoMock.mockResolvedValue({
     videos: [{ buffer: Buffer.from("fake-video-bytes"), mimeType: "video/mp4" }],
     provider: "openrouter",
@@ -224,6 +286,33 @@ describe("createLineVideoConfirmationGate", () => {
       autoProviderFallback: false,
     });
     expect(stageLineOutboundVideoMock).toHaveBeenCalledWith(expect.any(Buffer));
+    expect(notionCreateProcessingMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        jobId: expect.any(String),
+        accountId: "acct-1",
+        conversationId: "grp-a",
+        model: "bytedance/seedance-2.5",
+        prompt: "a cat riding a skateboard",
+        actualCostUsd: 0.79,
+      }),
+    );
+    expect(generateVideoMock.mock.invocationCallOrder[0]).toBeLessThan(
+      notionCreateProcessingMock.mock.invocationCallOrder[0]!,
+    );
+    expect(notionCreateProcessingMock.mock.invocationCallOrder[0]).toBeLessThan(
+      stageLineOutboundVideoMock.mock.invocationCallOrder[0]!,
+    );
+    expect(notionMarkCompletedMock).toHaveBeenCalledWith(
+      { pageId: "notion-page-1" },
+      expect.objectContaining({
+        r2Url: "https://r2.example/video.mp4",
+        r2ObjectKey: "outbound/line-video/x.mp4",
+        actualCostUsd: 0.79,
+      }),
+    );
+    expect(notionMarkCompletedMock.mock.invocationCallOrder[0]).toBeLessThan(
+      sendMessageLineMock.mock.invocationCallOrder[0]!,
+    );
     expect(sendMessageLineMock).toHaveBeenCalledWith(
       "line:group:grp-a",
       expect.stringContaining("วิดีโอเสร็จแล้ว"),
@@ -232,6 +321,8 @@ describe("createLineVideoConfirmationGate", () => {
     const [job] = await jobStore.entries();
     expect(job?.value.status).toBe("completed");
     expect(job?.value.actualCostUsd).toBe(0.79);
+    expect(job?.value.notionPageId).toBe("notion-page-1");
+    expect(job?.value.r2ObjectKey).toBe("outbound/line-video/x.mp4");
     // running -> completed released the lock: a new draft is immediately allowed.
     expect((await activeJobLockStore.entries()).length).toBe(0);
   });
@@ -276,6 +367,124 @@ describe("createLineVideoConfirmationGate", () => {
     expect(scheduled.length).toBe(0);
     // The draft must still be usable by the real owner afterward.
     expect(await draftStore.lookup(draft.draftId)).toMatchObject({ draftId: draft.draftId });
+  });
+
+  it("requires a frozen UGC scope for a group paired to UGC", async () => {
+    const binding: LineGroupPolicyBinding = {
+      accountId: "acct-1",
+      groupId: "grp-a",
+      policyId: "UGC",
+      boundByOwnerId: OWNER_ID,
+      boundAt: "2026-08-23T00:00:00.000Z",
+    };
+    const { gate, draft, scheduled, draftStore } = await fixture({
+      workspaceRuntime: createWorkspaceRuntime({ binding }),
+    });
+
+    await expect(gate(confirmEvent(draft.draftId), CTX)).resolves.toMatchObject({
+      handled: true,
+      text: expect.stringContaining("workspace scope"),
+    });
+    expect(await draftStore.lookup(draft.draftId)).toMatchObject({ draftId: draft.draftId });
+    expect(scheduled).toHaveLength(0);
+    expect(generateVideoMock).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when workspace policies are configured but their owning runtime is absent", async () => {
+    runtimeConfigMock.current = {
+      plugins: {
+        entries: {
+          "cloudbath-line-image-archive": {
+            config: { groupWorkspacePolicies: { ugc: { capabilities: UGC_CAPABILITIES } } },
+          },
+        },
+      },
+    };
+    const { gate, draft, scheduled, draftStore } = await fixture();
+
+    await expect(gate(confirmEvent(draft.draftId), CTX)).resolves.toEqual({
+      handled: true,
+      text: "Workspace policy service is unavailable.",
+    });
+    expect(await draftStore.lookup(draft.draftId)).toMatchObject({ draftId: draft.draftId });
+    expect(scheduled).toHaveLength(0);
+    expect(generateVideoMock).not.toHaveBeenCalled();
+  });
+
+  it("links a validated UGC scope through confirmation, Notion, R2, and completion", async () => {
+    runtimeConfigMock.current = {
+      plugins: {
+        entries: {
+          "cloudbath-line-image-archive": {
+            config: { groupWorkspacePolicies: { ugc: { capabilities: UGC_CAPABILITIES } } },
+          },
+        },
+      },
+    };
+    const ugcScopeStore = createMemoryStore<LineVideoUgcScope>();
+    const binding: LineGroupPolicyBinding = {
+      accountId: "acct-1",
+      groupId: "grp-a",
+      policyId: "UGC",
+      boundByOwnerId: OWNER_ID,
+      boundAt: "2026-08-23T00:00:00.000Z",
+    };
+    const { gate, draft, scheduled } = await fixture({
+      workspaceRuntime: createWorkspaceRuntime({ binding, scopeStore: ugcScopeStore }),
+    });
+    const scope: LineVideoUgcScope = {
+      version: 1,
+      policyId: "UGC",
+      accountId: "acct-1",
+      lineGroupId: "grp-a",
+      ownerSenderId: OWNER_ID,
+      productPageId: "product-page",
+      characterPageId: "character-page",
+      projectPageId: "project-page",
+      shotPageIds: ["shot-1", "shot-2", "shot-3"],
+      referenceAssets: [],
+      frozenPrompt: draft.prompt,
+      durationSeconds: draft.durationSeconds,
+      aspectRatio: draft.aspectRatio,
+      resolution: draft.resolution,
+      audio: draft.audio,
+      capabilities: UGC_CAPABILITIES,
+      r2Prefix: "outbound/line-video",
+      createdAt: "2026-08-23T00:00:00.000Z",
+    };
+    await ugcScopeStore.register(draft.draftId, scope);
+
+    expect((await gate(confirmEvent(draft.draftId), CTX))?.handled).toBe(true);
+    expect(scheduled).toHaveLength(1);
+    await scheduled[0]?.();
+
+    expect(notionCreateProcessingMock).toHaveBeenCalledWith(
+      expect.objectContaining({ ugcScope: scope }),
+    );
+    expect(notionMarkUgcProcessingMock).toHaveBeenCalledWith(scope);
+    expect(notionMarkUgcCompletedMock).toHaveBeenCalledWith(scope, 0.79);
+    expect(stageLineOutboundVideoMock).toHaveBeenCalledTimes(1);
+    expect(sendMessageLineMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps KEEP_WATCHING groups outside every paid video confirmation path", async () => {
+    const binding: LineGroupPolicyBinding = {
+      accountId: "acct-1",
+      groupId: "grp-a",
+      policyId: "KEEP_WATCHING",
+      boundByOwnerId: OWNER_ID,
+      boundAt: "2026-08-23T00:00:00.000Z",
+    };
+    const { gate, draft, scheduled } = await fixture({
+      workspaceRuntime: createWorkspaceRuntime({ binding }),
+    });
+
+    await expect(gate(confirmEvent(draft.draftId), CTX)).resolves.toMatchObject({
+      handled: true,
+      text: expect.stringContaining("ไม่อนุญาต"),
+    });
+    expect(scheduled).toHaveLength(0);
+    expect(generateVideoMock).not.toHaveBeenCalled();
   });
 
   it("binds a confirmation code to the owner that created it", async () => {
@@ -394,6 +603,55 @@ describe("createLineVideoConfirmationGate", () => {
     // running -> failed is terminal and releases the active-job lock, so it
     // never remains an active blocker for the conversation.
     expect((await activeJobLockStore.entries()).length).toBe(0);
+    expect(notionCreateProcessingMock).not.toHaveBeenCalled();
+  });
+
+  it("marks the same Notion record Failed when R2 archival fails", async () => {
+    stageLineOutboundVideoMock.mockRejectedValueOnce(new Error("R2_ACCESS_KEY_ID=secret-value"));
+    const { gate, draft, scheduled, jobStore } = await fixture();
+
+    await gate(confirmEvent(draft.draftId), CTX);
+    await scheduled[0]?.();
+
+    expect(notionCreateProcessingMock).toHaveBeenCalledTimes(1);
+    expect(notionMarkCompletedMock).not.toHaveBeenCalled();
+    expect(notionMarkFailedMock).toHaveBeenCalledWith(
+      { pageId: "notion-page-1" },
+      expect.not.stringContaining("secret-value"),
+    );
+    const [job] = await jobStore.entries();
+    expect(job?.value.status).toBe("failed");
+    expect(sendMessageLineMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("changes the same Notion record from Completed to Failed when LINE delivery fails", async () => {
+    sendMessageLineMock.mockRejectedValueOnce(new Error("LINE delivery failed"));
+    const { gate, draft, scheduled, jobStore } = await fixture();
+
+    await gate(confirmEvent(draft.draftId), CTX);
+    await scheduled[0]?.();
+
+    expect(notionMarkCompletedMock).toHaveBeenCalledTimes(1);
+    expect(notionMarkFailedMock).toHaveBeenCalledWith(
+      { pageId: "notion-page-1" },
+      "LINE delivery failed",
+    );
+    const [job] = await jobStore.entries();
+    expect(job?.value.status).toBe("failed");
+  });
+
+  it("validates Notion before the paid provider call and fails closed when unavailable", async () => {
+    notionValidateMock.mockRejectedValueOnce(new Error("Notion not configured"));
+    const { gate, draft, scheduled, jobStore } = await fixture();
+
+    await gate(confirmEvent(draft.draftId), CTX);
+    await scheduled[0]?.();
+
+    expect(generateVideoMock).not.toHaveBeenCalled();
+    expect(stageLineOutboundVideoMock).not.toHaveBeenCalled();
+    expect(notionCreateProcessingMock).not.toHaveBeenCalled();
+    const [job] = await jobStore.entries();
+    expect(job?.value.status).toBe("failed");
   });
 
   it("9: a polling/timeout failure is equally terminal and releases the lock", async () => {

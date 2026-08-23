@@ -176,7 +176,6 @@ export default defineBundledChannelEntry({
       maxEntries: LINE_VIDEO_ACTIVE_JOB_MAX_ENTRIES,
       defaultTtlMs: LINE_VIDEO_JOB_STALE_RUNNING_MS,
     });
-
     // LINE reply-token sends stay provider-native and reach only
     // reply_payload_sending; durable and model-driven `message` tool sends
     // reach message_sending. The shared relay handles both without allowing a

@@ -9,8 +9,109 @@ This additive OpenClaw plugin separates permanent image assets from configurable
 5. Optional model extraction produces fields defined by that schema.
 6. A profile-scoped Notion record references the shared R2 object.
 
-It targets OpenClaw `2026.7.2`, uses the supported `message_received` hook, and does not patch
-OpenClaw core or `extensions/line`.
+It targets OpenClaw `2026.7.2` and uses supported plugin hooks and SQLite-backed plugin state.
+
+## LINE group workspace policies
+
+The plugin also owns a durable, model-independent registry from native LINE group ID to one of two
+initial workspace policies: `UGC` or `KEEP_WATCHING`. Bindings and one-time pairing grants use the
+existing SQLite-backed plugin state under `OPENCLAW_STATE_DIR`; the model cannot infer or mutate
+them.
+
+Only the resolved LINE owner may request a code with the exact text `สร้าง pairing UGC` or
+`สร้าง pairing KEEP_WATCHING`. The same owner redeems the short-lived code inside the target LINE
+group. Codes are account-bound, owner-bound, single-use, and expire after ten minutes by default.
+Changing policy requires a fresh code. `ยกเลิก pairing` or `unpair group` removes the binding only
+when sent by the owner inside that group.
+
+`KEEP_WATCHING` is silent: ordinary text is claimed without an assistant reply, and supported image
+events are safely read from managed inbound media, content-addressed in the existing R2 bucket, and
+written to the one configured Notion data source. Its Notion schema must contain these exact
+properties: `Name` (title), `Captured At` (date), `Source` (rich text), `Sender` (rich text),
+`Media Type` (rich text), `File Size` (number), `R2 Object Key` (rich text), `SHA-256` (rich text),
+`Status` (select), and `Record ID` (rich text). Successful ingestion never replies to the watched
+group; failures remain in durable job state and use sanitized diagnostics.
+
+`UGC` exposes no unrestricted Notion tool. The verified owner prepares a product-review workflow
+with `cloudbath_ugc_video_prepare`; the tool resolves Product and optional Character records only
+inside the configured libraries, creates or reuses one UGC Project, creates an idempotent three-shot
+plan, freezes references and targets, then hands the exact prompt/settings to the existing
+owner-confirmed `line_video_draft` flow. Paid generation remains impossible until the exact owner
+confirmation. All six capability targets must be explicitly configured:
+
+- `PRODUCT_LIBRARY`: read
+- `CHARACTER_LIBRARY`: read
+- `UGC_PROJECTS`: read/write
+- `UGC_SHOTS`: read/write
+- `AI_VIDEO_LIBRARY`: read/write
+- `AI_IMAGE_LIBRARY`: read/write
+
+Exact non-secret `OPENCLAW_CONFIG_PATH` patch shape (merge this entry without replacing unrelated
+plugin configuration):
+
+```json5
+{
+  plugins: {
+    entries: {
+      "cloudbath-line-image-archive": {
+        enabled: true,
+        config: {
+          groupWorkspacePolicies: {
+            pairingTtlMs: 600000,
+            keepWatching: {
+              notion: {
+                databaseId: "22f2a9c709cb4baa8d41e5988e98f105",
+                dataSourceId: "14b2be8ee32d49bb85098530d82b3de2",
+              },
+              r2Prefix: "workspace/keep-watching/construction",
+            },
+            ugc: {
+              capabilities: {
+                PRODUCT_LIBRARY: {
+                  databaseId: "3338128fbb6345a9b2a92389ad070ac2",
+                  dataSourceId: "7342057309e74999a5a3813afa27d396",
+                },
+                CHARACTER_LIBRARY: {
+                  databaseId: "c9b716a9a305425d89c25254d837ac79",
+                  dataSourceId: "e27e904b17bf4a349f11dd6eab57041c",
+                },
+                UGC_PROJECTS: {
+                  databaseId: "4a583619ec254b61acd4c2b87812f95b",
+                  dataSourceId: "27452a8424c5465193e48bdbf3772f53",
+                },
+                UGC_SHOTS: {
+                  databaseId: "42d421b1258942b5aa26ef3093ce635e",
+                  dataSourceId: "d35ccd4ba44b4ac798e9b3647b201b55",
+                },
+                AI_VIDEO_LIBRARY: {
+                  databaseId: "3d309900f0a2466480b2a98fbae3e206",
+                  dataSourceId: "9305e95bdc2d4ed9bd001cd661e3807d",
+                },
+                AI_IMAGE_LIBRARY: {
+                  databaseId: "82d3bf66801a48f79482a71d18dce4e8",
+                  dataSourceId: "5438e9ffd76f4d5e870df260a3940b3c",
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+  },
+}
+```
+
+Missing targets or runtime credentials fail closed. Every ingest job freezes its group, policy,
+workflow type, source capabilities, Notion target, and R2 prefix before processing. UGC cannot use a
+KEEP_WATCHING target and KEEP_WATCHING cannot resolve UGC capability slots.
+
+Database IDs are deployment configuration, not Railway environment variables. The only Notion
+write credential is `OPENCLAW_NOTION_WRITE_TOKEN`.
+
+UGC schema validation requires the documented production fields but permits unrelated additional
+properties. In particular, the live relations `Product`, `Character`, `Project`, and `UGC Project`
+are validated against their configured data-source IDs and are never created, renamed, deleted, or
+retargeted by runtime.
 
 ## Universal asset identity
 
@@ -216,7 +317,7 @@ pnpm exec tsx scripts/cloudbath/setup-notion-image-archive.ts \
 Review the proposal, then explicitly approve its exact `proposalId`:
 
 ```bash
-NOTION_API_KEY="$NOTION_API_KEY" \
+OPENCLAW_NOTION_WRITE_TOKEN="$OPENCLAW_NOTION_WRITE_TOKEN" \
 NOTION_PARENT_PAGE_ID="$NOTION_PARENT_PAGE_ID" \
 pnpm exec tsx scripts/cloudbath/setup-notion-image-archive.ts \
   --mode create \
@@ -229,7 +330,7 @@ pnpm exec tsx scripts/cloudbath/setup-notion-image-archive.ts \
 Bind or validate an existing database without changing it:
 
 ```bash
-NOTION_API_KEY="$NOTION_API_KEY" \
+OPENCLAW_NOTION_WRITE_TOKEN="$OPENCLAW_NOTION_WRITE_TOKEN" \
 NOTION_DATABASE_ID="$NOTION_DATABASE_ID" \
 pnpm exec tsx scripts/cloudbath/setup-notion-image-archive.ts \
   --mode bind \
@@ -241,7 +342,7 @@ pnpm exec tsx scripts/cloudbath/setup-notion-image-archive.ts \
 Create a migration proposal:
 
 ```bash
-NOTION_API_KEY="$NOTION_API_KEY" \
+OPENCLAW_NOTION_WRITE_TOKEN="$OPENCLAW_NOTION_WRITE_TOKEN" \
 NOTION_DATABASE_ID="$NOTION_DATABASE_ID" \
 pnpm exec tsx scripts/cloudbath/setup-notion-image-archive.ts \
   --mode migration-plan \
@@ -255,33 +356,32 @@ A migration proposal reports missing, incompatible, possible-rename, and unrelat
 It never applies them. Administrators must review and make any schema changes separately.
 
 `NOTION_PARENT_PAGE_ID` and `NOTION_DATABASE_ID` are setup inputs. Runtime reads only
-`NOTION_API_KEY`; each runtime database ID comes from its Agent Profile. After setup, copy the
+`OPENCLAW_NOTION_WRITE_TOKEN`; each runtime database ID comes from its Agent Profile. After setup, copy the
 reported database ID into that Agent Profile's `notionDatabaseId` configuration field. Add only
-`NOTION_API_KEY` to Railway for Notion runtime access; do not create a global
+`OPENCLAW_NOTION_WRITE_TOKEN` to Railway for Notion runtime write access; do not create a global
 `NOTION_DATABASE_ID` runtime variable.
 
 ## Environment variables
 
-| Variable                           | Runtime purpose                                               |
-| ---------------------------------- | ------------------------------------------------------------- |
-| `CLOUDBATH_IMAGE_ARCHIVE_ENABLED`  | Master switch; defaults to `false`.                           |
-| `CLOUDBATH_IMAGE_ANALYSIS_ENABLED` | Enables schema-based extraction; defaults to `false`.         |
-| `IMAGE_MAX_MB`                     | Archive limit, default `10`, maximum `100`.                   |
-| `R2_ACCOUNT_ID`                    | Cloudflare account ID.                                        |
-| `R2_ACCESS_KEY_ID`                 | Bucket-scoped S3 access key ID.                               |
-| `R2_SECRET_ACCESS_KEY`             | Bucket-scoped S3 secret.                                      |
-| `R2_BUCKET_NAME`                   | Existing private bucket.                                      |
-| `R2_ENDPOINT`                      | Optional HTTPS S3 endpoint.                                   |
-| `R2_KEY_PREFIX`                    | Optional prefix before `assets/`.                             |
-| `NOTION_API_KEY`                   | Notion integration credential shared by configured databases. |
-| `NOTION_WELLNESS_READ_TOKEN`       | Read-only Wellness tool credential.                           |
-| `NOTION_CONSTRUCTION_WRITE_TOKEN`  | Construction Upload Inbox tool credential.                    |
+| Variable                           | Runtime purpose                                              |
+| ---------------------------------- | ------------------------------------------------------------ |
+| `CLOUDBATH_IMAGE_ARCHIVE_ENABLED`  | Master switch; defaults to `false`.                          |
+| `CLOUDBATH_IMAGE_ANALYSIS_ENABLED` | Enables schema-based extraction; defaults to `false`.        |
+| `IMAGE_MAX_MB`                     | Archive limit, default `10`, maximum `100`.                  |
+| `R2_ACCOUNT_ID`                    | Cloudflare account ID.                                       |
+| `R2_ACCESS_KEY_ID`                 | Bucket-scoped S3 access key ID.                              |
+| `R2_SECRET_ACCESS_KEY`             | Bucket-scoped S3 secret.                                     |
+| `R2_BUCKET_NAME`                   | Existing private bucket.                                     |
+| `R2_ENDPOINT`                      | Optional HTTPS S3 endpoint.                                  |
+| `R2_KEY_PREFIX`                    | Optional prefix before `assets/`.                            |
+| `OPENCLAW_NOTION_WRITE_TOKEN`      | Canonical credential for allowlisted OpenClaw Notion writes. |
+| `NOTION_WELLNESS_READ_TOKEN`       | Read-only Wellness tool credential.                          |
 
 LINE group allowlists and Notion database IDs are no longer global environment variables.
 
 ## Scoped Wellness and Construction tools
 
-The plugin also registers five optional agent tools. They are unavailable to agents until each
+The plugin also registers scoped optional agent tools. They are unavailable to agents until each
 tool is explicitly allowlisted:
 
 - `wellness_notion_query`, `wellness_notion_get_record`, and `wellness_notion_search` are
@@ -292,16 +392,18 @@ tool is explicitly allowlisted:
   properties in the Construction Upload Inbox. Creation always uses the fixed data source, and
   updates resolve a page by its `Record ID` inside that data source rather than accepting a page
   or database target from the model.
+- `cloudbath_ugc_video_prepare` exists only for a verified owner in a LINE group paired to UGC. It
+  reads/writes only the six configured capability targets and never calls a paid provider.
 
-Both connections are independently authenticated. The tools read their credentials only from
-`NOTION_WELLNESS_READ_TOKEN` and `NOTION_CONSTRUCTION_WRITE_TOKEN`, respectively. The Wellness
+Read and write access remain independently authenticated. Wellness tools use only
+`NOTION_WELLNESS_READ_TOKEN`; Construction writes use only `OPENCLAW_NOTION_WRITE_TOKEN`. The Wellness
 integration should have read-content capability only and must be shared with the configured
 Wellness root page so its direct child databases are visible. The Construction integration needs read,
 insert, and update-content capabilities on the Upload Inbox so the plugin can validate its schema,
 prevent duplicate Record IDs, and update an existing row. Neither integration needs schema-update,
 comment, or delete capabilities.
 
-All five tools are registered as optional. Enable only the intended tools on the LINE agent, for
+All tools are registered as optional. Enable only the intended tools on the LINE agent, for
 example:
 
 ```json5
@@ -317,6 +419,7 @@ example:
             "wellness_notion_search",
             "construction_upload_create",
             "construction_upload_update",
+            "cloudbath_ugc_video_prepare",
           ],
         },
       },
