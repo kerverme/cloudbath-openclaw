@@ -1,7 +1,5 @@
-import { createHash } from "node:crypto";
 import { GetObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
-import type { PluginStateKeyedStore } from "openclaw/plugin-sdk/plugin-state-runtime";
 import { fetchWithSsrFGuard, type SsrFPolicy } from "openclaw/plugin-sdk/ssrf-runtime";
 import type { VideoGenerationSourceAsset } from "openclaw/plugin-sdk/video-generation";
 
@@ -10,10 +8,6 @@ const MAX_REFERENCE_BYTES = 20 * 1024 * 1024;
 const MAX_REFERENCE_ASSETS = 8;
 const REFERENCE_FETCH_TIMEOUT_MS = 30_000;
 const REFERENCE_FETCH_POLICY: SsrFPolicy = { allowPrivateNetwork: false };
-
-export const CLOUDBATH_GROUP_BINDING_NAMESPACE = "line-group-policy-bindings-v1";
-export const CLOUDBATH_UGC_DRAFT_SCOPE_NAMESPACE = "ugc-video-draft-scopes-v1";
-export const CLOUDBATH_UGC_SCOPE_MAX_ENTRIES = 20_000;
 
 export type LineVideoUgcCapabilityId =
   | "PRODUCT_LIBRARY"
@@ -63,21 +57,6 @@ export type LineGroupPolicyBinding = {
   boundAt: string;
 };
 
-export type LineVideoUgcScopeStore = PluginStateKeyedStore<LineVideoUgcScope>;
-export type LineGroupPolicyBindingStore = PluginStateKeyedStore<LineGroupPolicyBinding>;
-
-function hashKey(...parts: string[]): string {
-  return createHash("sha256").update(parts.join("\0"), "utf8").digest("hex");
-}
-
-export function lineVideoUgcDraftScopeKey(draftId: string): string {
-  return hashKey("ugc-draft", draftId);
-}
-
-export function lineGroupPolicyBindingKey(accountId: string, groupId: string): string {
-  return hashKey(accountId, groupId);
-}
-
 function canonicalNotionId(value: unknown): string | undefined {
   if (typeof value !== "string") {
     return undefined;
@@ -123,6 +102,12 @@ export function resolveCloudbathUgcCapabilities(
   return result;
 }
 
+export function hasCloudbathLineGroupWorkspacePolicies(cfg: OpenClawConfig): boolean {
+  const plugin = objectValue(cfg.plugins?.entries?.["cloudbath-line-image-archive"]?.config);
+  const policies = objectValue(plugin?.groupWorkspacePolicies);
+  return Boolean(policies?.ugc || policies?.keepWatching);
+}
+
 function targetsEqual(
   left: Readonly<Record<LineVideoUgcCapabilityId, LineVideoNotionTarget>>,
   right: Readonly<Record<LineVideoUgcCapabilityId, LineVideoNotionTarget>>,
@@ -134,22 +119,19 @@ function targetsEqual(
   );
 }
 
-export async function validateLineVideoUgcScope(params: {
+export function validateLineVideoUgcScope(params: {
   scope: LineVideoUgcScope;
   cfg: OpenClawConfig;
-  bindingStore: LineGroupPolicyBindingStore;
+  binding: LineGroupPolicyBinding | undefined;
   accountId: string;
   groupId: string;
   ownerSenderId: string;
   frozenPrompt: string;
-}): Promise<boolean> {
+}): boolean {
   const capabilities = resolveCloudbathUgcCapabilities(params.cfg);
   if (!capabilities || !targetsEqual(params.scope.capabilities, capabilities)) {
     return false;
   }
-  const binding = await params.bindingStore.lookup(
-    lineGroupPolicyBindingKey(params.accountId, params.groupId),
-  );
   return (
     params.scope.version === 1 &&
     params.scope.policyId === "UGC" &&
@@ -158,10 +140,10 @@ export async function validateLineVideoUgcScope(params: {
     params.scope.ownerSenderId === params.ownerSenderId &&
     params.scope.frozenPrompt === params.frozenPrompt &&
     params.scope.r2Prefix === "outbound/line-video" &&
-    binding?.policyId === "UGC" &&
-    binding.accountId === params.accountId &&
-    binding.groupId === params.groupId &&
-    binding.boundByOwnerId === params.ownerSenderId
+    params.binding?.policyId === "UGC" &&
+    params.binding.accountId === params.accountId &&
+    params.binding.groupId === params.groupId &&
+    params.binding.boundByOwnerId === params.ownerSenderId
   );
 }
 

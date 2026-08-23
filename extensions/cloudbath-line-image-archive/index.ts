@@ -1,6 +1,7 @@
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import type { OpenClawPluginApi, PluginLogger } from "openclaw/plugin-sdk/plugin-entry";
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
+import type { PluginStateKeyedStore } from "openclaw/plugin-sdk/plugin-state-runtime";
 import { extractSchemaFieldsWithCurrentModel } from "./src/analysis.js";
 import { resolveArchiveConfig, resolveWorkspacePolicyConfig } from "./src/config.js";
 import {
@@ -9,6 +10,10 @@ import {
 } from "./src/group-workspace-policy.js";
 import { extractInboundLineImage } from "./src/inbound.js";
 import { KeepWatchingNotionWriter, KeepWatchingPipeline } from "./src/keep-watching.js";
+import {
+  clearCloudbathLineVideoWorkspaceRuntime,
+  installCloudbathLineVideoWorkspaceRuntime,
+} from "./src/line-video-workspace-runtime.js";
 import { CLOUDBATH_NOTION_TOOL_NAMES, createCloudbathNotionTools } from "./src/notion-tools.js";
 import { NotionArchiveClient } from "./src/notion.js";
 import { ArchivePipeline } from "./src/pipeline.js";
@@ -110,6 +115,7 @@ export default definePluginEntry({
     api.registerService({
       id: "cloudbath-line-image-archive",
       start: async (ctx) => {
+        clearCloudbathLineVideoWorkspaceRuntime();
         const config = resolveArchiveConfig(process.env, api.pluginConfig ?? {});
         const workspaceConfig = resolveWorkspacePolicyConfig(api.pluginConfig ?? {});
         const bindings = api.runtime.state.openKeyedStore<LineGroupPolicyBinding>({
@@ -128,6 +134,8 @@ export default definePluginEntry({
           pairingGrants,
         );
 
+        let ugcDraftScopes: PluginStateKeyedStore<FrozenUgcVideoScope> | undefined;
+
         if (workspaceConfig.ugc) {
           if (!config.notion.apiKey) {
             throw new Error("UGC is configured but OPENCLAW_NOTION_WRITE_TOKEN is missing");
@@ -137,7 +145,7 @@ export default definePluginEntry({
             maxEntries: CLOUDBATH_UGC_SCOPE_MAX_ENTRIES,
             overflowPolicy: "evict-oldest",
           });
-          const draftScopes = api.runtime.state.openKeyedStore<FrozenUgcVideoScope>({
+          ugcDraftScopes = api.runtime.state.openKeyedStore<FrozenUgcVideoScope>({
             namespace: CLOUDBATH_UGC_DRAFT_SCOPE_NAMESPACE,
             maxEntries: CLOUDBATH_UGC_SCOPE_MAX_ENTRIES,
             overflowPolicy: "evict-oldest",
@@ -152,7 +160,7 @@ export default definePluginEntry({
             workspaceRegistry,
             new UgcNotionWorkflowClient(config.notion.apiKey, config.retry, logger),
             pending,
-            draftScopes,
+            ugcDraftScopes,
             activeSessions,
           );
         }
@@ -190,6 +198,12 @@ export default definePluginEntry({
             logger,
           });
         }
+
+        installCloudbathLineVideoWorkspaceRuntime({
+          lookupBinding: async (accountId, groupId) =>
+            await workspaceRegistry?.lookup(accountId, groupId),
+          ...(ugcDraftScopes ? { ugcScopeStore: ugcDraftScopes } : {}),
+        });
 
         if (!config.enabled) {
           logger.info("archive_disabled", {
@@ -242,6 +256,7 @@ export default definePluginEntry({
         });
       },
       stop: async () => {
+        clearCloudbathLineVideoWorkspaceRuntime();
         await pipeline?.waitForIdle();
         await keepWatchingPipeline?.waitForIdle();
         pipeline = undefined;

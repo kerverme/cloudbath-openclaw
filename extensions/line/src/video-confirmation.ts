@@ -48,16 +48,17 @@ import {
 } from "./video-model-preference.js";
 import { stageLineOutboundVideo, stageLineVideoPreviewImage } from "./video-outbound-staging.js";
 import {
-  lineVideoUgcDraftScopeKey,
-  lineGroupPolicyBindingKey,
+  hasCloudbathLineGroupWorkspacePolicies,
   materializeLineVideoUgcReferences,
   resolveCloudbathUgcCapabilities,
   validateLineVideoUgcScope,
-  type LineGroupPolicyBindingStore,
   type LineVideoNotionTarget,
   type LineVideoUgcScope,
-  type LineVideoUgcScopeStore,
 } from "./video-ugc-scope.js";
+import {
+  tryGetLineVideoWorkspaceRuntime,
+  type LineVideoWorkspaceRuntime,
+} from "./video-workspace-runtime.js";
 
 const CONFIRMATION_PATTERN = /^ยืนยัน\s+VIDEO\s+(\d{4})$/iu;
 
@@ -335,8 +336,7 @@ export function createLineVideoConfirmationGate(params: {
   draftStore: LineVideoDraftStore;
   jobStore: LineVideoJobStore;
   activeJobLockStore: LineVideoActiveJobLockStore;
-  ugcScopeStore?: LineVideoUgcScopeStore;
-  groupBindingStore?: LineGroupPolicyBindingStore;
+  workspaceRuntime?: LineVideoWorkspaceRuntime;
   resolveApiKey?: () => Promise<string | undefined>;
   fetchImpl?: typeof fetch;
   createNotionLibrary?: (target: LineVideoNotionTarget) => LineVideoLibrary;
@@ -415,6 +415,7 @@ export function createLineVideoConfirmationGate(params: {
 
     const cfg = getRuntimeConfig();
     const configuredCapabilities = resolveCloudbathUgcCapabilities(cfg);
+    const workspacePoliciesConfigured = hasCloudbathLineGroupWorkspacePolicies(cfg);
     const videoLibraryTarget =
       configuredCapabilities?.AI_VIDEO_LIBRARY ??
       (params.createNotionLibrary
@@ -423,11 +424,13 @@ export function createLineVideoConfirmationGate(params: {
     if (!videoLibraryTarget) {
       return { handled: true, text: "ยังไม่ได้ตั้งค่า AI Video Library" };
     }
-    const ugcScope = await params.ugcScopeStore?.lookup(lineVideoUgcDraftScopeKey(draftId));
+    const workspaceRuntime = params.workspaceRuntime ?? tryGetLineVideoWorkspaceRuntime();
+    if (workspacePoliciesConfigured && !workspaceRuntime) {
+      return { handled: true, text: "Workspace policy service is unavailable." };
+    }
+    const ugcScope = await workspaceRuntime?.lookupUgcDraftScope(draftId);
     const groupId = conversationId.replace(/^line:group:/u, "");
-    const groupBinding = await params.groupBindingStore?.lookup(
-      lineGroupPolicyBindingKey(accountId, groupId),
-    );
+    const groupBinding = await workspaceRuntime?.lookupBinding(accountId, groupId);
     if (groupBinding?.policyId === "KEEP_WATCHING") {
       return { handled: true, text: "กลุ่มนี้ไม่อนุญาตให้สร้างวิดีโอ" };
     }
@@ -436,16 +439,15 @@ export function createLineVideoConfirmationGate(params: {
     }
     const ugcScopeValid =
       !ugcScope ||
-      (params.groupBindingStore !== undefined &&
-        (await validateLineVideoUgcScope({
-          scope: ugcScope,
-          cfg,
-          bindingStore: params.groupBindingStore,
-          accountId,
-          groupId,
-          ownerSenderId: senderId,
-          frozenPrompt: draft.prompt,
-        })));
+      validateLineVideoUgcScope({
+        scope: ugcScope,
+        cfg,
+        binding: groupBinding,
+        accountId,
+        groupId,
+        ownerSenderId: senderId,
+        frozenPrompt: draft.prompt,
+      });
     if (!ugcScopeValid) {
       return { handled: true, text: "UGC video draft scope ไม่ถูกต้องหรือถูกเปลี่ยน" };
     }
@@ -542,7 +544,7 @@ export function createLineVideoConfirmationGate(params: {
       return { handled: true, text: "video draft เปลี่ยนแปลง กรุณาสร้างใหม่" };
     }
     if (ugcScope) {
-      const consumedScope = await params.ugcScopeStore!.consume(lineVideoUgcDraftScopeKey(draftId));
+      const consumedScope = await workspaceRuntime?.consumeUgcDraftScope(draftId);
       if (!consumedScope || JSON.stringify(consumedScope) !== JSON.stringify(ugcScope)) {
         return { handled: true, text: "UGC video draft scope เปลี่ยนแปลง กรุณาสร้างใหม่" };
       }

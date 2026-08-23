@@ -72,11 +72,10 @@ vi.mock("./video-outbound-staging.js", () => ({
 const { createLineVideoConfirmationGate, parseLineVideoConfirmationCode } =
   await import("./video-confirmation.js");
 const { createLineVideoDraft } = await import("./video-draft-store.js");
-const { lineGroupPolicyBindingKey, lineVideoUgcDraftScopeKey } =
-  await import("./video-ugc-scope.js");
 import type { LineVideoDraft } from "./video-draft-store.js";
 import type { LineVideoActiveJobLock, LineVideoJob } from "./video-job-store.js";
 import type { LineGroupPolicyBinding, LineVideoUgcScope } from "./video-ugc-scope.js";
+import type { LineVideoWorkspaceRuntime } from "./video-workspace-runtime.js";
 
 function createMemoryStore<T>(): PluginStateKeyedStore<T> {
   const values = new Map<string, T>();
@@ -162,8 +161,7 @@ const UGC_CAPABILITIES = {
 async function fixture(params?: {
   fetchImpl?: typeof fetch;
   now?: () => number;
-  ugcScopeStore?: PluginStateKeyedStore<LineVideoUgcScope>;
-  groupBindingStore?: PluginStateKeyedStore<LineGroupPolicyBinding>;
+  workspaceRuntime?: LineVideoWorkspaceRuntime;
 }) {
   const draftStore = createMemoryStore<LineVideoDraft>();
   const jobStore = createMemoryStore<LineVideoJob>();
@@ -175,8 +173,7 @@ async function fixture(params?: {
     activeJobLockStore,
     resolveApiKey: async () => "sk-test",
     createNotionLibrary: createNotionLibraryMock,
-    ...(params?.ugcScopeStore ? { ugcScopeStore: params.ugcScopeStore } : {}),
-    ...(params?.groupBindingStore ? { groupBindingStore: params.groupBindingStore } : {}),
+    ...(params?.workspaceRuntime ? { workspaceRuntime: params.workspaceRuntime } : {}),
     fetchImpl: params?.fetchImpl ?? catalogFetch(),
     scheduleBackgroundWork: (run) => {
       scheduled.push(run);
@@ -199,6 +196,24 @@ async function fixture(params?: {
     ...(params?.now ? { now: params.now } : {}),
   });
   return { gate, draftStore, jobStore, activeJobLockStore, draft, scheduled };
+}
+
+function createWorkspaceRuntime(params: {
+  binding?: LineGroupPolicyBinding;
+  scopeStore?: PluginStateKeyedStore<LineVideoUgcScope>;
+}): LineVideoWorkspaceRuntime {
+  return {
+    async lookupBinding(accountId, groupId) {
+      const binding = params.binding;
+      return binding?.accountId === accountId && binding.groupId === groupId ? binding : undefined;
+    },
+    async lookupUgcDraftScope(draftId) {
+      return await params.scopeStore?.lookup(draftId);
+    },
+    async consumeUgcDraftScope(draftId) {
+      return await params.scopeStore?.consume(draftId);
+    },
+  };
 }
 
 const CTX = { accountId: "acct-1", conversationId: "grp-a" };
@@ -355,19 +370,41 @@ describe("createLineVideoConfirmationGate", () => {
   });
 
   it("requires a frozen UGC scope for a group paired to UGC", async () => {
-    const groupBindingStore = createMemoryStore<LineGroupPolicyBinding>();
-    await groupBindingStore.register(lineGroupPolicyBindingKey("acct-1", "grp-a"), {
+    const binding: LineGroupPolicyBinding = {
       accountId: "acct-1",
       groupId: "grp-a",
       policyId: "UGC",
       boundByOwnerId: OWNER_ID,
       boundAt: "2026-08-23T00:00:00.000Z",
+    };
+    const { gate, draft, scheduled, draftStore } = await fixture({
+      workspaceRuntime: createWorkspaceRuntime({ binding }),
     });
-    const { gate, draft, scheduled, draftStore } = await fixture({ groupBindingStore });
 
     await expect(gate(confirmEvent(draft.draftId), CTX)).resolves.toMatchObject({
       handled: true,
       text: expect.stringContaining("workspace scope"),
+    });
+    expect(await draftStore.lookup(draft.draftId)).toMatchObject({ draftId: draft.draftId });
+    expect(scheduled).toHaveLength(0);
+    expect(generateVideoMock).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when workspace policies are configured but their owning runtime is absent", async () => {
+    runtimeConfigMock.current = {
+      plugins: {
+        entries: {
+          "cloudbath-line-image-archive": {
+            config: { groupWorkspacePolicies: { ugc: { capabilities: UGC_CAPABILITIES } } },
+          },
+        },
+      },
+    };
+    const { gate, draft, scheduled, draftStore } = await fixture();
+
+    await expect(gate(confirmEvent(draft.draftId), CTX)).resolves.toEqual({
+      handled: true,
+      text: "Workspace policy service is unavailable.",
     });
     expect(await draftStore.lookup(draft.draftId)).toMatchObject({ draftId: draft.draftId });
     expect(scheduled).toHaveLength(0);
@@ -384,18 +421,16 @@ describe("createLineVideoConfirmationGate", () => {
         },
       },
     };
-    const groupBindingStore = createMemoryStore<LineGroupPolicyBinding>();
     const ugcScopeStore = createMemoryStore<LineVideoUgcScope>();
-    await groupBindingStore.register(lineGroupPolicyBindingKey("acct-1", "grp-a"), {
+    const binding: LineGroupPolicyBinding = {
       accountId: "acct-1",
       groupId: "grp-a",
       policyId: "UGC",
       boundByOwnerId: OWNER_ID,
       boundAt: "2026-08-23T00:00:00.000Z",
-    });
+    };
     const { gate, draft, scheduled } = await fixture({
-      groupBindingStore,
-      ugcScopeStore,
+      workspaceRuntime: createWorkspaceRuntime({ binding, scopeStore: ugcScopeStore }),
     });
     const scope: LineVideoUgcScope = {
       version: 1,
@@ -417,7 +452,7 @@ describe("createLineVideoConfirmationGate", () => {
       r2Prefix: "outbound/line-video",
       createdAt: "2026-08-23T00:00:00.000Z",
     };
-    await ugcScopeStore.register(lineVideoUgcDraftScopeKey(draft.draftId), scope);
+    await ugcScopeStore.register(draft.draftId, scope);
 
     expect((await gate(confirmEvent(draft.draftId), CTX))?.handled).toBe(true);
     expect(scheduled).toHaveLength(1);
@@ -433,15 +468,16 @@ describe("createLineVideoConfirmationGate", () => {
   });
 
   it("keeps KEEP_WATCHING groups outside every paid video confirmation path", async () => {
-    const groupBindingStore = createMemoryStore<LineGroupPolicyBinding>();
-    await groupBindingStore.register(lineGroupPolicyBindingKey("acct-1", "grp-a"), {
+    const binding: LineGroupPolicyBinding = {
       accountId: "acct-1",
       groupId: "grp-a",
       policyId: "KEEP_WATCHING",
       boundByOwnerId: OWNER_ID,
       boundAt: "2026-08-23T00:00:00.000Z",
+    };
+    const { gate, draft, scheduled } = await fixture({
+      workspaceRuntime: createWorkspaceRuntime({ binding }),
     });
-    const { gate, draft, scheduled } = await fixture({ groupBindingStore });
 
     await expect(gate(confirmEvent(draft.draftId), CTX)).resolves.toMatchObject({
       handled: true,

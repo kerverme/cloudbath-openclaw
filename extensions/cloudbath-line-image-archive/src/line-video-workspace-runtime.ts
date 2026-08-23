@@ -1,0 +1,41 @@
+import type { PluginStateKeyedStore } from "openclaw/plugin-sdk/plugin-state-runtime";
+import { createPluginRuntimeStore } from "openclaw/plugin-sdk/runtime-store";
+import type { FrozenUgcVideoScope, LineGroupPolicyBinding } from "./types.js";
+import { ugcDraftScopeKey } from "./ugc-workflow.js";
+
+const LINE_VIDEO_WORKSPACE_RUNTIME_KEY = "cloudbath.line-video-workspace-runtime.v1";
+
+export type CloudbathLineVideoWorkspaceRuntime = {
+  lookupBinding(accountId: string, groupId: string): Promise<LineGroupPolicyBinding | undefined>;
+  lookupUgcDraftScope(draftId: string): Promise<FrozenUgcVideoScope | undefined>;
+  consumeUgcDraftScope(draftId: string): Promise<FrozenUgcVideoScope | undefined>;
+};
+
+const runtimeStore = createPluginRuntimeStore<CloudbathLineVideoWorkspaceRuntime>({
+  key: LINE_VIDEO_WORKSPACE_RUNTIME_KEY,
+  errorMessage: "Cloudbath LINE video workspace runtime is unavailable",
+});
+
+export function installCloudbathLineVideoWorkspaceRuntime(params: {
+  lookupBinding: (
+    accountId: string,
+    groupId: string,
+  ) => Promise<LineGroupPolicyBinding | null | undefined>;
+  ugcScopeStore?: PluginStateKeyedStore<FrozenUgcVideoScope>;
+}): void {
+  runtimeStore.setRuntime({
+    async lookupBinding(accountId, groupId) {
+      return (await params.lookupBinding(accountId, groupId)) ?? undefined;
+    },
+    async lookupUgcDraftScope(draftId) {
+      return await params.ugcScopeStore?.lookup(ugcDraftScopeKey(draftId));
+    },
+    async consumeUgcDraftScope(draftId) {
+      return await params.ugcScopeStore?.consume(ugcDraftScopeKey(draftId));
+    },
+  });
+}
+
+export function clearCloudbathLineVideoWorkspaceRuntime(): void {
+  runtimeStore.clearRuntime();
+}
