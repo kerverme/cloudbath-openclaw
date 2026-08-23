@@ -236,6 +236,53 @@ export type UgcReferenceAsset = Readonly<{
   locator: string;
 }>;
 
+/**
+ * One character frozen into a project. `identityReferences` is the exact set
+ * every scene in the project resubmits; the Character Library is not consulted
+ * again after this is written.
+ */
+export type UgcCharacterLock = Readonly<{
+  code: string;
+  pageId: string;
+  /** Notion last-edit stamp at freeze time. Audit evidence, never a re-resolve key. */
+  contentIdentity?: string;
+  identityReferences: readonly UgcReferenceAsset[];
+  styleReferences: readonly UgcReferenceAsset[];
+  frozenAt: string;
+}>;
+
+/**
+ * Durable per-project cast. Outlives the pending-scope TTL so a scene prepared
+ * days later reuses the same references instead of re-resolving them.
+ */
+export type UgcProjectCharacterLock = Readonly<{
+  version: 1;
+  projectPageId: string;
+  projectRecordId: string;
+  accountId: string;
+  lineGroupId: string;
+  ownerSenderId: string;
+  characterLocks: readonly UgcCharacterLock[];
+  frozenAt: string;
+}>;
+
+/** Continuity trail a later film-director pass can read without re-deriving it. */
+export type UgcSceneContinuity = Readonly<{
+  sceneNumber: number;
+  previousScenePageId?: string;
+  characterPageIds: readonly string[];
+  characterCodes: readonly string[];
+  prompt: string;
+  durationSeconds?: number;
+  outputR2Key?: string;
+  /**
+   * Provider-neutral slot for a still carried forward from the previous scene.
+   * Populated only when a provider documents support for it; nothing here
+   * implies video-to-video capability.
+   */
+  previousSceneFrameR2Key?: string;
+}>;
+
 export type FrozenUgcVideoScope = Readonly<{
   version: 1;
   policyId: "UGC";
@@ -244,8 +291,14 @@ export type FrozenUgcVideoScope = Readonly<{
   ownerSenderId: string;
   productPageId: string;
   characterPageId?: string;
+  /** Frozen cast for this scene, in submission order. */
+  characterLocks: readonly UgcCharacterLock[];
   projectPageId: string;
+  projectRecordId: string;
   shotPageIds: readonly string[];
+  /** The scene this scope will generate. Scene 1 for a fresh project. */
+  scene: UgcSceneContinuity;
+  scenePageId: string;
   referenceAssets: readonly UgcReferenceAsset[];
   frozenPrompt: string;
   durationSeconds?: number;

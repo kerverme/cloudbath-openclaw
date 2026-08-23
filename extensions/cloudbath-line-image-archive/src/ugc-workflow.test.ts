@@ -4,6 +4,7 @@ import type {
   ActiveUgcLineSession,
   FrozenUgcVideoScope,
   PendingUgcVideoScope,
+  UgcProjectCharacterLock,
   SafeLogger,
   UgcCapabilityId,
   WorkspacePolicyConfig,
@@ -204,11 +205,11 @@ function liveFetch() {
               parent: { type: "data_source_id", data_source_id: dataSourceId },
               properties: {
                 Name: { type: "title", title: [{ plain_text: "Mae Kampong Host" }] },
-                "Identity References": {
+                "Identity Reference R2 Keys": {
                   type: "url",
                   url: "https://assets.example/identity.png",
                 },
-                "Style References": {
+                "Style Reference R2 Keys": {
                   type: "url",
                   url: "https://assets.example/style.png",
                 },
@@ -222,6 +223,13 @@ function liveFetch() {
         body.filter?.property === "Record ID" &&
         (dataSourceId === LIVE_TARGETS.UGC_PROJECTS.dataSourceId ||
           dataSourceId === LIVE_TARGETS.UGC_SHOTS.dataSourceId)
+      ) {
+        return Response.json({ results: [], has_more: false });
+      }
+      // Scene-number lookup for a project with no scenes yet.
+      if (
+        body.filter?.property === "Project" &&
+        dataSourceId === LIVE_TARGETS.UGC_SHOTS.dataSourceId
       ) {
         return Response.json({ results: [], has_more: false });
       }
@@ -298,6 +306,7 @@ describe("Cloudbath UGC workflow", () => {
       pending,
       scopes,
       activeSessions,
+      memoryStore<UgcProjectCharacterLock>(),
       () => Date.UTC(2026, 7, 23),
     );
     await workflow.observeTurn({
@@ -339,8 +348,10 @@ describe("Cloudbath UGC workflow", () => {
       Product: { relation: [{ id: "product-page" }] },
       Character: { relation: [{ id: "character-page" }] },
     });
+    // One ledger row per scene: preparation creates Scene 1 only, and later
+    // scenes are added on request rather than by a fixed three-shot plan.
     const shots = created.filter((entry) => entry.target === LIVE_TARGETS.UGC_SHOTS.dataSourceId);
-    expect(shots).toHaveLength(3);
+    expect(shots).toHaveLength(1);
     expect(shots[0]?.properties).toMatchObject({
       Project: { relation: [{ id: "created-page-1" }] },
       "Shot Number": { number: 1 },
@@ -350,7 +361,7 @@ describe("Cloudbath UGC workflow", () => {
     expect(pendingScope).toMatchObject({
       policyId: "UGC",
       projectPageId: "created-page-1",
-      shotPageIds: ["created-page-2", "created-page-3", "created-page-4"],
+      shotPageIds: ["created-page-2"],
       frozenPrompt: "Review the serum in a calm wellness setting",
     });
     await expect(
@@ -402,6 +413,7 @@ describe("Cloudbath UGC workflow", () => {
       memoryStore<PendingUgcVideoScope>(),
       memoryStore<FrozenUgcVideoScope>(),
       memoryStore<ActiveUgcLineSession>(),
+      memoryStore<UgcProjectCharacterLock>(),
     );
     await workflow.observeTurn({
       channelId: "line",
@@ -435,6 +447,7 @@ describe("Cloudbath UGC workflow", () => {
       memoryStore<PendingUgcVideoScope>(),
       memoryStore<FrozenUgcVideoScope>(),
       memoryStore<ActiveUgcLineSession>(),
+      memoryStore<UgcProjectCharacterLock>(),
     );
     expect(
       workflow.createTool({

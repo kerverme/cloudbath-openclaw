@@ -32,10 +32,12 @@ import type {
   SchemaProfile,
   FrozenUgcVideoScope,
   PendingUgcVideoScope,
+  UgcProjectCharacterLock,
 } from "./src/types.js";
 import {
   CLOUDBATH_UGC_DRAFT_SCOPE_NAMESPACE,
   CLOUDBATH_UGC_ACTIVE_SESSION_NAMESPACE,
+  CLOUDBATH_UGC_PROJECT_LOCK_NAMESPACE,
   CLOUDBATH_UGC_PENDING_NAMESPACE,
   CLOUDBATH_UGC_SCOPE_MAX_ENTRIES,
   CLOUDBATH_UGC_VIDEO_PREPARE_TOOL_NAME,
@@ -155,6 +157,13 @@ export default definePluginEntry({
             maxEntries: CLOUDBATH_UGC_SCOPE_MAX_ENTRIES,
             overflowPolicy: "evict-oldest",
           });
+          // No TTL: a project's frozen cast must outlive every scope window, or
+          // a later scene would re-resolve references and silently recast.
+          const projectLocks = api.runtime.state.openKeyedStore<UgcProjectCharacterLock>({
+            namespace: CLOUDBATH_UGC_PROJECT_LOCK_NAMESPACE,
+            maxEntries: CLOUDBATH_UGC_SCOPE_MAX_ENTRIES,
+            overflowPolicy: "evict-oldest",
+          });
           ugcWorkflow = new CloudbathUgcVideoWorkflow(
             workspaceConfig.ugc,
             workspaceRegistry,
@@ -162,6 +171,7 @@ export default definePluginEntry({
             pending,
             ugcDraftScopes,
             activeSessions,
+            projectLocks,
           );
         }
 

@@ -474,3 +474,76 @@ implement:
 
 All automated tests mock R2, Notion, LINE, and model boundaries. They do not access production
 services or secrets.
+
+## Multi-character identity lock and scenes
+
+A UGC project may cast several characters by name (`characterNames: ["F1", "F2"]`;
+the older single `characterName` still works). Every requested code must resolve
+to exactly one Character Library row before anything is created — a partial cast
+never reaches a scene.
+
+### Character Library properties this reads
+
+Identity references, in order:
+
+- `Identity Reference R2 Keys`
+- `Canonical Reference Set`
+- `Preview`
+
+Style references: `Style Reference R2 Keys`.
+
+Only these live names are read. Values are still validated as R2 keys or HTTPS
+URLs exactly as before; nothing about that check was relaxed.
+
+A character with no usable identity reference fails closed rather than being
+cast invisibly.
+
+### What the lock guarantees
+
+The first preparation for a project freezes each character's references into a
+durable project lock (`ugc-project-character-lock-v1`, no TTL). Later scenes in
+that project reuse the stored lock verbatim — the Character Library is never
+re-queried for them, so editing a library row cannot change an in-flight
+project's references. Asking for a different cast on a locked project is
+rejected; start a new project instead.
+
+This guarantees the same reference assets are **submitted** for every scene. It
+does not mean the generative model renders identical subjects across scenes, and
+nothing here should be described as preventing visual drift.
+
+### Reference allocation
+
+Each scene gets at most `MAX_REFERENCE_ASSETS` (8) references. Allocation gives
+every cast member one identity slot first, then distributes the remainder
+round-robin, then product, then style. If the cast is larger than the budget the
+request fails closed — a character is never silently dropped to fit.
+
+### Scenes
+
+Scenes are rows in `UGC_SHOTS`, one per scene, keyed by project + scene number so
+a replayed preparation reuses the row. Omitting `sceneNumber` prepares the next
+scene in the project. This replaces PR #32's fixed three-shot Hook/Product/Close
+plan.
+
+Each prepared scene carries continuity metadata: scene number, previous scene
+page id, participating character page ids and codes, prompt, and duration.
+
+### Optional schema additions (not applied automatically)
+
+The scene ledger currently writes only fields PR #32 already provisions
+(`Name`, `Record ID`, `Status`, `Project`, `Shot Number`, `Prompt`). To have the
+ledger also carry per-scene execution data, add these to `UGC_SHOTS` manually —
+this plugin never mutates live schema:
+
+| Property             | Type                         | Purpose                     |
+| -------------------- | ---------------------------- | --------------------------- |
+| `Duration Seconds`   | number                       | Scene duration as confirmed |
+| `Characters`         | relation → Character Library | Cast actually submitted     |
+| `Model`              | rich_text                    | Provider model id used      |
+| `Estimated Cost USD` | number                       | Shown at confirmation       |
+| `Actual Cost USD`    | number                       | Reported after generation   |
+| `Output R2 Key`      | rich_text                    | Archived result object key  |
+| `Previous Scene`     | relation → UGC_SHOTS         | Continuity link             |
+
+Until they exist the workflow keeps working; the data lives in the frozen scope
+rather than the ledger.
