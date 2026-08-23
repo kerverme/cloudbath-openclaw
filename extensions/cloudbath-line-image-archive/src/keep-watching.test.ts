@@ -64,16 +64,28 @@ function memoryStore() {
   };
 }
 
-function logger(): SafeLogger & {
-  error: ReturnType<typeof vi.fn>;
-  info: ReturnType<typeof vi.fn>;
+type LoggerMock = ReturnType<typeof vi.fn<SafeLogger["info"]>>;
+
+function logger(): {
+  error: LoggerMock;
+  info: LoggerMock;
+  warn: LoggerMock;
 } {
   return {
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
+    info: vi.fn<SafeLogger["info"]>(),
+    warn: vi.fn<SafeLogger["warn"]>(),
+    error: vi.fn<SafeLogger["error"]>(),
   };
 }
+
+type EnsureObject = (params: {
+  body: Uint8Array;
+  bucketName: string;
+  objectKey: string;
+  contentType: string;
+  contentLength: number;
+  sha256: string;
+}) => Promise<{ kind: "uploaded" | "existing"; etag?: string }>;
 
 function lineJob(filePath: string): InboundImageJob {
   return {
@@ -92,7 +104,7 @@ describe("KEEP_WATCHING silent ingest", () => {
   it("archives a safe image to the fixed R2 prefix and configured Notion target", async () => {
     const media = await managedPng();
     const state = memoryStore();
-    const ensureObject = vi.fn(async () => ({ kind: "uploaded" as const }));
+    const ensureObject = vi.fn<EnsureObject>(async () => ({ kind: "uploaded" }));
     const createRecord = vi.fn(async () => ({ pageId: "page-1", duplicate: false }));
     const subject = new KeepWatchingPipeline({
       stateDir: media.stateDir,
@@ -142,7 +154,7 @@ describe("KEEP_WATCHING silent ingest", () => {
   it("deduplicates stable LINE message identity before any R2 or Notion operation", async () => {
     const media = await managedPng();
     const state = memoryStore();
-    const ensureObject = vi.fn(async () => ({ kind: "uploaded" as const }));
+    const ensureObject = vi.fn<EnsureObject>(async () => ({ kind: "uploaded" }));
     const createRecord = vi.fn(async () => ({ pageId: "page-1", duplicate: false }));
     const subject = new KeepWatchingPipeline({
       stateDir: media.stateDir,
