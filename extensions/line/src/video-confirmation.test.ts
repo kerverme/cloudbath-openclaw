@@ -2,8 +2,8 @@ import type { PluginStateKeyedStore } from "openclaw/plugin-sdk/plugin-state-run
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const generateVideoMock = vi.fn();
-const sendMessageLineMock = vi.fn(async () => ({}));
-const resolveLineAccountMock = vi.fn(() => ({
+const sendMessageLineMock = vi.fn(async (..._args: unknown[]) => ({}));
+const resolveLineAccountMock = vi.fn((..._args: unknown[]) => ({
   accountId: "acct-1",
   enabled: true,
   channelAccessToken: "token",
@@ -11,14 +11,14 @@ const resolveLineAccountMock = vi.fn(() => ({
   tokenSource: "config" as const,
   config: {},
 }));
-const stageLineOutboundVideoMock = vi.fn(async () => ({
+const stageLineOutboundVideoMock = vi.fn(async (..._args: unknown[]) => ({
   url: "https://r2.example/video.mp4",
   objectKey: "outbound/line-video/x.mp4",
   contentType: "video/mp4",
   contentLength: 10,
   sha256: "abc",
 }));
-const stageLineVideoPreviewImageMock = vi.fn(async () => ({
+const stageLineVideoPreviewImageMock = vi.fn(async (..._args: unknown[]) => ({
   url: "https://r2.example/preview.jpg",
   objectKey: "outbound/line/preview.jpg",
   contentType: "image/jpeg",
