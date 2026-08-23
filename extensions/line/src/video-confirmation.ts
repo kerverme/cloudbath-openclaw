@@ -178,14 +178,15 @@ async function executeConfirmedLineVideoJob(params: {
     }
     const actualCostUsd = readOpenRouterUsageCost(result.metadata);
 
-    let videoUrl: string | undefined = video.url;
-    if (video.buffer) {
-      const staged = await stageLineOutboundVideo(video.buffer);
-      videoUrl = staged.url;
-    }
-    if (!videoUrl) {
+    const generatedSource = video.buffer ?? video.url;
+    if (!generatedSource) {
       throw new Error("Generated video has neither a buffer nor a deliverable URL");
     }
+    // Both provider buffers and transient provider URLs converge here. URL
+    // results are downloaded through the SSRF guard and their validated bytes
+    // are archived in the existing R2 bucket before LINE sees any URL.
+    const stagedVideo = await stageLineOutboundVideo(generatedSource);
+    const videoUrl = stagedVideo.url;
 
     await updateLineVideoJob({
       store: params.jobStore,
@@ -269,7 +270,11 @@ export function createLineVideoConfirmationGate(params: {
     }
 
     const accountId = ctx.accountId?.trim();
-    const conversationId = (ctx.conversationId ?? ctx.sessionKey ?? event.sessionKey)?.trim();
+    // before_dispatch's trusted native conversation id is the same LINE
+    // group/room/user identity used by the draft tool. Session ids/keys are
+    // intentionally excluded: they are OpenClaw lifecycle identities and are
+    // not stable aliases for a LINE conversation.
+    const conversationId = ctx.conversationId?.trim();
     const senderId = event.senderId?.trim();
     if (!accountId || !conversationId || !senderId) {
       return { handled: true, text: "ยืนยันสิทธิ์เจ้าของสำหรับ video draft นี้ไม่ได้" };
@@ -296,6 +301,11 @@ export function createLineVideoConfirmationGate(params: {
     if (
       draft.accountId !== accountId ||
       draft.conversationKey !== conversationKey ||
+      !draft.deliveryTo ||
+      buildLineVideoConversationKey({
+        accountId: draft.accountId,
+        conversationId: draft.deliveryTo,
+      }) !== conversationKey ||
       draft.ownerSenderId !== senderId
     ) {
       return { handled: true, text: "video draft นี้ไม่ตรงกับบทสนทนานี้" };

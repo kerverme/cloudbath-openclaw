@@ -23,10 +23,19 @@ import {
   S3Client,
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+import { fetchWithSsrFGuard, type SsrFPolicy } from "openclaw/plugin-sdk/ssrf-runtime";
 import { stageLineOutboundImage, type StagedLineImage } from "./outbound-media-staging.js";
 
 const OUTBOUND_LINE_VIDEO_PREFIX = "outbound/line-video";
 const SIGNED_URL_EXPIRY_SECONDS = 60 * 60;
+const MAX_VIDEO_BYTES = 512 * 1024 * 1024;
+const VIDEO_FETCH_TIMEOUT_MS = 60_000;
+const VIDEO_FETCH_POLICY: SsrFPolicy = { allowPrivateNetwork: false };
+
+type GuardedFetchResult = Awaited<ReturnType<typeof fetchWithSsrFGuard>>;
+type GuardedFetchLike = (
+  params: Parameters<typeof fetchWithSsrFGuard>[0],
+) => Promise<GuardedFetchResult>;
 
 export class LineVideoOutboundStagingError extends Error {
   constructor(readonly code: string) {
@@ -95,13 +104,101 @@ export type LineVideoOutboundStagingDependencies = {
   env?: NodeJS.ProcessEnv;
   s3Client?: { send(command: HeadObjectCommand | PutObjectCommand): Promise<unknown> };
   presign?: typeof getSignedUrl;
+  guardedFetch?: GuardedFetchLike;
 };
 
-/** Uploads (idempotently, content-addressed) a generated video buffer to R2 and returns a signed URL. */
+async function readResponseBytes(response: Response): Promise<Buffer> {
+  const declaredLength = Number(response.headers.get("content-length"));
+  if (Number.isFinite(declaredLength) && declaredLength > MAX_VIDEO_BYTES) {
+    fail("video_size_invalid");
+  }
+  if (!response.body) {
+    const bytes = Buffer.from(await response.arrayBuffer());
+    return bytes.byteLength <= MAX_VIDEO_BYTES ? bytes : fail("video_size_invalid");
+  }
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let length = 0;
+  try {
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk.done) {
+        break;
+      }
+      length += chunk.value.byteLength;
+      if (length > MAX_VIDEO_BYTES) {
+        await reader.cancel();
+        fail("video_size_invalid");
+      }
+      chunks.push(chunk.value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return Buffer.concat(
+    chunks.map((chunk) => Buffer.from(chunk)),
+    length,
+  );
+}
+
+async function downloadProviderVideo(
+  rawUrl: string,
+  guardedFetch: GuardedFetchLike,
+): Promise<Buffer> {
+  let url: URL;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    return fail("provider_url_invalid");
+  }
+  if (url.protocol !== "https:") {
+    return fail("provider_url_invalid");
+  }
+  let guarded: GuardedFetchResult;
+  try {
+    guarded = await guardedFetch({
+      url: url.toString(),
+      requireHttps: true,
+      maxRedirects: 3,
+      timeoutMs: VIDEO_FETCH_TIMEOUT_MS,
+      policy: VIDEO_FETCH_POLICY,
+      auditContext: "line-generated-video-source",
+    });
+  } catch {
+    return fail("provider_fetch_failed");
+  }
+  try {
+    if (guarded.response.status !== 200) {
+      return fail("provider_http_status_invalid");
+    }
+    const contentType =
+      guarded.response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() ?? "";
+    if (
+      contentType &&
+      !contentType.startsWith("video/") &&
+      contentType !== "application/octet-stream"
+    ) {
+      return fail("provider_content_type_invalid");
+    }
+    return await readResponseBytes(guarded.response);
+  } finally {
+    await guarded.release();
+  }
+}
+
+/**
+ * Archives generated video bytes in the existing Cloudbath R2 bucket and
+ * returns a signed URL. Provider URLs are always downloaded through the SSRF
+ * guard and re-staged; the transient provider URL is never sent to LINE.
+ */
 export async function stageLineOutboundVideo(
-  bytes: Buffer,
+  source: Buffer | string,
   dependencies: LineVideoOutboundStagingDependencies = {},
 ): Promise<StagedLineImage> {
+  const bytes =
+    typeof source === "string"
+      ? await downloadProviderVideo(source, dependencies.guardedFetch ?? fetchWithSsrFGuard)
+      : source;
   if (bytes.byteLength === 0) {
     fail("video_size_invalid");
   }
@@ -120,9 +217,28 @@ export async function stageLineOutboundVideo(
       credentials: { accessKeyId: config.accessKeyId, secretAccessKey: config.secretAccessKey },
     });
 
+  let existing: unknown;
   try {
-    await client.send(new HeadObjectCommand({ Bucket: config.bucketName, Key: objectKey }));
+    existing = await client.send(
+      new HeadObjectCommand({ Bucket: config.bucketName, Key: objectKey }),
+    );
   } catch {
+    existing = undefined;
+  }
+  if (existing) {
+    const head = existing as {
+      Metadata?: Record<string, string>;
+      ContentLength?: number;
+      ContentType?: string;
+    };
+    if (
+      head.Metadata?.sha256 !== sha256 ||
+      head.ContentLength !== bytes.byteLength ||
+      head.ContentType?.split(";", 1)[0]?.trim().toLowerCase() !== contentType
+    ) {
+      fail("r2_object_conflict");
+    }
+  } else {
     try {
       await client.send(
         new PutObjectCommand({
@@ -147,6 +263,9 @@ export async function stageLineOutboundVideo(
       new GetObjectCommand({ Bucket: config.bucketName, Key: objectKey }),
       { expiresIn: SIGNED_URL_EXPIRY_SECONDS },
     );
+    if (new URL(url).protocol !== "https:") {
+      return fail("signed_url_generation_failed");
+    }
     return { url, objectKey, contentType, contentLength: bytes.byteLength, sha256 };
   } catch {
     return fail("signed_url_generation_failed");

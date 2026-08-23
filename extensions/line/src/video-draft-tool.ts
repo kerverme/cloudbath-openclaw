@@ -61,10 +61,11 @@ function nearestSupported(values: readonly number[], requested: number): number 
   );
 }
 
-function resolveDuration(model: OpenRouterVideoModel, requested: number | undefined): number {
+function resolveDefaultDuration(model: OpenRouterVideoModel): number {
   const supported = model.supportedDurationSeconds;
-  const target = requested ?? DEFAULT_DURATION_SECONDS;
-  return supported.length > 0 ? nearestSupported(supported, target) : target;
+  return supported.length > 0
+    ? nearestSupported(supported, DEFAULT_DURATION_SECONDS)
+    : DEFAULT_DURATION_SECONDS;
 }
 
 function resolveChoice(
@@ -124,6 +125,7 @@ type LineVideoDraftResolution =
   | "provider_auth_unavailable"
   | "catalog_unavailable"
   | "model_unavailable"
+  | "unsupported_duration"
   | "unknown_cost"
   | "over_limit";
 
@@ -161,6 +163,8 @@ type CreateLineVideoDraftToolParams = {
   senderIsOwner?: boolean;
   requesterSenderId?: string;
   sessionId?: string;
+  /** Trusted LINE-native group/room/user id for the active inbound turn. */
+  nativeConversationId?: string;
   /**
    * Host session key. The one identity shared with the outbound
    * `message_sending` hook, so it is what the relay correlates on.
@@ -290,13 +294,15 @@ export function createLineVideoDraftTool(params: CreateLineVideoDraftToolParams)
           jsonResult({ resolution: "invalid_input", reason: "prompt is required" }),
         );
       }
-      const sessionId = params.sessionId?.trim();
       const requesterSenderId = params.requesterSenderId?.trim();
       const accountId = params.accountId?.trim();
+      const deliveryTo = params.deliveryTo?.trim();
+      const nativeConversationId = (params.nativeConversationId ?? deliveryTo)?.trim();
       if (
-        !sessionId ||
+        !nativeConversationId ||
         !requesterSenderId ||
         !accountId ||
+        !deliveryTo ||
         !params.draftStore ||
         !params.preferenceStore ||
         !params.activeJobLockStore
@@ -305,9 +311,13 @@ export function createLineVideoDraftTool(params: CreateLineVideoDraftToolParams)
       }
       const conversationKey = buildLineVideoConversationKey({
         accountId,
-        conversationId: sessionId,
+        conversationId: nativeConversationId,
       });
-      if (!conversationKey) {
+      const deliveryConversationKey = buildLineVideoConversationKey({
+        accountId,
+        conversationId: deliveryTo,
+      });
+      if (!conversationKey || deliveryConversationKey !== conversationKey) {
         return failDeterministic("context_unavailable");
       }
 
@@ -364,10 +374,31 @@ export function createLineVideoDraftTool(params: CreateLineVideoDraftToolParams)
         });
       }
 
-      const durationSeconds = resolveDuration(
-        model,
-        typeof input.durationSeconds === "number" ? input.durationSeconds : undefined,
-      );
+      const requestedDurationSeconds =
+        typeof input.durationSeconds === "number" ? input.durationSeconds : undefined;
+      if (
+        requestedDurationSeconds !== undefined &&
+        model.supportedDurationSeconds.length > 0 &&
+        !model.supportedDurationSeconds.includes(requestedDurationSeconds)
+      ) {
+        const supported = model.supportedDurationSeconds.toSorted((left, right) => left - right);
+        const text = [
+          "❌ ยังไม่ได้สร้าง Video Draft",
+          `สาเหตุ: ระยะเวลา ${requestedDurationSeconds} วินาทีไม่รองรับสำหรับโมเดลนี้`,
+          `ระยะเวลาที่รองรับ: ${supported.join(", ")} วินาที (สูงสุด ${supported.at(-1)} วินาที)`,
+          "ยังไม่มีการส่งคำขอสร้างวิดีโอและยังไม่มีค่าใช้จ่าย",
+        ].join("\n");
+        await recordDeterministicText(text);
+        return finish("unsupported_duration", {
+          content: [{ type: "text" as const, text }],
+          details: {
+            resolution: "unsupported_duration",
+            requestedDurationSeconds,
+            supportedDurationSeconds: supported,
+          },
+        });
+      }
+      const durationSeconds = requestedDurationSeconds ?? resolveDefaultDuration(model);
       const aspectRatio = resolveChoice(
         model.supportedAspectRatios,
         typeof input.aspectRatio === "string" ? input.aspectRatio : undefined,
@@ -442,7 +473,7 @@ export function createLineVideoDraftTool(params: CreateLineVideoDraftToolParams)
         resolution,
         audio,
         estimatedCostUsd: costGuard.estimatedCostUsd,
-        ...(params.deliveryTo ? { deliveryTo: params.deliveryTo } : {}),
+        deliveryTo,
         ...(params.now ? { now: params.now } : {}),
       });
 

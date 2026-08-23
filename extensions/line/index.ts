@@ -202,6 +202,7 @@ export default defineBundledChannelEntry({
           senderIsOwner: ctx.senderIsOwner,
           requesterSenderId: ctx.requesterSenderId,
           sessionId: ctx.sessionId,
+          nativeConversationId: ctx.nativeChannelId,
           sessionKey: ctx.sessionKey,
           // Awaited inside execute(): the relay must hold the text before the
           // tool returns, or the model's reply could reach the outbound hook

@@ -28,6 +28,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig, PluginRuntime } from "../api.js";
 import { linePlugin } from "./channel.js";
 import { setLineRuntime } from "./runtime.js";
+import type { LineVideoDraft } from "./video-draft-store.js";
+import type { LineVideoActiveJobLock, LineVideoJob } from "./video-job-store.js";
 
 const generateVideoMock = vi.fn();
 
@@ -82,8 +84,11 @@ vi.mock("./accounts.js", () => ({
 }));
 
 const lineEntry = (await import("../index.js")).default;
+const { createLineVideoConfirmationGate } = await import("./video-confirmation.js");
 const { LINE_VIDEO_DRAFT_TOOL_NAME } = await import("./video-draft-tool.js");
 const { LINE_VIDEO_DRAFT_NAMESPACE } = await import("./video-draft-store.js");
+const { LINE_VIDEO_ACTIVE_JOB_NAMESPACE, LINE_VIDEO_JOB_NAMESPACE } =
+  await import("./video-job-store.js");
 
 const OWNER_ID = "U-owner-production-seam";
 const GROUP_ID = "C11111111111111111111111111111111";
@@ -267,9 +272,10 @@ describe(`LINE production outbound seam for '${PRODUCTION_REQUEST}'`, () => {
       messageChannel: "line",
       senderIsOwner: true,
       requesterSenderId: OWNER_ID,
-      sessionId: GROUP_ID,
+      sessionId: "ephemeral-session-generation-not-the-line-group",
       sessionKey: SESSION_KEY,
       agentAccountId: "acct-1",
+      nativeChannelId: `line:group:${GROUP_ID}`,
       deliveryContext: { channel: "line", to: GROUP_ID, accountId: "acct-1" },
     });
     const tools = Array.isArray(materialized) ? materialized : [materialized];
@@ -337,6 +343,55 @@ describe(`LINE production outbound seam for '${PRODUCTION_REQUEST}'`, () => {
         durationSeconds: 5,
       });
 
+      // Production regression: the tool receives an ephemeral sessionId,
+      // while before_dispatch receives the raw LINE conversationId. They are
+      // not interchangeable; both paths must derive the same canonical key
+      // from the trusted native LINE group identity.
+      const scheduled: Array<() => Promise<void>> = [];
+      const confirmationGate = createLineVideoConfirmationGate({
+        draftStore: draftStore as PluginStateKeyedStore<LineVideoDraft>,
+        jobStore: stores.get(LINE_VIDEO_JOB_NAMESPACE) as PluginStateKeyedStore<LineVideoJob>,
+        activeJobLockStore: stores.get(
+          LINE_VIDEO_ACTIVE_JOB_NAMESPACE,
+        ) as PluginStateKeyedStore<LineVideoActiveJobLock>,
+        resolveApiKey: async () => "test-openrouter-key",
+        fetchImpl: globalThis.fetch,
+        scheduleBackgroundWork: (run) => scheduled.push(run),
+      });
+      const confirmEvent = {
+        content: "",
+        body: `ยืนยัน VIDEO ${shownCode}`,
+        channel: "line",
+        senderId: OWNER_ID,
+        senderIsOwner: true,
+      };
+
+      const otherConversation = await confirmationGate(confirmEvent, {
+        accountId: "acct-1",
+        conversationId: `${GROUP_ID}-other`,
+        sessionKey: SESSION_KEY,
+      });
+      expect(otherConversation?.text).toContain("ไม่ตรงกับบทสนทนานี้");
+      expect(scheduled).toHaveLength(0);
+      expect(generateVideoMock).not.toHaveBeenCalled();
+
+      const nonOwner = await confirmationGate(
+        { ...confirmEvent, senderId: "U-other", senderIsOwner: false },
+        { accountId: "acct-1", conversationId: GROUP_ID, sessionKey: SESSION_KEY },
+      );
+      expect(nonOwner?.text).toContain("ไม่มีสิทธิ์");
+      expect(scheduled).toHaveLength(0);
+      expect(generateVideoMock).not.toHaveBeenCalled();
+
+      const confirmed = await confirmationGate(confirmEvent, {
+        accountId: "acct-1",
+        conversationId: GROUP_ID,
+        sessionKey: SESSION_KEY,
+      });
+      expect(confirmed?.text).toContain("เริ่มสร้างวิดีโอแล้ว");
+      expect(scheduled).toHaveLength(1);
+      expect(generateVideoMock).not.toHaveBeenCalled();
+
       // Exercise the other real outbound seam. Provider-native LINE replies
       // use reply_payload_sending and never enter the durable message tool.
       const replySessionKey = `${SESSION_KEY}:provider-native`;
@@ -347,9 +402,10 @@ describe(`LINE production outbound seam for '${PRODUCTION_REQUEST}'`, () => {
         messageChannel: "line",
         senderIsOwner: true,
         requesterSenderId: OWNER_ID,
-        sessionId: replyGroupId,
+        sessionId: "another-ephemeral-session-generation",
         sessionKey: replySessionKey,
         agentAccountId: "acct-1",
+        nativeChannelId: `line:group:${replyGroupId}`,
         deliveryContext: { channel: "line", to: replyGroupId, accountId: "acct-1" },
       });
       const replyTools = Array.isArray(replyToolMaterialized)
