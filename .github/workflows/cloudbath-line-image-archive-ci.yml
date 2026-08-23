@@ -62,7 +62,9 @@ jobs:
           node scripts/run-vitest.mjs run \
             extensions/cloudbath-line-image-archive/src/analysis.test.ts \
             extensions/cloudbath-line-image-archive/src/config.test.ts \
+            extensions/cloudbath-line-image-archive/src/group-workspace-policy.test.ts \
             extensions/cloudbath-line-image-archive/src/inbound.test.ts \
+            extensions/cloudbath-line-image-archive/src/keep-watching.test.ts \
             extensions/cloudbath-line-image-archive/src/notion-schema.test.ts \
             extensions/cloudbath-line-image-archive/src/notion.test.ts \
             extensions/cloudbath-line-image-archive/src/notion-tools.test.ts \
@@ -249,6 +251,8 @@ jobs:
               test -f /app/extensions/cloudbath-line-image-archive/index.ts
               test -f /app/extensions/cloudbath-line-image-archive/openclaw.plugin.json
               test -f /app/extensions/cloudbath-line-image-archive/src/notion-tools.ts
+              test -f /app/extensions/cloudbath-line-image-archive/src/group-workspace-policy.ts
+              test -f /app/extensions/cloudbath-line-image-archive/src/keep-watching.ts
               test -f /app/extensions/cloudbath-line-image-archive/profiles/construction-site-progress.v1.json
               test -f /app/extensions/line/index.ts
               test -f /app/extensions/line/openclaw.plugin.json
