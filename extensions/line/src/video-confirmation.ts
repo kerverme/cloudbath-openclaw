@@ -279,7 +279,9 @@ async function executeConfirmedLineVideoJob(params: {
       // URL, and only for the scene this confirmation approved.
       await notionLibrary.markUgcCompleted(params.ugcScope, actualCostUsd, {
         r2ObjectKey: stagedVideo.objectKey,
+        assetUrl: videoUrl,
         completedAt: params.now(),
+        model: params.draft.model,
       });
     }
 

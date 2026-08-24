@@ -528,34 +528,82 @@ plan.
 Each prepared scene carries continuity metadata: scene number, previous scene
 page id, participating character page ids and codes, prompt, and duration.
 
-### Scene result ledger
+### Scene result ledger (live UGC_SHOTS columns)
 
-After a confirmed generation succeeds, the **confirmed scene only** is updated —
-completing scene 1 never marks scene 2 completed. The scene row records Status,
-and where the live schema has the column: Actual Cost USD, the archived R2
-object key, Completed At, Duration Seconds. On failure the scene is marked
-Failed with a sanitized Failure Reason.
+Writes use the **actual production column names**. There is no `Shot Number`,
+`Duration Seconds` or `Output R2 Key`, and neither UGC database has a
+`Record ID`.
 
-The R2 key written is always the **archived** object, never the transient
-provider URL.
+| Workflow value      | Live UGC_SHOTS column     |
+| ------------------- | ------------------------- |
+| scene order         | `Shot Order`              |
+| scene duration      | `Duration`                |
+| archived object key | `Generated R2 Object Key` |
+| hosted result URL   | `Generated Asset URL`     |
+| provider model      | `Model`                   |
+| cost                | `Actual Cost USD`         |
+| completion time     | `Completed At`            |
+| sanitized failure   | `Failure Reason`          |
 
-### Optional UGC_SHOTS columns (not applied automatically)
+After a confirmed generation only the **confirmed scene** is written —
+completing scene 1 never marks scene 2 completed. Optional columns are written
+only when the live data source has them; Notion rejects a PATCH naming an
+unknown property, so an absent column would otherwise lose the Status write too.
 
-The ledger writes optional columns only when the live data source actually has
-them: Notion rejects a PATCH naming an unknown property, so an absent column
-would otherwise lose the Status write too. Add these manually to record full
-per-scene execution data — this plugin never provisions schema:
+### Status values
 
-| Property           | Type                         | Written when present                                  |
-| ------------------ | ---------------------------- | ----------------------------------------------------- |
-| `Actual Cost USD`  | number                       | Cost reported by the provider                         |
-| `Output R2 Key`    | rich_text                    | Archived result object key                            |
-| `Completed At`     | date                         | Completion timestamp                                  |
-| `Duration Seconds` | number                       | Scene duration as confirmed                           |
-| `Failure Reason`   | rich_text                    | Sanitized failure cause (truncated)                   |
-| `Characters`       | relation → Character Library | Not written yet; cast lives in the frozen lock        |
-| `Previous Scene`   | relation → UGC_SHOTS         | Not written yet; continuity lives in the frozen scope |
+Both UGC databases expose exactly `Draft`, `Ready`, `Generating`, `Completed`,
+`Failed`. Nothing writes `Processing` or `Awaiting Confirmation`. The mapping:
 
-Without them the workflow keeps working and the data stays in the frozen scope.
-`Status`, `Project`, `Shot Number`, `Prompt`, `Record ID` and `Name` are already
-provisioned by PR #32 and always written.
+| Workflow state                        | Status       |
+| ------------------------------------- | ------------ |
+| new project / scene                   | `Draft`      |
+| prepared, awaiting owner confirmation | `Ready`      |
+| paid execution started                | `Generating` |
+| success                               | `Completed`  |
+| failure                               | `Failed`     |
+
+Startup schema validation checks these options exist, so a drifted database
+fails closed at validation instead of when a paid scene tries to report.
+
+### Project identity without a Record ID
+
+Live UGC_PROJECTS has no `Record ID`, and `Project ID` is a Notion-managed
+`unique_id` that cannot be written. Create-or-reuse therefore resolves identity
+from what the database already stores: the `Product` relation plus the exact set
+of `Character` relations. F1+F2 is a different project from F1 alone, and a
+replayed preparation reuses the same row.
+
+**No new property is required.** The deterministic record id still exists but is
+a durable-state key only (character lock, frozen scope) and is never written to
+Notion.
+
+Scenes resolve the same way — by `Project` relation plus `Shot Order`.
+
+### Project-level result
+
+UGC_PROJECTS is written with `Status`, `Actual Cost USD`, `Video Model`,
+`Failure Reason`, and — only once every scene in the project is settled —
+`Final R2 Object Key`, `Final Video URL` and `Completed At`.
+
+Project status is **derived, never assumed**: a completed scene promotes the
+project only when no sibling scene is still `Draft`/`Ready`/`Generating`.
+Finishing scene 1 of a two-scene project leaves the project `Generating`. If
+sibling state cannot be read, the project is not promoted.
+
+Nothing is stitched, so `Final Video URL` is the last completed scene's asset,
+not a combined reel.
+
+### Project prompt
+
+Live UGC_PROJECTS has no `Prompt` column. `Script` was considered and rejected —
+it is a script field, not a generation prompt, and reusing it would misrepresent
+its meaning. The prompt is preserved per scene in `Prompt` on UGC_SHOTS and in
+the durable frozen scope.
+
+### No automatic schema mutation
+
+This plugin never provisions or alters Notion schema. Every column above already
+exists in production; nothing further needs to be added for the current flow.
+`Characters` and `Previous Scene` relations on UGC_SHOTS are **not** written —
+cast and continuity live in the frozen scope, which is what execution reads.

@@ -53,6 +53,7 @@ type NotionPropertyValue = {
   title?: Array<{ plain_text?: string }>;
   rich_text?: Array<{ plain_text?: string }>;
   number?: number | null;
+  relation?: Array<{ id?: string }>;
   url?: string | null;
   files?: Array<{
     type?: string;
@@ -103,30 +104,47 @@ type UgcPrepareToolContext = {
   nativeConversationId?: string;
 };
 
+/**
+ * Status options the live UGC databases actually offer. Writing anything else
+ * makes Notion reject the update, so the set is validated at startup rather
+ * than discovered when a paid scene tries to report its result.
+ */
+export const UGC_STATUS_OPTIONS = ["Draft", "Ready", "Generating", "Completed", "Failed"] as const;
+export type UgcStatus = (typeof UGC_STATUS_OPTIONS)[number];
+
+/**
+ * Contract against the LIVE production schemas. Names here are the real column
+ * names -- `Shot Order`, `Duration`, `Generated R2 Object Key` -- not the
+ * invented ones an earlier draft assumed. Neither UGC_PROJECTS nor UGC_SHOTS
+ * has a `Record ID`, so create-or-reuse identity comes from live relations
+ * (see findProjectByCast / findSceneByOrder) instead of a synthetic column.
+ */
 const CAPABILITY_SCHEMAS: Readonly<
   Record<
     UgcCapabilityId,
-    Readonly<Record<string, { type: string; relationTarget?: UgcCapabilityId }>>
+    Readonly<
+      Record<
+        string,
+        { type: string; relationTarget?: UgcCapabilityId; statusOptions?: readonly string[] }
+      >
+    >
   >
 > = {
   PRODUCT_LIBRARY: { Name: { type: "title" } },
   CHARACTER_LIBRARY: { Name: { type: "title" } },
   UGC_PROJECTS: {
     Name: { type: "title" },
-    "Record ID": { type: "rich_text" },
-    Status: { type: "select" },
+    Status: { type: "select", statusOptions: UGC_STATUS_OPTIONS },
     Product: { type: "relation", relationTarget: "PRODUCT_LIBRARY" },
     Character: { type: "relation", relationTarget: "CHARACTER_LIBRARY" },
-    Prompt: { type: "rich_text" },
     "Estimated Cost USD": { type: "number" },
     "Actual Cost USD": { type: "number" },
   },
   UGC_SHOTS: {
     Name: { type: "title" },
-    "Record ID": { type: "rich_text" },
-    Status: { type: "select" },
+    Status: { type: "select", statusOptions: UGC_STATUS_OPTIONS },
     Project: { type: "relation", relationTarget: "UGC_PROJECTS" },
-    "Shot Number": { type: "number" },
+    "Shot Order": { type: "number" },
     Prompt: { type: "rich_text" },
   },
   AI_VIDEO_LIBRARY: {
@@ -142,6 +160,14 @@ const CAPABILITY_SCHEMAS: Readonly<
     Character: { type: "relation", relationTarget: "CHARACTER_LIBRARY" },
   },
 };
+
+/** Reads `Shot Order` from a live UGC_SHOTS row. */
+function sceneOrder(page: NotionPage): number | undefined {
+  const property = page.properties?.["Shot Order"];
+  return property?.type === "number" && typeof property.number === "number"
+    ? property.number
+    : undefined;
+}
 
 function canonicalNotionId(value: string | undefined): string | undefined {
   const normalized = value?.trim().toLowerCase().replaceAll("-", "");
@@ -377,6 +403,19 @@ export class UgcNotionWorkflowClient {
               throw new Error(`${capabilityId} Notion relation is incompatible at ${name}`);
             }
           }
+          if (contract.statusOptions) {
+            // Every status this workflow writes must exist as an option, or a
+            // completed paid scene would fail to record its own result.
+            const available = new Set(
+              (property.select?.options ?? []).map((option) => option.name),
+            );
+            const missing = contract.statusOptions.filter((option) => !available.has(option));
+            if (missing.length > 0) {
+              throw new Error(
+                `${capabilityId} Notion status options are incompatible at ${name}: missing ${missing.join(", ")}`,
+              );
+            }
+          }
         }
         return source;
       })();
@@ -473,16 +512,6 @@ export class UgcNotionWorkflowClient {
     return exact[0]!;
   }
 
-  private async findByRecordId(target: NotionTarget, id: string): Promise<NotionPage | undefined> {
-    const pages = await this.queryAll(target, {
-      filter: { property: "Record ID", rich_text: { equals: id } },
-    });
-    if (pages.length > 1) {
-      throw new Error("Notion record identity is duplicated");
-    }
-    return pages[0];
-  }
-
   private async createPage(
     target: NotionTarget,
     properties: Record<string, unknown>,
@@ -497,6 +526,34 @@ export class UgcNotionWorkflowClient {
     return this.assertPage(page, target);
   }
 
+  /**
+   * Finds the project for this exact cast.
+   *
+   * Live UGC_PROJECTS has no `Record ID`, and `Project ID` is a Notion-managed
+   * unique_id we cannot write, so identity comes from what the database
+   * actually stores: the Product relation plus the exact set of Character
+   * relations. F1+F2 is therefore a different project from F1 alone, and a
+   * replayed preparation reuses the same row instead of forking one.
+   */
+  private async findProjectByCast(params: {
+    target: NotionTarget;
+    productPageId: string;
+    characterPageIds: readonly string[];
+  }): Promise<NotionPage | undefined> {
+    const wanted = [...params.characterPageIds].toSorted().join("|");
+    const pages = await this.queryAll(params.target, {
+      filter: { property: "Product", relation: { contains: params.productPageId } },
+    });
+    return pages.find((page) => {
+      const cast = (page.properties?.Character?.relation ?? [])
+        .map((entry) => entry.id ?? "")
+        .filter(Boolean)
+        .toSorted()
+        .join("|");
+      return cast === wanted;
+    });
+  }
+
   async createOrReuseProject(params: {
     capabilities: Readonly<Record<UgcCapabilityId, NotionTarget>>;
     accountId: string;
@@ -504,67 +561,81 @@ export class UgcNotionWorkflowClient {
     product: NotionPage;
     characterPageIds: readonly string[];
     characterLabel?: string;
-    prompt: string;
   }): Promise<{ page: NotionPage; recordId: string }> {
     const target = params.capabilities.UGC_PROJECTS;
     await this.schema("UGC_PROJECTS", target, params.capabilities);
+    // Durable-state key only (character lock, scene scope). Never written to
+    // Notion -- the live schema has no column for it.
     const id = recordId({
       accountId: params.accountId,
       groupId: params.groupId,
       productPageId: params.product.id!,
-      // The whole cast identifies the project: F1+F2 is a different project
-      // from F1 alone, so their scenes and locks never collide.
-      characterPageId: params.characterPageIds.join("|") || undefined,
+      characterPageId: [...params.characterPageIds].toSorted().join("|") || undefined,
     });
-    const existing = await this.findByRecordId(target, id);
+    const existing = await this.findProjectByCast({
+      target,
+      productPageId: params.product.id!,
+      characterPageIds: params.characterPageIds,
+    });
     if (existing) {
       return { page: existing, recordId: id };
     }
     const productName = plainText(params.product.properties?.Name);
     const page = await this.createPage(target, {
       Name: title(`${productName}${params.characterLabel ? ` × ${params.characterLabel}` : ""}`),
-      "Record ID": richText(id),
-      Status: { select: { name: "Draft" } },
+      Status: { select: { name: "Draft" satisfies UgcStatus } },
       Product: relation(params.product.id),
-      Character: relation(params.characterPageIds[0]),
-      Prompt: richText(params.prompt),
+      // The whole frozen cast, not just the first character: a project running
+      // F1 and F2 must relate to both library pages.
+      Character: { relation: params.characterPageIds.map((pageId) => ({ id: pageId })) },
       "Estimated Cost USD": { number: null },
       "Actual Cost USD": { number: null },
     });
     return { page, recordId: id };
   }
 
+  /** Read-only scene lookup by order. Never creates. */
+  async findSceneByOrder(params: {
+    capabilities: Readonly<Record<UgcCapabilityId, NotionTarget>>;
+    projectPageId: string;
+    sceneNumber: number;
+  }): Promise<NotionPage | undefined> {
+    const pages = await this.queryAll(params.capabilities.UGC_SHOTS, {
+      filter: { property: "Project", relation: { contains: params.projectPageId } },
+    });
+    return pages.find((page) => sceneOrder(page) === params.sceneNumber);
+  }
+
   /**
-   * One UGC_SHOTS row per scene, keyed by project + scene number so a replayed
-   * preparation reuses the row instead of forking the ledger. Uses only fields
-   * PR #32 already provisions; see README for the optional additions that would
-   * let the ledger also carry duration, cast and output key.
+   * One UGC_SHOTS row per scene, identified by its Project relation plus
+   * `Shot Order`, so a replayed preparation reuses the row.
    */
   async createOrReuseScene(params: {
     capabilities: Readonly<Record<UgcCapabilityId, NotionTarget>>;
     projectPageId: string;
-    projectRecordId: string;
     sceneNumber: number;
     prompt: string;
+    durationSeconds?: number;
   }): Promise<NotionPage> {
     const target = params.capabilities.UGC_SHOTS;
     await this.schema("UGC_SHOTS", target, params.capabilities);
-    const id = hashKey("ugc-scene-v1", params.projectRecordId, String(params.sceneNumber));
-    const existing = await this.findByRecordId(target, id);
+    const existing = await this.findSceneByOrder(params);
     if (existing) {
       return existing;
     }
     return await this.createPage(target, {
       Name: title(`Scene ${params.sceneNumber}`),
-      "Record ID": richText(id),
-      Status: { select: { name: "Draft" } },
+      Status: { select: { name: "Draft" satisfies UgcStatus } },
       Project: relation(params.projectPageId),
-      "Shot Number": { number: params.sceneNumber },
+      "Shot Order": { number: params.sceneNumber },
       Prompt: richText(params.prompt),
+      ...(params.durationSeconds !== undefined
+        ? { Duration: { number: params.durationSeconds } }
+        : {}),
     });
   }
 
-  /** Highest scene number already recorded for a project, 0 when none. */
+  /** Highest scene order already recorded for a project, 0 when none. */
   async latestSceneNumber(params: {
     capabilities: Readonly<Record<UgcCapabilityId, NotionTarget>>;
     projectPageId: string;
@@ -573,9 +644,8 @@ export class UgcNotionWorkflowClient {
       filter: { property: "Project", relation: { contains: params.projectPageId } },
     });
     return pages.reduce((highest, page) => {
-      const property = page.properties?.["Shot Number"];
-      const value = property?.type === "number" ? property.number : undefined;
-      return typeof value === "number" && value > highest ? value : highest;
+      const value = sceneOrder(page);
+      return value !== undefined && value > highest ? value : highest;
     }, 0);
   }
 
@@ -583,11 +653,22 @@ export class UgcNotionWorkflowClient {
     scope: FrozenUgcVideoScope;
     estimatedCostUsd: number;
   }): Promise<void> {
+    // "Ready" is the live option for prepared-and-awaiting-owner; the database
+    // has no "Awaiting Confirmation".
     await this.request(`/v1/pages/${encodeURIComponent(params.scope.projectPageId)}`, {
       method: "PATCH",
       body: JSON.stringify({
         properties: {
-          Status: { select: { name: "Awaiting Confirmation" } },
+          Status: { select: { name: "Ready" satisfies UgcStatus } },
+          "Estimated Cost USD": { number: params.estimatedCostUsd },
+        },
+      }),
+    });
+    await this.request(`/v1/pages/${encodeURIComponent(params.scope.scenePageId)}`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        properties: {
+          Status: { select: { name: "Ready" satisfies UgcStatus } },
           "Estimated Cost USD": { number: params.estimatedCostUsd },
         },
       }),
@@ -762,7 +843,6 @@ export class CloudbathUgcVideoWorkflow {
           ...(input.characterNames.length > 0
             ? { characterLabel: input.characterNames.join(" × ") }
             : {}),
-          prompt: input.prompt,
         });
 
         // The cast is frozen once per project. A later scene reuses the stored
@@ -812,22 +892,30 @@ export class CloudbathUgcVideoWorkflow {
             capabilities: this.config.capabilities,
             projectPageId: project.page.id!,
           })) + 1;
+        // Read-only. Creating the previous scene here would mint a phantom
+        // Scene 1 carrying Scene 2's prompt, so a missing predecessor fails
+        // closed instead.
         const previousScene =
           sceneNumber > 1
-            ? await this.notion.createOrReuseScene({
+            ? await this.notion.findSceneByOrder({
                 capabilities: this.config.capabilities,
                 projectPageId: project.page.id!,
-                projectRecordId: project.recordId,
                 sceneNumber: sceneNumber - 1,
-                prompt: input.prompt,
               })
             : undefined;
+        if (sceneNumber > 1 && !previousScene) {
+          throw new Error(
+            `Scene ${sceneNumber} cannot be prepared because scene ${sceneNumber - 1} does not exist in this project`,
+          );
+        }
         const scenePage = await this.notion.createOrReuseScene({
           capabilities: this.config.capabilities,
           projectPageId: project.page.id!,
-          projectRecordId: project.recordId,
           sceneNumber,
           prompt: input.prompt,
+          ...(input.durationSeconds !== undefined
+            ? { durationSeconds: input.durationSeconds }
+            : {}),
         });
         const scene: UgcSceneContinuity = Object.freeze({
           sceneNumber,

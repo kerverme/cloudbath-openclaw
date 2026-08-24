@@ -103,9 +103,20 @@ function requestBody(body: BodyInit | null | undefined): string {
 function schema(id: UgcCapabilityId) {
   const properties: Record<string, unknown> = { Name: { type: "title" } };
   if (id === "UGC_PROJECTS") {
+    // LIVE UGC_PROJECTS: no Record ID, no Prompt.
     Object.assign(properties, {
-      "Record ID": { type: "rich_text" },
-      Status: { type: "select" },
+      Status: {
+        type: "select",
+        select: {
+          options: [
+            { name: "Draft" },
+            { name: "Ready" },
+            { name: "Generating" },
+            { name: "Completed" },
+            { name: "Failed" },
+          ],
+        },
+      },
       Product: {
         type: "relation",
         relation: { data_source_id: LIVE_TARGETS.PRODUCT_LIBRARY.dataSourceId },
@@ -114,24 +125,46 @@ function schema(id: UgcCapabilityId) {
         type: "relation",
         relation: { data_source_id: LIVE_TARGETS.CHARACTER_LIBRARY.dataSourceId },
       },
-      Prompt: { type: "rich_text" },
       "Estimated Cost USD": { type: "number" },
       "Actual Cost USD": { type: "number" },
     });
   } else if (id === "UGC_SHOTS") {
+    // LIVE UGC_SHOTS: Shot Order, not Shot Number.
     Object.assign(properties, {
-      "Record ID": { type: "rich_text" },
-      Status: { type: "select" },
+      Status: {
+        type: "select",
+        select: {
+          options: [
+            { name: "Draft" },
+            { name: "Ready" },
+            { name: "Generating" },
+            { name: "Completed" },
+            { name: "Failed" },
+          ],
+        },
+      },
       Project: {
         type: "relation",
         relation: { data_source_id: LIVE_TARGETS.UGC_PROJECTS.dataSourceId },
       },
-      "Shot Number": { type: "number" },
+      "Shot Order": { type: "number" },
       Prompt: { type: "rich_text" },
+      Duration: { type: "number" },
     });
   } else if (id === "AI_VIDEO_LIBRARY") {
     Object.assign(properties, {
-      Status: { type: "select" },
+      Status: {
+        type: "select",
+        select: {
+          options: [
+            { name: "Draft" },
+            { name: "Ready" },
+            { name: "Generating" },
+            { name: "Completed" },
+            { name: "Failed" },
+          ],
+        },
+      },
       "Video Job ID": { type: "rich_text" },
       "UGC Project": {
         type: "relation",
@@ -219,10 +252,10 @@ function liveFetch() {
           has_more: false,
         });
       }
+      // Live schemas have no Record ID; create-or-reuse resolves by relation.
       if (
-        body.filter?.property === "Record ID" &&
-        (dataSourceId === LIVE_TARGETS.UGC_PROJECTS.dataSourceId ||
-          dataSourceId === LIVE_TARGETS.UGC_SHOTS.dataSourceId)
+        body.filter?.property === "Product" &&
+        dataSourceId === LIVE_TARGETS.UGC_PROJECTS.dataSourceId
       ) {
         return Response.json({ results: [], has_more: false });
       }
@@ -354,7 +387,7 @@ describe("Cloudbath UGC workflow", () => {
     expect(shots).toHaveLength(1);
     expect(shots[0]?.properties).toMatchObject({
       Project: { relation: [{ id: "created-page-1" }] },
-      "Shot Number": { number: 1 },
+      "Shot Order": { number: 1 },
     });
 
     const pendingScope = await pending.lookup(ugcPendingKey("line-session"));

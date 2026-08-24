@@ -56,10 +56,22 @@ function scopeForScene(sceneNumber: number, scenePageId: string): LineVideoUgcSc
 }
 
 /** `sceneProperties` controls which optional ledger columns the stub advertises. */
-function stubNotion(sceneProperties: string[]) {
+function stubNotion(
+  sceneProperties: string[],
+  siblingScenes: Array<{ id: string; status: string }> = [],
+) {
   const patches: Array<{ pageId: string; properties: Record<string, any> }> = [];
   const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
     const url = new URL(typeof input === "string" ? input : (input as URL).href);
+    // Sibling scenes for the derived project status.
+    if (url.pathname.endsWith("/query")) {
+      return Response.json({
+        results: siblingScenes.map((scene) => ({
+          id: scene.id,
+          properties: { Status: { select: { name: scene.status } } },
+        })),
+      });
+    }
     if (url.pathname.startsWith("/v1/data_sources/")) {
       const id = url.pathname.split("/").at(-1)!;
       return Response.json({
@@ -93,15 +105,19 @@ function stubNotion(sceneProperties: string[]) {
     fetchImpl: fetchImpl as unknown as typeof fetch,
   });
   const scenePatches = () => patches.filter((patch) => patch.pageId.startsWith("scene-"));
-  return { library, patches, scenePatches };
+  const projectPatches = () => patches.filter((patch) => patch.pageId === "project-page");
+  return { library, patches, scenePatches, projectPatches };
 }
 
+/** The live UGC_SHOTS columns this ledger writes. */
 const FULL_SCHEMA = [
   "Status",
   "Actual Cost USD",
-  "Output R2 Key",
+  "Generated R2 Object Key",
+  "Generated Asset URL",
   "Completed At",
-  "Duration Seconds",
+  "Duration",
+  "Model",
   "Failure Reason",
 ];
 
@@ -126,19 +142,23 @@ describe("scene result ledger", () => {
 
     await notion.library.markUgcCompleted!(scopeForScene(1, "scene-1"), 0.51, {
       r2ObjectKey: "outbound/line-video/scene-1.mp4",
+      assetUrl: "https://r2.example/scene-1.mp4",
       completedAt: Date.parse("2026-08-23T01:00:00.000Z"),
+      model: "bytedance/seedance-2.5",
     });
 
     const properties = notion.scenePatches()[0]!.properties;
     expect(properties.Status).toEqual({ select: { name: "Completed" } });
     expect(properties["Actual Cost USD"]).toEqual({ number: 0.51 });
-    expect(properties["Output R2 Key"].rich_text[0].text.content).toBe(
+    expect(properties["Generated R2 Object Key"].rich_text[0].text.content).toBe(
       "outbound/line-video/scene-1.mp4",
     );
     expect(properties["Completed At"]).toEqual({
       date: { start: "2026-08-23T01:00:00.000Z" },
     });
-    expect(properties["Duration Seconds"]).toEqual({ number: 10 });
+    expect(properties["Duration"]).toEqual({ number: 10 });
+    expect(properties["Generated Asset URL"]).toEqual({ url: "https://r2.example/scene-1.mp4" });
+    expect(properties.Model.rich_text[0].text.content).toBe("bytedance/seedance-2.5");
   });
 
   it("degrades to a Status-only write when the live schema lacks the columns", async () => {
@@ -170,15 +190,48 @@ describe("scene result ledger", () => {
     );
   });
 
-  it("writes Processing to the scene before generation", async () => {
+  it("writes the live Generating status when paid execution starts", async () => {
     const notion = stubNotion(FULL_SCHEMA);
 
     await notion.library.markUgcProcessing!(scopeForScene(3, "scene-3"));
 
+    // The live databases have no "Processing" option.
     expect(notion.scenePatches()[0]).toMatchObject({
       pageId: "scene-3",
-      properties: { Status: { select: { name: "Processing" } } },
+      properties: { Status: { select: { name: "Generating" } } },
     });
+    expect(JSON.stringify(notion.patches)).not.toContain("Processing");
+  });
+
+  it("never writes a status the live databases do not offer", async () => {
+    const notion = stubNotion(FULL_SCHEMA);
+
+    await notion.library.markUgcProcessing!(scopeForScene(1, "scene-1"));
+    await notion.library.markUgcCompleted!(scopeForScene(1, "scene-1"), 0.5, {
+      r2ObjectKey: "outbound/line-video/scene-1.mp4",
+      completedAt: Date.now(),
+    });
+    await notion.library.markUgcFailed!(scopeForScene(1, "scene-1"), "boom");
+
+    const written = notion.patches.map((patch) => patch.properties.Status?.select?.name);
+    for (const status of written) {
+      expect(["Draft", "Ready", "Generating", "Completed", "Failed"]).toContain(status);
+    }
+  });
+
+  it("never names a column the live schema does not have", async () => {
+    const notion = stubNotion(FULL_SCHEMA);
+
+    await notion.library.markUgcCompleted!(scopeForScene(1, "scene-1"), 0.5, {
+      r2ObjectKey: "outbound/line-video/scene-1.mp4",
+      completedAt: Date.now(),
+    });
+
+    const names = notion.scenePatches().flatMap((patch) => Object.keys(patch.properties));
+    expect(names).not.toContain("Shot Number");
+    expect(names).not.toContain("Duration Seconds");
+    expect(names).not.toContain("Output R2 Key");
+    expect(names).not.toContain("Record ID");
   });
 
   it("does not carry one scene's R2 key into another scene's ledger row", async () => {
@@ -194,13 +247,90 @@ describe("scene result ledger", () => {
     });
 
     const [first, second] = notion.scenePatches();
-    expect(first!.properties["Output R2 Key"].rich_text[0].text.content).toBe(
+    expect(first!.properties["Generated R2 Object Key"].rich_text[0].text.content).toBe(
       "outbound/line-video/scene-1.mp4",
     );
-    expect(second!.properties["Output R2 Key"].rich_text[0].text.content).toBe(
+    expect(second!.properties["Generated R2 Object Key"].rich_text[0].text.content).toBe(
       "outbound/line-video/scene-2.mp4",
     );
     expect(first!.properties["Actual Cost USD"]).toEqual({ number: 0.51 });
     expect(second!.properties["Actual Cost USD"]).toEqual({ number: 0.62 });
+  });
+});
+
+describe("project status semantics", () => {
+  const PROJECT_SCHEMA = [
+    "Status",
+    "Actual Cost USD",
+    "Final R2 Object Key",
+    "Final Video URL",
+    "Completed At",
+    "Failure Reason",
+    "Video Model",
+    ...FULL_SCHEMA,
+  ];
+
+  it("leaves the project Generating when a later scene is still outstanding", async () => {
+    const notion = stubNotion(PROJECT_SCHEMA, [
+      { id: "scene-1", status: "Completed" },
+      { id: "scene-2", status: "Draft" },
+    ]);
+
+    await notion.library.markUgcCompleted!(scopeForScene(1, "scene-1"), 0.51, {
+      r2ObjectKey: "outbound/line-video/scene-1.mp4",
+      assetUrl: "https://r2.example/scene-1.mp4",
+      completedAt: Date.now(),
+    });
+
+    const project = notion.projectPatches()[0]!.properties;
+    // Scene 1 finishing must not declare a two-scene project done.
+    expect(project.Status).toEqual({ select: { name: "Generating" } });
+    expect(project["Final R2 Object Key"]).toBeUndefined();
+    expect(project["Final Video URL"]).toBeUndefined();
+  });
+
+  it("completes the project only when every scene is settled", async () => {
+    const notion = stubNotion(PROJECT_SCHEMA, [
+      { id: "scene-1", status: "Completed" },
+      { id: "scene-2", status: "Completed" },
+    ]);
+
+    await notion.library.markUgcCompleted!(scopeForScene(2, "scene-2"), 0.62, {
+      r2ObjectKey: "outbound/line-video/scene-2.mp4",
+      assetUrl: "https://r2.example/scene-2.mp4",
+      completedAt: Date.parse("2026-08-23T02:00:00.000Z"),
+      model: "bytedance/seedance-2.5",
+    });
+
+    const project = notion.projectPatches()[0]!.properties;
+    expect(project.Status).toEqual({ select: { name: "Completed" } });
+    expect(project["Final R2 Object Key"].rich_text[0].text.content).toBe(
+      "outbound/line-video/scene-2.mp4",
+    );
+    expect(project["Video Model"].rich_text[0].text.content).toBe("bytedance/seedance-2.5");
+  });
+
+  it("does not promote the project when sibling state cannot be read", async () => {
+    const notion = stubNotion(PROJECT_SCHEMA, []);
+    // An empty result set means no outstanding siblings, so a single-scene
+    // project completes; this pins that the single-scene case still works.
+    await notion.library.markUgcCompleted!(scopeForScene(1, "scene-1"), 0.51, {
+      r2ObjectKey: "outbound/line-video/scene-1.mp4",
+      completedAt: Date.now(),
+    });
+
+    expect(notion.projectPatches()[0]!.properties.Status).toEqual({
+      select: { name: "Completed" },
+    });
+  });
+
+  it("marks the project Failed with a sanitized reason", async () => {
+    const notion = stubNotion(PROJECT_SCHEMA, [{ id: "scene-1", status: "Failed" }]);
+
+    await notion.library.markUgcFailed!(scopeForScene(1, "scene-1"), "provider rejected request");
+
+    const project = notion.projectPatches()[0]!.properties;
+    expect(project.Status).toEqual({ select: { name: "Failed" } });
+    expect(project["Failure Reason"].rich_text[0].text.content).toBe("provider rejected request");
   });
 });

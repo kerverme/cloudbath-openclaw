@@ -117,7 +117,7 @@ export type LineVideoLibrary = {
   markUgcCompleted?(
     scope: LineVideoUgcScope,
     actualCostUsd?: number,
-    outcome?: { r2ObjectKey?: string; completedAt?: number },
+    outcome?: { r2ObjectKey?: string; assetUrl?: string; completedAt?: number; model?: string },
   ): Promise<void>;
   markUgcFailed?(scope: LineVideoUgcScope, reason: string): Promise<void>;
 };
@@ -164,6 +164,9 @@ function resolveConfig(env: NodeJS.ProcessEnv, target: LineVideoNotionTarget): V
     dataSourceId: canonicalNotionId(target.dataSourceId, "data_source_id_invalid"),
   };
 }
+
+/** The five status options the live UGC databases expose. */
+type UgcLiveStatus = "Draft" | "Ready" | "Generating" | "Completed" | "Failed";
 
 function richText(value: string): Record<string, unknown> {
   const characters = Array.from(value).slice(0, MAX_RICH_TEXT_LENGTH);
@@ -457,11 +460,13 @@ class VideoLibraryNotionClient implements LineVideoLibrary {
    */
   private async updateSceneLedger(params: {
     scope: LineVideoUgcScope;
-    status: "Processing" | "Completed" | "Failed";
+    status: UgcLiveStatus;
     actualCostUsd?: number;
     r2ObjectKey?: string;
+    assetUrl?: string;
     completedAt?: number;
     failureReason?: string;
+    model?: string;
   }): Promise<void> {
     const target = params.scope.capabilities.UGC_SHOTS;
     const available = await this.sceneSchema(target);
@@ -475,13 +480,19 @@ class VideoLibraryNotionClient implements LineVideoLibrary {
       put("Actual Cost USD", { number: params.actualCostUsd });
     }
     if (params.r2ObjectKey) {
-      put("Output R2 Key", richText(params.r2ObjectKey));
+      put("Generated R2 Object Key", richText(params.r2ObjectKey));
+    }
+    if (params.assetUrl) {
+      put("Generated Asset URL", { url: params.assetUrl });
     }
     if (params.completedAt !== undefined) {
       put("Completed At", { date: { start: new Date(params.completedAt).toISOString() } });
     }
+    if (params.model) {
+      put("Model", richText(params.model));
+    }
     if (params.scope.scene?.durationSeconds !== undefined) {
-      put("Duration Seconds", { number: params.scope.scene.durationSeconds });
+      put("Duration", { number: params.scope.scene.durationSeconds });
     }
     if (params.failureReason) {
       // Already sanitized upstream; truncated again so a long provider string
@@ -495,43 +506,132 @@ class VideoLibraryNotionClient implements LineVideoLibrary {
     });
   }
 
+  /**
+   * Sibling scene states for this project. A read failure reports an unknown
+   * outstanding scene so the project can never be promoted to Completed on
+   * missing information.
+   */
+  private async siblingSceneStatuses(
+    scope: LineVideoUgcScope,
+  ): Promise<Array<{ pageId: string; status: string | undefined }>> {
+    try {
+      const response = await this.request<{
+        results?: Array<{
+          id?: string;
+          properties?: Record<string, { select?: { name?: string } }>;
+        }>;
+      }>(
+        `/v1/data_sources/${encodeURIComponent(scope.capabilities.UGC_SHOTS.dataSourceId)}/query`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            filter: { property: "Project", relation: { contains: scope.projectPageId } },
+            page_size: 100,
+          }),
+        },
+      );
+      return (response.results ?? []).map((page) => ({
+        pageId: page.id ?? "",
+        status: page.properties?.Status?.select?.name,
+      }));
+    } catch {
+      return [{ pageId: "unknown", status: "Generating" }];
+    }
+  }
+
+  /**
+   * Project status is derived, never assumed. A completed scene promotes the
+   * project only when no sibling scene is still Draft/Ready/Generating -- so
+   * finishing scene 1 of a two-scene project leaves the project Generating.
+   */
+  private async resolveProjectStatus(params: {
+    scope: LineVideoUgcScope;
+    sceneStatus: UgcLiveStatus;
+  }): Promise<{ status: UgcLiveStatus; projectComplete: boolean }> {
+    if (params.sceneStatus !== "Completed") {
+      return { status: params.sceneStatus, projectComplete: false };
+    }
+    const scenes = await this.siblingSceneStatuses(params.scope);
+    const outstanding = scenes.filter(
+      (scene) =>
+        scene.pageId !== params.scope.scenePageId &&
+        scene.status !== "Completed" &&
+        scene.status !== "Failed",
+    );
+    return outstanding.length === 0
+      ? { status: "Completed", projectComplete: true }
+      : { status: "Generating", projectComplete: false };
+  }
+
   private async updateUgcStatus(params: {
     scope: LineVideoUgcScope;
-    status: "Processing" | "Completed" | "Failed";
+    status: UgcLiveStatus;
     actualCostUsd?: number;
     r2ObjectKey?: string;
+    assetUrl?: string;
     completedAt?: number;
     failureReason?: string;
     model?: string;
   }): Promise<void> {
+    await this.updateSceneLedger(params);
+    const project = await this.resolveProjectStatus({
+      scope: params.scope,
+      sceneStatus: params.status,
+    });
+    const available = await this.sceneSchema(params.scope.capabilities.UGC_PROJECTS);
+    const optional: Record<string, unknown> = {};
+    const put = (name: string, value: unknown): void => {
+      if (available.has(name)) {
+        optional[name] = value;
+      }
+    };
+    if (params.actualCostUsd !== undefined) {
+      put("Actual Cost USD", { number: params.actualCostUsd });
+    }
+    if (params.model) {
+      put("Video Model", richText(params.model));
+    }
+    if (params.failureReason) {
+      put("Failure Reason", richText(params.failureReason.slice(0, 400)));
+    }
+    // "Final" belongs to a finished project only. Nothing is stitched here, so
+    // this is the last completed scene's asset, not a combined reel.
+    if (project.projectComplete) {
+      if (params.r2ObjectKey) {
+        put("Final R2 Object Key", richText(params.r2ObjectKey));
+      }
+      if (params.assetUrl) {
+        put("Final Video URL", { url: params.assetUrl });
+      }
+      if (params.completedAt !== undefined) {
+        put("Completed At", { date: { start: new Date(params.completedAt).toISOString() } });
+      }
+    }
     await this.updateScopedPage({
       pageId: params.scope.projectPageId,
       target: params.scope.capabilities.UGC_PROJECTS,
-      properties: {
-        Status: { select: { name: params.status } },
-        ...(params.actualCostUsd !== undefined
-          ? { "Actual Cost USD": { number: params.actualCostUsd } }
-          : {}),
-      },
+      properties: { Status: { select: { name: project.status } }, ...optional },
     });
-    await this.updateSceneLedger(params);
   }
 
   async markUgcProcessing(scope: LineVideoUgcScope): Promise<void> {
-    await this.updateUgcStatus({ scope, status: "Processing" });
+    // Live option is "Generating"; the databases have no "Processing".
+    await this.updateUgcStatus({ scope, status: "Generating" });
   }
 
   async markUgcCompleted(
     scope: LineVideoUgcScope,
     actualCostUsd?: number,
-    outcome?: { r2ObjectKey?: string; completedAt?: number },
+    outcome?: { r2ObjectKey?: string; assetUrl?: string; completedAt?: number; model?: string },
   ): Promise<void> {
     await this.updateUgcStatus({
       scope,
       status: "Completed",
       ...(actualCostUsd !== undefined ? { actualCostUsd } : {}),
       ...(outcome?.r2ObjectKey ? { r2ObjectKey: outcome.r2ObjectKey } : {}),
+      ...(outcome?.assetUrl ? { assetUrl: outcome.assetUrl } : {}),
       ...(outcome?.completedAt !== undefined ? { completedAt: outcome.completedAt } : {}),
+      ...(outcome?.model ? { model: outcome.model } : {}),
     });
   }
 

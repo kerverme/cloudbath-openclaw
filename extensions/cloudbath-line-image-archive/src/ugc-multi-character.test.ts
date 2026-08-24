@@ -84,9 +84,20 @@ type CharacterRow = { id: string; name: string; identity: string[]; style?: stri
 function dataSourceSchema(id: UgcCapabilityId) {
   const properties: Record<string, unknown> = { Name: { type: "title" } };
   if (id === "UGC_PROJECTS") {
+    // Mirrors the LIVE UGC_PROJECTS schema: no Record ID, no Prompt.
     Object.assign(properties, {
-      "Record ID": { type: "rich_text" },
-      Status: { type: "select" },
+      Status: {
+        type: "select",
+        select: {
+          options: [
+            { name: "Draft" },
+            { name: "Ready" },
+            { name: "Generating" },
+            { name: "Completed" },
+            { name: "Failed" },
+          ],
+        },
+      },
       Product: {
         type: "relation",
         relation: { data_source_id: TARGETS.PRODUCT_LIBRARY.dataSourceId },
@@ -95,24 +106,59 @@ function dataSourceSchema(id: UgcCapabilityId) {
         type: "relation",
         relation: { data_source_id: TARGETS.CHARACTER_LIBRARY.dataSourceId },
       },
-      Prompt: { type: "rich_text" },
       "Estimated Cost USD": { type: "number" },
       "Actual Cost USD": { type: "number" },
+      "Final R2 Object Key": { type: "rich_text" },
+      "Final Video URL": { type: "url" },
+      "Completed At": { type: "date" },
+      "Failure Reason": { type: "rich_text" },
+      "Video Model": { type: "rich_text" },
     });
   } else if (id === "UGC_SHOTS") {
+    // Mirrors the LIVE UGC_SHOTS schema: Shot Order, Duration, Generated R2
+    // Object Key -- no Record ID, Shot Number, Duration Seconds or Output R2 Key.
     Object.assign(properties, {
-      "Record ID": { type: "rich_text" },
-      Status: { type: "select" },
+      Status: {
+        type: "select",
+        select: {
+          options: [
+            { name: "Draft" },
+            { name: "Ready" },
+            { name: "Generating" },
+            { name: "Completed" },
+            { name: "Failed" },
+          ],
+        },
+      },
       Project: {
         type: "relation",
         relation: { data_source_id: TARGETS.UGC_PROJECTS.dataSourceId },
       },
-      "Shot Number": { type: "number" },
+      "Shot Order": { type: "number" },
       Prompt: { type: "rich_text" },
+      Duration: { type: "number" },
+      Model: { type: "rich_text" },
+      "Estimated Cost USD": { type: "number" },
+      "Actual Cost USD": { type: "number" },
+      "Generated R2 Object Key": { type: "rich_text" },
+      "Generated Asset URL": { type: "url" },
+      "Completed At": { type: "date" },
+      "Failure Reason": { type: "rich_text" },
     });
   } else if (id === "AI_VIDEO_LIBRARY") {
     Object.assign(properties, {
-      Status: { type: "select" },
+      Status: {
+        type: "select",
+        select: {
+          options: [
+            { name: "Draft" },
+            { name: "Ready" },
+            { name: "Generating" },
+            { name: "Completed" },
+            { name: "Failed" },
+          ],
+        },
+      },
       "Video Job ID": { type: "rich_text" },
       "UGC Project": {
         type: "relation",
@@ -164,11 +210,13 @@ function identityProperties(identity: string[]) {
  */
 function stubNotion(characters: CharacterRow[]) {
   const created: Array<{ target: string; properties: Record<string, unknown> }> = [];
-  /** Record ID -> stored page, so create-or-reuse behaves like real Notion. */
-  const pagesByRecordId = new Map<string, any>();
-  const recordIdOf = (properties: any): string | undefined =>
-    properties?.["Record ID"]?.rich_text?.[0]?.text?.content ??
-    properties?.["Record ID"]?.rich_text?.[0]?.plain_text;
+  /**
+   * Every created page, so create-or-reuse resolves the way production does:
+   * by relation, since the live schemas have no Record ID column.
+   */
+  const pages: any[] = [];
+  const relationIds = (page: any, name: string): string[] =>
+    (page.properties?.[name]?.relation ?? []).map((entry: any) => entry.id).filter(Boolean);
   let sequence = 0;
   const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
     const url = new URL(typeof input === "string" ? input : (input as URL).href);
@@ -221,15 +269,16 @@ function stubNotion(characters: CharacterRow[]) {
       if (body.filter?.property === "Project") {
         const projectId = body.filter.relation.contains;
         return Response.json({
-          results: [...pagesByRecordId.values()].filter(
-            (page) => page.properties?.Project?.relation?.[0]?.id === projectId,
-          ),
+          results: pages.filter((page) => relationIds(page, "Project").includes(projectId)),
           has_more: false,
         });
       }
-      if (body.filter?.property === "Record ID") {
-        const match = pagesByRecordId.get(body.filter.rich_text.equals);
-        return Response.json({ results: match ? [match] : [], has_more: false });
+      if (body.filter?.property === "Product") {
+        const productId = body.filter.relation.contains;
+        return Response.json({
+          results: pages.filter((page) => relationIds(page, "Product").includes(productId)),
+          has_more: false,
+        });
       }
       return Response.json({ results: [], has_more: false });
     }
@@ -244,15 +293,12 @@ function stubNotion(characters: CharacterRow[]) {
         // scene-number read depends on it.
         properties: {
           ...body.properties,
-          ...(body.properties?.["Shot Number"]
-            ? { "Shot Number": { type: "number", ...body.properties["Shot Number"] } }
+          ...(body.properties?.["Shot Order"]
+            ? { "Shot Order": { type: "number", ...body.properties["Shot Order"] } }
             : {}),
         },
       };
-      const id = recordIdOf(body.properties);
-      if (id) {
-        pagesByRecordId.set(id, page);
-      }
+      pages.push(page);
       return Response.json(page);
     }
     if (url.pathname.startsWith("/v1/pages/") && init?.method === "PATCH") {
@@ -476,5 +522,134 @@ describe("identity reuse across scenes", () => {
       durationSeconds: 10,
     });
     expect(scene2.scene.previousScenePageId).toBeDefined();
+  });
+});
+
+describe("live schema alignment", () => {
+  it("writes both F1 and F2 into the project Character relation", async () => {
+    const flow = buildWorkflow(CAST);
+
+    await flow.prepare({
+      productName: "Cloudbath Serum",
+      characterNames: ["F1", "F2"],
+      prompt: "F1 plays with F2 in a garden",
+    });
+
+    const project = flow.created.find(
+      (entry) => entry.target === TARGETS.UGC_PROJECTS.dataSourceId,
+    )!;
+    expect((project.properties as any).Character.relation.map((entry: any) => entry.id)).toEqual([
+      "page-f1",
+      "page-f2",
+    ]);
+  });
+
+  it("creates rows using only live column names", async () => {
+    const flow = buildWorkflow(CAST);
+
+    await flow.prepare({
+      productName: "Cloudbath Serum",
+      characterNames: ["F1", "F2"],
+      prompt: "F1 plays with F2 in a garden",
+      durationSeconds: 10,
+    });
+
+    const names = flow.created.flatMap((entry) => Object.keys(entry.properties));
+    expect(names).not.toContain("Record ID");
+    expect(names).not.toContain("Shot Number");
+    expect(names).not.toContain("Duration Seconds");
+    expect(names).not.toContain("Output R2 Key");
+
+    const scene = flow.created.find((entry) => entry.target === TARGETS.UGC_SHOTS.dataSourceId)!;
+    expect(scene.properties).toHaveProperty("Shot Order");
+    expect(scene.properties).toHaveProperty("Duration");
+  });
+
+  it("creates rows only with live status options", async () => {
+    const flow = buildWorkflow(CAST);
+
+    await flow.prepare({
+      productName: "Cloudbath Serum",
+      characterNames: ["F1", "F2"],
+      prompt: "F1 plays with F2 in a garden",
+    });
+
+    for (const entry of flow.created) {
+      const status = (entry.properties as any).Status?.select?.name;
+      if (status) {
+        expect(["Draft", "Ready", "Generating", "Completed", "Failed"]).toContain(status);
+      }
+    }
+  });
+
+  it("reuses the same project row for a repeated preparation of the same cast", async () => {
+    const flow = buildWorkflow(CAST);
+
+    await flow.prepare({
+      productName: "Cloudbath Serum",
+      characterNames: ["F1", "F2"],
+      prompt: "scene one",
+    });
+    await flow.prepare({
+      productName: "Cloudbath Serum",
+      characterNames: ["F1", "F2"],
+      prompt: "scene two",
+    });
+
+    // Idempotent without a Record ID column: identity is Product + exact cast.
+    expect(
+      flow.created.filter((entry) => entry.target === TARGETS.UGC_PROJECTS.dataSourceId),
+    ).toHaveLength(1);
+  });
+});
+
+describe("previous scene is never invented", () => {
+  it("refuses to prepare scene 2 when scene 1 does not exist", async () => {
+    const flow = buildWorkflow(CAST);
+
+    await expect(
+      flow.prepare({
+        productName: "Cloudbath Serum",
+        characterNames: ["F1", "F2"],
+        sceneNumber: 2,
+        prompt: "F1 พา F2 เดินเข้าบ้าน",
+      }),
+    ).rejects.toThrow(/scene 1 does not exist/u);
+  });
+
+  it("never creates a scene 1 carrying scene 2's prompt", async () => {
+    const flow = buildWorkflow(CAST);
+
+    await flow
+      .prepare({
+        productName: "Cloudbath Serum",
+        characterNames: ["F1", "F2"],
+        sceneNumber: 2,
+        prompt: "F1 พา F2 เดินเข้าบ้าน",
+      })
+      .catch(() => undefined);
+
+    const scenes = flow.created.filter((entry) => entry.target === TARGETS.UGC_SHOTS.dataSourceId);
+    expect(scenes).toHaveLength(0);
+    expect(JSON.stringify(flow.created)).not.toContain("เดินเข้าบ้าน");
+  });
+
+  it("links scene 2 to the real scene 1 once it exists", async () => {
+    const flow = buildWorkflow(CAST);
+
+    const scene1 = await flow.prepare({
+      productName: "Cloudbath Serum",
+      characterNames: ["F1", "F2"],
+      prompt: "F1 เล่นกับ F2 ในสวน",
+    });
+    const scene2 = await flow.prepare({
+      productName: "Cloudbath Serum",
+      characterNames: ["F1", "F2"],
+      sceneNumber: 2,
+      prompt: "F1 พา F2 เดินเข้าบ้าน",
+    });
+
+    expect(scene2.scene.previousScenePageId).toBe(scene1.scenePageId);
+    expect(scene2.scenePageId).not.toBe(scene1.scenePageId);
   });
 });
