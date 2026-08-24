@@ -15,6 +15,7 @@ import {
   materializeLineVideoUgcReferences,
   orderLineVideoUgcReferences,
   validateLineVideoUgcScope,
+  type LineGroupPolicyBinding,
   type LineVideoUgcCharacterLock,
   type LineVideoUgcReference,
   type LineVideoUgcScope,
@@ -253,11 +254,12 @@ describe("confirmation cannot swap project, scene or cast", () => {
       },
     },
   } as never;
-  const binding = {
-    policyId: "UGC" as const,
+  const binding: LineGroupPolicyBinding = {
+    policyId: "UGC",
     accountId: "acct-1",
     groupId: "C-ugc",
     boundByOwnerId: "U-owner",
+    boundAt: FROZEN_AT,
   };
   const base = {
     cfg,
