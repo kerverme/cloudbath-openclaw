@@ -6,6 +6,8 @@ import type { VideoGenerationSourceAsset } from "openclaw/plugin-sdk/video-gener
 const NOTION_ID_PATTERN = /^[0-9a-f]{32}$/u;
 const MAX_REFERENCE_BYTES = 20 * 1024 * 1024;
 const MAX_REFERENCE_ASSETS = 8;
+/** Deterministic submission order, applied after per-character fairness. */
+const KIND_PRIORITY = { identity: 0, product: 1, style: 2 } as const;
 const REFERENCE_FETCH_TIMEOUT_MS = 30_000;
 const REFERENCE_FETCH_POLICY: SsrFPolicy = { allowPrivateNetwork: false };
 
@@ -28,6 +30,30 @@ export type LineVideoUgcReference = Readonly<{
   locator: string;
 }>;
 
+/**
+ * One character frozen into the project at preparation time. The paid path
+ * consumes these assets verbatim and never reads the Character Library.
+ */
+export type LineVideoUgcCharacterLock = Readonly<{
+  code: string;
+  pageId: string;
+  contentIdentity?: string;
+  identityReferences: readonly LineVideoUgcReference[];
+  styleReferences: readonly LineVideoUgcReference[];
+  frozenAt: string;
+}>;
+
+export type LineVideoUgcSceneContinuity = Readonly<{
+  sceneNumber: number;
+  previousScenePageId?: string;
+  characterPageIds: readonly string[];
+  characterCodes: readonly string[];
+  prompt: string;
+  durationSeconds?: number;
+  outputR2Key?: string;
+  previousSceneFrameR2Key?: string;
+}>;
+
 export type LineVideoUgcScope = Readonly<{
   version: 1;
   policyId: "UGC";
@@ -36,7 +62,11 @@ export type LineVideoUgcScope = Readonly<{
   ownerSenderId: string;
   productPageId: string;
   characterPageId?: string;
+  characterLocks: readonly LineVideoUgcCharacterLock[];
   projectPageId: string;
+  projectRecordId: string;
+  scene: LineVideoUgcSceneContinuity;
+  scenePageId: string;
   shotPageIds: readonly string[];
   referenceAssets: readonly LineVideoUgcReference[];
   frozenPrompt: string;
@@ -130,6 +160,27 @@ export function validateLineVideoUgcScope(params: {
 }): boolean {
   const capabilities = resolveCloudbathUgcCapabilities(params.cfg);
   if (!capabilities || !targetsEqual(params.scope.capabilities, capabilities)) {
+    return false;
+  }
+  // Scene and cast identity are part of what confirmation approves: the owner
+  // confirmed THIS scene with THIS cast, so a scope whose lock and scene no
+  // longer agree must not reach the paid call.
+  const scene = params.scope.scene;
+  const locks = params.scope.characterLocks ?? [];
+  const sceneMatchesLock =
+    scene !== undefined &&
+    Number.isInteger(scene.sceneNumber) &&
+    scene.sceneNumber >= 1 &&
+    scene.prompt === params.scope.frozenPrompt &&
+    scene.characterPageIds.length === locks.length &&
+    scene.characterCodes.length === locks.length &&
+    locks.every(
+      (lock, index) =>
+        scene.characterPageIds[index] === lock.pageId &&
+        scene.characterCodes[index] === lock.code &&
+        lock.identityReferences.length > 0,
+    );
+  if (!sceneMatchesLock || typeof params.scope.scenePageId !== "string") {
     return false;
   }
   return (
@@ -251,16 +302,84 @@ async function readHttpsReference(
   }
 }
 
+/**
+ * Orders a scene's frozen references for submission, guaranteeing every locked
+ * character is actually represented.
+ *
+ * Sorting by kind and truncating would let one character's references fill the
+ * budget and drop another entirely -- the scene would generate without F2 in
+ * it. Each locked character therefore claims one identity asset first, the rest
+ * fill round-robin, and a cast that cannot fit fails closed rather than
+ * shipping a silently smaller cast.
+ *
+ * Everything here reads the frozen lock. The Character Library is never
+ * consulted after the project is locked, so scene 2 submits exactly what scene
+ * 1 did.
+ */
+export function orderLineVideoUgcReferences(scope: LineVideoUgcScope): LineVideoUgcReference[] {
+  const locks = scope.characterLocks ?? [];
+  if (locks.length === 0) {
+    return scope.referenceAssets
+      .toSorted((left, right) => KIND_PRIORITY[left.kind] - KIND_PRIORITY[right.kind])
+      .slice(0, MAX_REFERENCE_ASSETS);
+  }
+  if (locks.length > MAX_REFERENCE_ASSETS) {
+    throw new Error("UGC scene requests more characters than reference slots");
+  }
+
+  const available = new Map(
+    scope.referenceAssets.map((asset) => [`${asset.source}\0${asset.locator}`, asset]),
+  );
+  const selected: LineVideoUgcReference[] = [];
+  const claimed = new Set<string>();
+  const claim = (reference: LineVideoUgcReference | undefined): boolean => {
+    if (!reference) {
+      return false;
+    }
+    const key = `${reference.source}\0${reference.locator}`;
+    // Only assets frozen into this scope may be submitted; a lock entry that
+    // is not in referenceAssets was never part of the confirmed scene.
+    if (claimed.has(key) || !available.has(key) || selected.length >= MAX_REFERENCE_ASSETS) {
+      return false;
+    }
+    claimed.add(key);
+    selected.push(available.get(key)!);
+    return true;
+  };
+
+  for (const lock of locks) {
+    const claimedOne = lock.identityReferences.some((reference) => claim(reference));
+    if (!claimedOne) {
+      throw new Error(
+        `UGC scene has no usable frozen identity reference for character "${lock.code}"`,
+      );
+    }
+  }
+  for (let depth = 1; selected.length < MAX_REFERENCE_ASSETS; depth += 1) {
+    let progressed = false;
+    for (const lock of locks) {
+      if (claim(lock.identityReferences[depth])) {
+        progressed = true;
+      }
+    }
+    if (!progressed) {
+      break;
+    }
+  }
+  for (const asset of scope.referenceAssets.filter((entry) => entry.kind === "product")) {
+    claim(asset);
+  }
+  for (const asset of scope.referenceAssets.filter((entry) => entry.kind === "style")) {
+    claim(asset);
+  }
+  return selected.toSorted((left, right) => KIND_PRIORITY[left.kind] - KIND_PRIORITY[right.kind]);
+}
+
 export async function materializeLineVideoUgcReferences(
   scope: LineVideoUgcScope,
   dependencies: LineVideoUgcReferenceDependencies = {},
 ): Promise<VideoGenerationSourceAsset[]> {
-  const ordered = scope.referenceAssets
-    .toSorted((left, right) => {
-      const priority = { identity: 0, product: 1, style: 2 } as const;
-      return priority[left.kind] - priority[right.kind];
-    })
-    .slice(0, MAX_REFERENCE_ASSETS);
+  const ordered = orderLineVideoUgcReferences(scope);
   const assets: VideoGenerationSourceAsset[] = [];
   for (const reference of ordered) {
     const buffer =

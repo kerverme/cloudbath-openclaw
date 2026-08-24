@@ -528,22 +528,34 @@ plan.
 Each prepared scene carries continuity metadata: scene number, previous scene
 page id, participating character page ids and codes, prompt, and duration.
 
-### Optional schema additions (not applied automatically)
+### Scene result ledger
 
-The scene ledger currently writes only fields PR #32 already provisions
-(`Name`, `Record ID`, `Status`, `Project`, `Shot Number`, `Prompt`). To have the
-ledger also carry per-scene execution data, add these to `UGC_SHOTS` manually —
-this plugin never mutates live schema:
+After a confirmed generation succeeds, the **confirmed scene only** is updated —
+completing scene 1 never marks scene 2 completed. The scene row records Status,
+and where the live schema has the column: Actual Cost USD, the archived R2
+object key, Completed At, Duration Seconds. On failure the scene is marked
+Failed with a sanitized Failure Reason.
 
-| Property             | Type                         | Purpose                     |
-| -------------------- | ---------------------------- | --------------------------- |
-| `Duration Seconds`   | number                       | Scene duration as confirmed |
-| `Characters`         | relation → Character Library | Cast actually submitted     |
-| `Model`              | rich_text                    | Provider model id used      |
-| `Estimated Cost USD` | number                       | Shown at confirmation       |
-| `Actual Cost USD`    | number                       | Reported after generation   |
-| `Output R2 Key`      | rich_text                    | Archived result object key  |
-| `Previous Scene`     | relation → UGC_SHOTS         | Continuity link             |
+The R2 key written is always the **archived** object, never the transient
+provider URL.
 
-Until they exist the workflow keeps working; the data lives in the frozen scope
-rather than the ledger.
+### Optional UGC_SHOTS columns (not applied automatically)
+
+The ledger writes optional columns only when the live data source actually has
+them: Notion rejects a PATCH naming an unknown property, so an absent column
+would otherwise lose the Status write too. Add these manually to record full
+per-scene execution data — this plugin never provisions schema:
+
+| Property           | Type                         | Written when present                                  |
+| ------------------ | ---------------------------- | ----------------------------------------------------- |
+| `Actual Cost USD`  | number                       | Cost reported by the provider                         |
+| `Output R2 Key`    | rich_text                    | Archived result object key                            |
+| `Completed At`     | date                         | Completion timestamp                                  |
+| `Duration Seconds` | number                       | Scene duration as confirmed                           |
+| `Failure Reason`   | rich_text                    | Sanitized failure cause (truncated)                   |
+| `Characters`       | relation → Character Library | Not written yet; cast lives in the frozen lock        |
+| `Previous Scene`   | relation → UGC_SHOTS         | Not written yet; continuity lives in the frozen scope |
+
+Without them the workflow keeps working and the data stays in the frozen scope.
+`Status`, `Project`, `Shot Number`, `Prompt`, `Record ID` and `Name` are already
+provisioned by PR #32 and always written.

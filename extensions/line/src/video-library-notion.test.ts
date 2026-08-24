@@ -54,9 +54,26 @@ const UGC_SCOPE: LineVideoUgcScope = {
   lineGroupId: "line-group",
   ownerSenderId: "line-owner",
   productPageId: "product-page",
+  characterLocks: [
+    {
+      code: "F1",
+      pageId: "character-page",
+      identityReferences: [{ kind: "identity", source: "r2", locator: "workspace/ugc/f1.png" }],
+      styleReferences: [],
+      frozenAt: "2026-08-23T00:00:00.000Z",
+    },
+  ],
   projectPageId: "ugc-project-page",
+  projectRecordId: "ugc-project-record",
+  scene: {
+    sceneNumber: 1,
+    characterPageIds: ["character-page"],
+    characterCodes: ["F1"],
+    prompt: "a cat sitting on water",
+  },
+  scenePageId: "shot-page-1",
   shotPageIds: ["shot-page-1"],
-  referenceAssets: [],
+  referenceAssets: [{ kind: "identity", source: "r2", locator: "workspace/ugc/f1.png" }],
   frozenPrompt: "a cat sitting on water",
   capabilities: {
     PRODUCT_LIBRARY: { databaseId: "a".repeat(32), dataSourceId: "1".repeat(32) },

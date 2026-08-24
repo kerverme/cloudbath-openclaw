@@ -114,7 +114,11 @@ export type LineVideoLibrary = {
   ): Promise<void>;
   markFailed(record: LineVideoLibraryRecord, reason: string): Promise<void>;
   markUgcProcessing?(scope: LineVideoUgcScope): Promise<void>;
-  markUgcCompleted?(scope: LineVideoUgcScope, actualCostUsd?: number): Promise<void>;
+  markUgcCompleted?(
+    scope: LineVideoUgcScope,
+    actualCostUsd?: number,
+    outcome?: { r2ObjectKey?: string; completedAt?: number },
+  ): Promise<void>;
   markUgcFailed?(scope: LineVideoUgcScope, reason: string): Promise<void>;
 };
 
@@ -423,10 +427,82 @@ class VideoLibraryNotionClient implements LineVideoLibrary {
     }
   }
 
+  /**
+   * Property names present on a UGC_SHOTS data source, cached per data source.
+   *
+   * The scene ledger writes optional execution fields only when the live
+   * database actually has them: Notion rejects a PATCH naming an unknown
+   * property, and this plugin never provisions schema itself. Missing columns
+   * degrade to a Status-only update rather than failing a completed scene.
+   */
+  private readonly sceneProperties = new Map<string, Promise<ReadonlySet<string>>>();
+
+  private async sceneSchema(target: LineVideoNotionTarget): Promise<ReadonlySet<string>> {
+    let pending = this.sceneProperties.get(target.dataSourceId);
+    if (!pending) {
+      pending = (async () => {
+        const source = await this.request<NotionDataSource>(
+          `/v1/data_sources/${encodeURIComponent(target.dataSourceId)}`,
+        );
+        return new Set(Object.keys(source.properties ?? {}));
+      })().catch(() => new Set<string>());
+      this.sceneProperties.set(target.dataSourceId, pending);
+    }
+    return await pending;
+  }
+
+  /**
+   * Writes the outcome of ONE scene. `scenePageId` is the scene the owner
+   * confirmed, so completing scene 1 can never mark scene 2 completed.
+   */
+  private async updateSceneLedger(params: {
+    scope: LineVideoUgcScope;
+    status: "Processing" | "Completed" | "Failed";
+    actualCostUsd?: number;
+    r2ObjectKey?: string;
+    completedAt?: number;
+    failureReason?: string;
+  }): Promise<void> {
+    const target = params.scope.capabilities.UGC_SHOTS;
+    const available = await this.sceneSchema(target);
+    const optional: Record<string, unknown> = {};
+    const put = (name: string, value: unknown): void => {
+      if (available.has(name)) {
+        optional[name] = value;
+      }
+    };
+    if (params.actualCostUsd !== undefined) {
+      put("Actual Cost USD", { number: params.actualCostUsd });
+    }
+    if (params.r2ObjectKey) {
+      put("Output R2 Key", richText(params.r2ObjectKey));
+    }
+    if (params.completedAt !== undefined) {
+      put("Completed At", { date: { start: new Date(params.completedAt).toISOString() } });
+    }
+    if (params.scope.scene?.durationSeconds !== undefined) {
+      put("Duration Seconds", { number: params.scope.scene.durationSeconds });
+    }
+    if (params.failureReason) {
+      // Already sanitized upstream; truncated again so a long provider string
+      // cannot overflow a Notion rich_text write.
+      put("Failure Reason", richText(params.failureReason.slice(0, 400)));
+    }
+    await this.updateScopedPage({
+      pageId: params.scope.scenePageId,
+      target,
+      properties: { Status: { select: { name: params.status } }, ...optional },
+    });
+  }
+
   private async updateUgcStatus(params: {
     scope: LineVideoUgcScope;
     status: "Processing" | "Completed" | "Failed";
     actualCostUsd?: number;
+    r2ObjectKey?: string;
+    completedAt?: number;
+    failureReason?: string;
+    model?: string;
   }): Promise<void> {
     await this.updateScopedPage({
       pageId: params.scope.projectPageId,
@@ -438,33 +514,29 @@ class VideoLibraryNotionClient implements LineVideoLibrary {
           : {}),
       },
     });
-    await Promise.all(
-      params.scope.shotPageIds.map(
-        async (pageId) =>
-          await this.updateScopedPage({
-            pageId,
-            target: params.scope.capabilities.UGC_SHOTS,
-            properties: { Status: { select: { name: params.status } } },
-          }),
-      ),
-    );
+    await this.updateSceneLedger(params);
   }
 
   async markUgcProcessing(scope: LineVideoUgcScope): Promise<void> {
     await this.updateUgcStatus({ scope, status: "Processing" });
   }
 
-  async markUgcCompleted(scope: LineVideoUgcScope, actualCostUsd?: number): Promise<void> {
+  async markUgcCompleted(
+    scope: LineVideoUgcScope,
+    actualCostUsd?: number,
+    outcome?: { r2ObjectKey?: string; completedAt?: number },
+  ): Promise<void> {
     await this.updateUgcStatus({
       scope,
       status: "Completed",
       ...(actualCostUsd !== undefined ? { actualCostUsd } : {}),
+      ...(outcome?.r2ObjectKey ? { r2ObjectKey: outcome.r2ObjectKey } : {}),
+      ...(outcome?.completedAt !== undefined ? { completedAt: outcome.completedAt } : {}),
     });
   }
 
   async markUgcFailed(scope: LineVideoUgcScope, reason: string): Promise<void> {
-    void reason;
-    await this.updateUgcStatus({ scope, status: "Failed" });
+    await this.updateUgcStatus({ scope, status: "Failed", failureReason: reason });
   }
 }
 

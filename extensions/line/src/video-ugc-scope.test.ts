@@ -40,8 +40,27 @@ const SCOPE: LineVideoUgcScope = {
   ownerSenderId: "U-owner",
   productPageId: "product-page",
   characterPageId: "character-page",
+  characterLocks: [
+    {
+      code: "F1",
+      pageId: "character-page",
+      identityReferences: [
+        { kind: "identity", source: "r2", locator: "workspace/ugc/identity.png" },
+      ],
+      styleReferences: [],
+      frozenAt: "2026-08-23T00:00:00.000Z",
+    },
+  ],
   projectPageId: "project-page",
-  shotPageIds: ["shot-1", "shot-2"],
+  projectRecordId: "project-record",
+  scene: {
+    sceneNumber: 1,
+    characterPageIds: ["character-page"],
+    characterCodes: ["F1"],
+    prompt: "review the product",
+  },
+  scenePageId: "shot-1",
+  shotPageIds: ["shot-1"],
   referenceAssets: [
     { kind: "style", source: "https", locator: "https://assets.example/style.png" },
     { kind: "identity", source: "r2", locator: "workspace/ugc/identity.png" },

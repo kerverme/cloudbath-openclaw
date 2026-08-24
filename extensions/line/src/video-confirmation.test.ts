@@ -440,8 +440,20 @@ describe("createLineVideoConfirmationGate", () => {
       ownerSenderId: OWNER_ID,
       productPageId: "product-page",
       characterPageId: "character-page",
+      // Cast-free: this case covers the Notion/R2/completion chain. Multi-
+      // character reference execution is covered in
+      // video-ugc-multi-character-execution.e2e.test.ts, which mocks R2.
+      characterLocks: [],
       projectPageId: "project-page",
-      shotPageIds: ["shot-1", "shot-2", "shot-3"],
+      projectRecordId: "project-record",
+      scene: {
+        sceneNumber: 1,
+        characterPageIds: [],
+        characterCodes: [],
+        prompt: draft.prompt,
+      },
+      scenePageId: "shot-1",
+      shotPageIds: ["shot-1"],
       referenceAssets: [],
       frozenPrompt: draft.prompt,
       durationSeconds: draft.durationSeconds,
@@ -462,7 +474,12 @@ describe("createLineVideoConfirmationGate", () => {
       expect.objectContaining({ ugcScope: scope }),
     );
     expect(notionMarkUgcProcessingMock).toHaveBeenCalledWith(scope);
-    expect(notionMarkUgcCompletedMock).toHaveBeenCalledWith(scope, 0.79);
+    // The scene ledger receives the ARCHIVED R2 key, never the provider URL.
+    expect(notionMarkUgcCompletedMock).toHaveBeenCalledWith(
+      scope,
+      0.79,
+      expect.objectContaining({ r2ObjectKey: expect.any(String) }),
+    );
     expect(stageLineOutboundVideoMock).toHaveBeenCalledTimes(1);
     expect(sendMessageLineMock).toHaveBeenCalledTimes(1);
   });
