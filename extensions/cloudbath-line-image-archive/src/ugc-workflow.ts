@@ -920,6 +920,15 @@ export class CloudbathUgcVideoWorkflow {
             projectPageId: instance.projectPageId,
           });
         } else {
+          // A new project must carry at least one identity source. Product and
+          // cast are each optional alone, but a prompt-only project would have
+          // nothing durable to freeze, so every later scene would drift. Checked
+          // before any resolve/create so an identity-less request writes nothing.
+          if (!input.productName && input.characterNames.length === 0) {
+            throw new Error(
+              "A new project needs a product or at least one character; a prompt alone has no identity to lock",
+            );
+          }
           // Product is optional: a character-only project is a first-class
           // shape, and no placeholder product row is invented for it.
           const product = input.productName

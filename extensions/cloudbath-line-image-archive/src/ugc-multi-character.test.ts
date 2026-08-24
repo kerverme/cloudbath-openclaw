@@ -1116,3 +1116,88 @@ describe("D) finalized projects are durably closed", () => {
     expect(projectB.scene.sceneNumber).toBe(1);
   });
 });
+
+describe("E) a new project needs an identity source", () => {
+  it("accepts a character-only new project", async () => {
+    const flow = buildWorkflow(CAST);
+
+    const scene = await flow.prepare({
+      characterNames: ["F1", "F2"],
+      prompt: "F1 and F2 in the garden",
+    });
+
+    expect(scene.productPageId).toBeUndefined();
+    expect(scene.characterLocks).toHaveLength(2);
+    expect(flow.paidVideoCalls()).toHaveLength(0);
+  });
+
+  it("accepts a product-only new project", async () => {
+    const flow = buildWorkflow(CAST);
+
+    const scene = await flow.prepare({
+      productName: "Cloudbath Serum",
+      prompt: "The serum on a marble counter",
+    });
+
+    expect(scene.productPageId).toBeDefined();
+    expect(scene.characterLocks).toHaveLength(0);
+    // The product alone still supplies a frozen identity reference.
+    expect(scene.referenceAssets.length).toBeGreaterThan(0);
+    expect(flow.paidVideoCalls()).toHaveLength(0);
+  });
+
+  it("fails closed on a new project with neither product nor characters", async () => {
+    const flow = buildWorkflow(CAST);
+
+    await expect(flow.prepare({ prompt: "Something cinematic" })).rejects.toThrow(
+      /needs a product or at least one character/u,
+    );
+
+    // Nothing was written: no project, no scene, no library row.
+    expect(flow.created).toHaveLength(0);
+    expect(flow.paidVideoCalls()).toHaveLength(0);
+  });
+
+  it("still fails closed when an explicit new project has no identity", async () => {
+    const flow = buildWorkflow(CAST);
+
+    await flow.prepare({ characterNames: ["F1", "F2"], prompt: "Scene 1" });
+    const createdAfterFirst = flow.created.length;
+
+    await expect(
+      flow.prepare({ startNewProject: true, prompt: "Scene 1 of nothing" }),
+    ).rejects.toThrow(/needs a product or at least one character/u);
+
+    expect(flow.created).toHaveLength(createdAfterFirst);
+    expect(flow.paidVideoCalls()).toHaveLength(0);
+  });
+
+  it("allows a prompt-only continuation of an existing project", async () => {
+    const flow = buildWorkflow(CAST);
+
+    const scene1 = await flow.prepare({
+      productName: "Cloudbath Serum",
+      characterNames: ["F1", "F2"],
+      prompt: "Scene 1",
+    });
+    // Identity comes from the frozen active project, so the prompt is enough.
+    const scene2 = await flow.prepare({ sceneNumber: 2, prompt: "Scene 2" });
+
+    expect(scene2.projectInstanceId).toBe(scene1.projectInstanceId);
+    expect(scene2.productPageId).toBe(scene1.productPageId);
+    expect(scene2.characterLocks).toEqual(scene1.characterLocks);
+    expect(flow.paidVideoCalls()).toHaveLength(0);
+  });
+
+  it("allows a prompt-only continuation of a character-only project", async () => {
+    const flow = buildWorkflow(CAST);
+
+    const scene1 = await flow.prepare({ characterNames: ["F1", "F2"], prompt: "Scene 1" });
+    const scene2 = await flow.prepare({ sceneNumber: 2, prompt: "Scene 2" });
+
+    expect(scene2.projectInstanceId).toBe(scene1.projectInstanceId);
+    expect(scene2.productPageId).toBeUndefined();
+    expect(scene2.referenceAssets).toEqual(scene1.referenceAssets);
+    expect(flow.paidVideoCalls()).toHaveLength(0);
+  });
+});
