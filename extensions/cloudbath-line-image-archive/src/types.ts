@@ -264,9 +264,20 @@ export type UgcProjectInstance = Readonly<{
   accountId: string;
   lineGroupId: string;
   ownerSenderId: string;
-  productPageId: string;
+  /** Absent for a character-only project; no placeholder product is invented. */
+  productPageId?: string;
+  /**
+   * Product references frozen at project creation, alongside the character
+   * lock. Editing the Product Library later cannot reach this project.
+   */
+  productReferences: readonly UgcReferenceAsset[];
   characterPageIds: readonly string[];
   createdAt: string;
+  /**
+   * Set once the owner finalizes. A finalized project is durably closed: it
+   * never returns to Ready or Generating, and continuation fails closed.
+   */
+  finalizedAt?: string;
 }>;
 
 /**
@@ -324,7 +335,7 @@ export type FrozenUgcVideoScope = Readonly<{
   accountId: string;
   lineGroupId: string;
   ownerSenderId: string;
-  productPageId: string;
+  productPageId?: string;
   characterPageId?: string;
   /** Frozen cast for this scene, in submission order. */
   characterLocks: readonly UgcCharacterLock[];

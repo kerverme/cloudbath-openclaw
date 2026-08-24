@@ -90,7 +90,8 @@ type NotionQueryResponse = {
 };
 
 type UgcPrepareInput = {
-  productName: string;
+  /** Optional: a project may be character-only, with no product at all. */
+  productName?: string;
   characterNames: string[];
   /** Explicit "start a new project" rather than continuing the active one. */
   startNewProject?: boolean;
@@ -304,14 +305,15 @@ function propertyReferences(
  * a fresh Character Library read -- that is what keeps scene 2 identical to
  * scene 1.
  */
+/**
+ * Builds one scene's submission set from the project's frozen cast and frozen
+ * product references. Both come from the project instance, never from a fresh
+ * library read -- that is what keeps scene 2 identical to scene 1.
+ */
 function freezeSceneReferences(
   characterLocks: readonly UgcCharacterLock[],
-  product: NotionPage,
+  productReferences: readonly UgcReferenceAsset[],
 ): UgcReferenceAsset[] {
-  const productReferences = [
-    ...propertyReferences(product, PRODUCT_REFERENCE_PROPERTIES, "product"),
-    ...propertyReferences(product, PRODUCT_STYLE_PROPERTIES, "style"),
-  ];
   if (characterLocks.length === 0) {
     const unique = new Map<string, UgcReferenceAsset>();
     for (const item of productReferences) {
@@ -325,6 +327,14 @@ function freezeSceneReferences(
       productReferences,
       maxAssets: MAX_REFERENCE_ASSETS,
     }).assets,
+  ];
+}
+
+/** Reads a Product Library row's generation references at freeze time. */
+function readProductReferences(product: NotionPage): UgcReferenceAsset[] {
+  return [
+    ...propertyReferences(product, PRODUCT_REFERENCE_PROPERTIES, "product"),
+    ...propertyReferences(product, PRODUCT_STYLE_PROPERTIES, "style"),
   ];
 }
 
@@ -545,18 +555,21 @@ export class UgcNotionWorkflowClient {
    */
   async createProject(params: {
     capabilities: Readonly<Record<UgcCapabilityId, NotionTarget>>;
-    product: NotionPage;
+    product?: NotionPage;
     characterPageIds: readonly string[];
     characterLabel?: string;
     projectInstanceId: string;
   }): Promise<NotionPage> {
     const target = params.capabilities.UGC_PROJECTS;
     await this.schema("UGC_PROJECTS", target, params.capabilities);
-    const productName = plainText(params.product.properties?.Name);
+    const productName = params.product ? plainText(params.product.properties?.Name) : "";
+    const label = [productName, params.characterLabel].filter(Boolean).join(" × ");
     return await this.createPage(target, {
-      Name: title(`${productName}${params.characterLabel ? ` × ${params.characterLabel}` : ""}`),
+      Name: title(label || "Untitled project"),
       Status: { select: { name: "Draft" satisfies UgcStatus } },
-      Product: relation(params.product.id),
+      // A character-only project carries no product relation; no placeholder
+      // product row is ever invented for it.
+      Product: relation(params.product?.id),
       // The whole frozen cast, not just the first character.
       Character: { relation: params.characterPageIds.map((pageId) => ({ id: pageId })) },
       "Estimated Cost USD": { number: null },
@@ -717,8 +730,8 @@ function parseInput(value: unknown): UgcPrepareInput {
       : {};
   const productName = typeof input.productName === "string" ? input.productName.trim() : "";
   const prompt = typeof input.prompt === "string" ? input.prompt.trim() : "";
-  if (!productName || !prompt) {
-    throw new Error("productName and prompt are required");
+  if (!prompt) {
+    throw new Error("prompt is required");
   }
   // characterNames is canonical; the single-character field stays accepted so
   // an owner's existing one-character phrasing keeps working.
@@ -736,7 +749,7 @@ function parseInput(value: unknown): UgcPrepareInput {
     throw new Error("sceneNumber must be 1 or greater");
   }
   return {
-    productName,
+    ...(productName ? { productName } : {}),
     characterNames,
     ...(input.startNewProject === true ? { startNewProject: true } : {}),
     ...(sceneNumber !== undefined ? { sceneNumber } : {}),
@@ -832,7 +845,7 @@ export class CloudbathUgcVideoWorkflow {
       description:
         "OWNER-ONLY. In a LINE group paired to UGC, resolves configured Product/Character records by name, freezes one project-level character identity lock, creates or reuses the requested scene, and freezes scope before line_video_draft. Later scenes in the same project reuse the frozen cast. This never performs paid generation.",
       parameters: Type.Object({
-        productName: Type.String(),
+        productName: Type.Optional(Type.String()),
         characterNames: Type.Optional(Type.Array(Type.String())),
         startNewProject: Type.Optional(Type.Boolean()),
         characterName: Type.Optional(Type.String()),
@@ -853,27 +866,6 @@ export class CloudbathUgcVideoWorkflow {
           throw new Error("UGC workflow is restricted to the owner who paired this group");
         }
         await this.notion.validateCapabilities(this.config.capabilities);
-        const product = await this.notion.resolveNamedRecord({
-          capabilityId: "PRODUCT_LIBRARY",
-          target: this.config.capabilities.PRODUCT_LIBRARY,
-          capabilities: this.config.capabilities,
-          name: input.productName,
-        });
-        // Every requested code must resolve to exactly one library row before
-        // anything is created; a partial cast never reaches a scene.
-        const characterPages = [];
-        for (const code of input.characterNames) {
-          characterPages.push({
-            code,
-            page: await this.notion.resolveNamedRecord({
-              capabilityId: "CHARACTER_LIBRARY",
-              target: this.config.capabilities.CHARACTER_LIBRARY,
-              capabilities: this.config.capabilities,
-              name: code,
-            }),
-          });
-        }
-        const characterPageIds = characterPages.map((entry) => entry.page.id!);
 
         // Continue the conversation's active project unless the owner asked for
         // a new one. Product + cast is NOT an identity: the same product and
@@ -887,27 +879,78 @@ export class CloudbathUgcVideoWorkflow {
         const active = input.startNewProject
           ? undefined
           : await this.activeProjects.lookup(activeKey);
-        const existingInstance = active
+        const activeInstance = active
           ? await this.projectInstances.lookup(ugcProjectInstanceKey(active.projectInstanceId))
           : undefined;
+        // A finalized project is durably closed. Continuing it would reopen a
+        // film the owner declared finished, so it fails closed; the owner must
+        // start a new project explicitly.
+        if (activeInstance?.finalizedAt) {
+          throw new Error(
+            "This project was finalized and cannot take more scenes; start a new project to continue",
+          );
+        }
+        const existingInstance = activeInstance;
         const nowIso = new Date(this.now()).toISOString();
         let instance: UgcProjectInstance;
         let projectPage: NotionPage;
+        const characterPages: Array<{ code: string; page: NotionPage }> = [];
         if (existingInstance) {
-          // Same project: its cast is already frozen and must not change.
+          // Continuation runs entirely on frozen identity: no Product or
+          // Character row is re-resolved, so the owner need not repeat
+          // productName and a library edit cannot retarget this project.
+          if (input.productName) {
+            const named = await this.notion.resolveNamedRecord({
+              capabilityId: "PRODUCT_LIBRARY",
+              target: this.config.capabilities.PRODUCT_LIBRARY,
+              capabilities: this.config.capabilities,
+              name: input.productName,
+            });
+            // Naming a different product mid-project would silently change what
+            // the remaining scenes advertise.
+            if (named.id !== existingInstance.productPageId) {
+              throw new Error(
+                "This project is locked to a different product; start a new project to change it",
+              );
+            }
+          }
           instance = existingInstance;
           projectPage = await this.notion.readProjectPage({
             capabilities: this.config.capabilities,
             projectPageId: instance.projectPageId,
           });
         } else {
+          // Product is optional: a character-only project is a first-class
+          // shape, and no placeholder product row is invented for it.
+          const product = input.productName
+            ? await this.notion.resolveNamedRecord({
+                capabilityId: "PRODUCT_LIBRARY",
+                target: this.config.capabilities.PRODUCT_LIBRARY,
+                capabilities: this.config.capabilities,
+                name: input.productName,
+              })
+            : undefined;
+          // Every requested code must resolve to exactly one library row before
+          // anything is created; a partial cast never reaches a scene.
+          for (const code of input.characterNames) {
+            characterPages.push({
+              code,
+              page: await this.notion.resolveNamedRecord({
+                capabilityId: "CHARACTER_LIBRARY",
+                target: this.config.capabilities.CHARACTER_LIBRARY,
+                capabilities: this.config.capabilities,
+                name: code,
+              }),
+            });
+          }
+          const characterPageIds = characterPages.map((entry) => entry.page.id!);
           // Random, not derived: two projects for the same product and cast
           // created in the same millisecond must still be distinct pieces of
           // work, so nothing about their content may feed this id.
           const projectInstanceId = crypto.randomUUID();
           projectPage = await this.notion.createProject({
             capabilities: this.config.capabilities,
-            product,
+            ...(product ? { product } : {}),
             characterPageIds,
             ...(input.characterNames.length > 0
               ? { characterLabel: input.characterNames.join(" × ") }
@@ -921,7 +964,11 @@ export class CloudbathUgcVideoWorkflow {
             accountId,
             lineGroupId: groupId,
             ownerSenderId,
-            productPageId: product.id!,
+            ...(product?.id ? { productPageId: product.id } : {}),
+            // Product references freeze here, beside the cast: editing the
+            // Product Library afterwards cannot reach this project, while a new
+            // project is free to freeze the updated ones.
+            productReferences: Object.freeze(product ? readProductReferences(product) : []),
             characterPageIds: Object.freeze([...characterPageIds]),
             createdAt: nowIso,
           };
@@ -1028,7 +1075,7 @@ export class CloudbathUgcVideoWorkflow {
           accountId,
           lineGroupId: groupId,
           ownerSenderId,
-          productPageId: product.id!,
+          ...(instance.productPageId ? { productPageId: instance.productPageId } : {}),
           ...(characterLocks[0] ? { characterPageId: characterLocks[0].pageId } : {}),
           characterLocks: Object.freeze(characterLocks),
           projectInstanceId: instance.projectInstanceId,
@@ -1037,7 +1084,9 @@ export class CloudbathUgcVideoWorkflow {
           shotPageIds: Object.freeze(shots.map((shot) => shot.id!)),
           scene,
           scenePageId: scenePage.id!,
-          referenceAssets: Object.freeze(freezeSceneReferences(characterLocks, product)),
+          referenceAssets: Object.freeze(
+            freezeSceneReferences(characterLocks, instance.productReferences),
+          ),
           frozenPrompt: input.prompt,
           ...(input.durationSeconds !== undefined
             ? { durationSeconds: input.durationSeconds }
@@ -1126,6 +1175,15 @@ export class CloudbathUgcVideoWorkflow {
         ) {
           return jsonResult({ resolution: "no_active_project" });
         }
+        // Idempotent: re-finalizing is a no-op that reports the existing state
+        // rather than rewriting Notion or reopening anything.
+        if (instance.finalizedAt) {
+          return jsonResult({
+            resolution: "already_finalized",
+            projectInstanceId: instance.projectInstanceId,
+            finalizedAt: instance.finalizedAt,
+          });
+        }
         await this.notion.validateCapabilities(this.config.capabilities);
         const scenes = await this.notion.listScenes({
           capabilities: this.config.capabilities,
@@ -1148,10 +1206,19 @@ export class CloudbathUgcVideoWorkflow {
           ...(last.assetUrl ? { finalAssetUrl: last.assetUrl } : {}),
           completedAt: this.now(),
         });
+        // Durable close, written after Notion succeeds: the instance is the
+        // authority continuation checks, so a finalized project can never
+        // return to Ready or Generating.
+        const finalizedAt = new Date(this.now()).toISOString();
+        await this.projectInstances.register(ugcProjectInstanceKey(instance.projectInstanceId), {
+          ...instance,
+          finalizedAt,
+        });
         return jsonResult({
           resolution: "project_finalized",
           projectInstanceId: instance.projectInstanceId,
           completedScenes: completed.length,
+          finalizedAt,
           finalR2ObjectKey: last.r2ObjectKey || undefined,
         });
       },

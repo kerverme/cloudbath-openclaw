@@ -81,6 +81,13 @@ function memoryStore<T>(): PluginStateKeyedStore<T> {
 }
 
 type CharacterRow = { id: string; name: string; identity: string[]; style?: string[] };
+type ProductRow = { id: string; name: string; reference: string };
+
+const DEFAULT_PRODUCT: ProductRow = {
+  id: "product-page",
+  name: "Cloudbath Serum",
+  reference: "product/serum.png",
+};
 
 /** Mirrors the live capability schemas the workflow validates before writing. */
 function dataSourceSchema(id: UgcCapabilityId) {
@@ -210,7 +217,7 @@ function identityProperties(identity: string[]) {
  * Notion stub carrying only what this flow reads. `characters` is mutable so a
  * test can edit the library AFTER a project freeze and prove the lock holds.
  */
-function stubNotion(characters: CharacterRow[]) {
+function stubNotion(characters: CharacterRow[], products: ProductRow[] = [DEFAULT_PRODUCT]) {
   const created: Array<{ target: string; properties: Record<string, unknown> }> = [];
   /**
    * Every created page, so create-or-reuse resolves the way production does:
@@ -238,17 +245,15 @@ function stubNotion(characters: CharacterRow[]) {
       const dataSourceId = url.pathname.split("/").at(-2);
       if (dataSourceId === TARGETS.PRODUCT_LIBRARY.dataSourceId) {
         return Response.json({
-          results: [
-            {
-              object: "page",
-              id: "product-page",
-              parent: { type: "data_source_id", data_source_id: dataSourceId },
-              properties: {
-                Name: { type: "title", title: [{ plain_text: "Cloudbath Serum" }] },
-                "Reference Images": keyProperty("product/serum.png"),
-              },
+          results: products.map((row) => ({
+            object: "page",
+            id: row.id,
+            parent: { type: "data_source_id", data_source_id: dataSourceId },
+            properties: {
+              Name: { type: "title", title: [{ plain_text: row.name }] },
+              "Reference Images": keyProperty(row.reference),
             },
-          ],
+          })),
           has_more: false,
         });
       }
@@ -312,21 +317,26 @@ function stubNotion(characters: CharacterRow[]) {
       }
     }
     if (url.pathname.startsWith("/v1/pages/") && init?.method === "PATCH") {
+      patches.push(url.pathname);
       return Response.json({ object: "page", id: url.pathname.split("/").at(-1) });
     }
     throw new Error(`Unexpected Notion request: ${url.pathname}`);
   }) as unknown as typeof fetch;
+
+  const patches: string[] = [];
+  const storedPages = () => pages;
+  const patchCount = () => patches.length;
 
   const paidVideoCalls = () =>
     (fetchImpl as unknown as { mock: { calls: Array<[string | URL]> } }).mock.calls.filter(
       ([input]) => String(input).includes("/videos") && !String(input).includes("/videos/models"),
     );
 
-  return { fetchImpl, created, paidVideoCalls };
+  return { fetchImpl, created, paidVideoCalls, storedPages, patchCount };
 }
 
-function buildWorkflow(characters: CharacterRow[]) {
-  const notion = stubNotion(characters);
+function buildWorkflow(characters: CharacterRow[], products: ProductRow[] = [DEFAULT_PRODUCT]) {
+  const notion = stubNotion(characters, products);
   const pending = memoryStore<PendingUgcVideoScope>();
   const projectLocks = memoryStore<UgcProjectCharacterLock>();
   const projectInstances = memoryStore<UgcProjectInstance>();
@@ -867,5 +877,242 @@ describe("explicit project finalization", () => {
         nativeConversationId: "line:group:C-ugc",
       }),
     ).toBeNull();
+  });
+});
+
+describe("A) character-only project", () => {
+  it("creates a project and two scenes with no product at all", async () => {
+    const flow = buildWorkflow(CAST);
+
+    const scene1 = await flow.prepare({
+      characterNames: ["F1", "F2"],
+      prompt: "F1 plays with F2 in the garden",
+      durationSeconds: 10,
+    });
+    const scene2 = await flow.prepare({
+      characterNames: ["F1", "F2"],
+      sceneNumber: 2,
+      prompt: "F1 walks with F2 into the house",
+      durationSeconds: 10,
+    });
+
+    expect(scene1.productPageId).toBeUndefined();
+    expect(scene2.projectInstanceId).toBe(scene1.projectInstanceId);
+    // Identical frozen F1/F2 references across both scenes.
+    expect(scene2.referenceAssets).toEqual(scene1.referenceAssets);
+    expect(scene1.referenceAssets.every((asset) => asset.kind === "identity")).toBe(true);
+    expect(flow.paidVideoCalls()).toHaveLength(0);
+  });
+
+  it("does not invent a placeholder product row", async () => {
+    const flow = buildWorkflow(CAST);
+
+    await flow.prepare({
+      characterNames: ["F1", "F2"],
+      prompt: "F1 plays with F2 in the garden",
+    });
+
+    expect(
+      flow.created.filter((entry) => entry.target === TARGETS.PRODUCT_LIBRARY.dataSourceId),
+    ).toHaveLength(0);
+    const project = flow.created.find(
+      (entry) => entry.target === TARGETS.UGC_PROJECTS.dataSourceId,
+    )!;
+    expect((project.properties as any).Product.relation).toEqual([]);
+  });
+
+  it("still requires a prompt", async () => {
+    const flow = buildWorkflow(CAST);
+
+    await expect(flow.prepare({ characterNames: ["F1"] })).rejects.toThrow(/prompt is required/u);
+  });
+});
+
+describe("B) product identity lock", () => {
+  it("scene 2 keeps the product references frozen at project creation", async () => {
+    const products: ProductRow[] = [structuredClone(DEFAULT_PRODUCT)];
+    const flow = buildWorkflow(CAST, products);
+
+    const scene1 = await flow.prepare({
+      productName: "Cloudbath Serum",
+      characterNames: ["F1", "F2"],
+      prompt: "Scene 1",
+    });
+
+    // The Product Library is edited between scenes.
+    products[0]!.reference = "product/serum-REPACKAGED.png";
+
+    const scene2 = await flow.prepare({
+      characterNames: ["F1", "F2"],
+      sceneNumber: 2,
+      prompt: "Scene 2",
+    });
+
+    expect(scene2.referenceAssets).toEqual(scene1.referenceAssets);
+    expect(scene2.referenceAssets.some((asset) => asset.locator.includes("REPACKAGED"))).toBe(
+      false,
+    );
+    expect(scene1.referenceAssets.some((asset) => asset.locator === "product/serum.png")).toBe(
+      true,
+    );
+  });
+
+  it("a new project may freeze the updated product references", async () => {
+    const products: ProductRow[] = [structuredClone(DEFAULT_PRODUCT)];
+    const flow = buildWorkflow(CAST, products);
+
+    await flow.prepare({
+      productName: "Cloudbath Serum",
+      characterNames: ["F1", "F2"],
+      prompt: "Project A scene 1",
+    });
+    products[0]!.reference = "product/serum-REPACKAGED.png";
+
+    const projectB = await flow.prepare({
+      productName: "Cloudbath Serum",
+      characterNames: ["F1", "F2"],
+      startNewProject: true,
+      prompt: "Project B scene 1",
+    });
+
+    expect(projectB.referenceAssets.some((asset) => asset.locator.includes("REPACKAGED"))).toBe(
+      true,
+    );
+  });
+});
+
+describe("C) continuation uses frozen project identity", () => {
+  it("continues without repeating productName", async () => {
+    const flow = buildWorkflow(CAST);
+
+    const scene1 = await flow.prepare({
+      productName: "Cloudbath Serum",
+      characterNames: ["F1", "F2"],
+      prompt: "Scene 1",
+    });
+    const scene2 = await flow.prepare({ sceneNumber: 2, prompt: "Scene 2" });
+
+    expect(scene2.projectInstanceId).toBe(scene1.projectInstanceId);
+    expect(scene2.productPageId).toBe(scene1.productPageId);
+    expect(scene2.characterLocks).toEqual(scene1.characterLocks);
+  });
+
+  it("fails closed when a different product is named mid-project", async () => {
+    const products: ProductRow[] = [
+      structuredClone(DEFAULT_PRODUCT),
+      { id: "product-page-2", name: "Cloudbath Toner", reference: "product/toner.png" },
+    ];
+    const flow = buildWorkflow(CAST, products);
+
+    await flow.prepare({
+      productName: "Cloudbath Serum",
+      characterNames: ["F1", "F2"],
+      prompt: "Scene 1",
+    });
+
+    await expect(
+      flow.prepare({
+        productName: "Cloudbath Toner",
+        characterNames: ["F1", "F2"],
+        sceneNumber: 2,
+        prompt: "Scene 2",
+      }),
+    ).rejects.toThrow(/locked to a different product/u);
+  });
+
+  it("does not re-resolve characters on continuation", async () => {
+    const characters = structuredClone(CAST);
+    const flow = buildWorkflow(characters);
+
+    const scene1 = await flow.prepare({
+      characterNames: ["F1", "F2"],
+      prompt: "Scene 1",
+    });
+    // Renaming the library rows would break a re-resolve; the frozen lock does
+    // not care.
+    characters[0]!.name = "RENAMED";
+    characters[1]!.name = "ALSO-RENAMED";
+
+    const scene2 = await flow.prepare({ sceneNumber: 2, prompt: "Scene 2" });
+
+    expect(scene2.characterLocks).toEqual(scene1.characterLocks);
+    expect(scene2.referenceAssets).toEqual(scene1.referenceAssets);
+  });
+});
+
+describe("D) finalized projects are durably closed", () => {
+  function finalize(flow: ReturnType<typeof buildWorkflow>) {
+    return flow.workflow.createFinalizeTool({
+      messageChannel: "line",
+      senderIsOwner: true,
+      requesterSenderId: OWNER,
+      sessionKey: SESSION_KEY,
+      accountId: "primary",
+      nativeConversationId: "line:group:C-ugc",
+    })!;
+  }
+
+  /** Marks every scene row Completed so finalization has something to close. */
+  function completeScenes(flow: ReturnType<typeof buildWorkflow>) {
+    for (const page of flow.storedPages()) {
+      if (page.properties?.["Shot Order"]) {
+        page.properties.Status = { type: "select", select: { name: "Completed" } };
+        page.properties["Generated R2 Object Key"] = {
+          type: "rich_text",
+          rich_text: [{ plain_text: "outbound/line-video/scene.mp4" }],
+        };
+      }
+    }
+  }
+
+  it("finalizes, then refuses further scenes and stays finalized", async () => {
+    const flow = buildWorkflow(CAST);
+
+    await flow.prepare({ characterNames: ["F1", "F2"], prompt: "Scene 1" });
+    await flow.prepare({ characterNames: ["F1", "F2"], sceneNumber: 2, prompt: "Scene 2" });
+    completeScenes(flow);
+
+    const finalized = (await finalize(flow).execute()) as { details?: Record<string, unknown> };
+    expect(finalized.details?.resolution).toBe("project_finalized");
+    expect(finalized.details?.finalizedAt).toEqual(expect.any(String));
+
+    // "ต่อ Scene 3" must fail closed.
+    await expect(flow.prepare({ sceneNumber: 3, prompt: "F1 กับ F2 ตอนจบ" })).rejects.toThrow(
+      /finalized and cannot take more scenes/u,
+    );
+    expect(flow.paidVideoCalls()).toHaveLength(0);
+  });
+
+  it("is idempotent when finalized twice", async () => {
+    const flow = buildWorkflow(CAST);
+    await flow.prepare({ characterNames: ["F1", "F2"], prompt: "Scene 1" });
+    completeScenes(flow);
+
+    const first = (await finalize(flow).execute()) as { details?: Record<string, unknown> };
+    const patchesAfterFirst = flow.patchCount();
+    const second = (await finalize(flow).execute()) as { details?: Record<string, unknown> };
+
+    expect(first.details?.resolution).toBe("project_finalized");
+    expect(second.details?.resolution).toBe("already_finalized");
+    expect(second.details?.finalizedAt).toBe(first.details?.finalizedAt);
+    // No further Notion write, and certainly no provider call.
+    expect(flow.patchCount()).toBe(patchesAfterFirst);
+    expect(flow.paidVideoCalls()).toHaveLength(0);
+  });
+
+  it("allows an explicit new project after finalization", async () => {
+    const flow = buildWorkflow(CAST);
+    const projectA = await flow.prepare({ characterNames: ["F1", "F2"], prompt: "Scene 1" });
+    completeScenes(flow);
+    await finalize(flow).execute();
+
+    const projectB = await flow.prepare({
+      characterNames: ["F1", "F2"],
+      startNewProject: true,
+      prompt: "New film scene 1",
+    });
+
+    expect(projectB.projectInstanceId).not.toBe(projectA.projectInstanceId);
+    expect(projectB.scene.sceneNumber).toBe(1);
   });
 });

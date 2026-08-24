@@ -587,11 +587,32 @@ emits can retarget it.
 - Replaying a scene preparation on the active project is idempotent: scenes
   resolve by `Project` relation plus `Shot Order`.
 
-### Character lock is per project instance
+### Product is optional
 
-Project A and Project B freeze independently. Editing the Character Library
-later cannot touch Project A, but a deliberately new Project B freezes the
-then-current references. That is intentional: a new film may want the new art.
+A project may be **character-only**: F1 + F2 with no product at all. No
+placeholder product row is invented, and the Notion `Product` relation is simply
+left empty. `productName` is optional; only `prompt` is required.
+
+### Product and character identity both freeze at project creation
+
+A project with a product freezes its product page id **and its generation
+reference assets** alongside the character lock. Editing the Product Library
+afterwards cannot reach that project; a deliberately new project is free to
+freeze the updated references.
+
+### Continuation runs on frozen identity
+
+`ต่อ Scene 2 ...` reuses the active project's frozen product and cast. Neither
+the Product Library nor the Character Library is re-resolved as authoritative
+identity, so:
+
+- the owner does not need to repeat `productName` when continuing;
+- renaming or editing a library row cannot retarget an in-flight project;
+- naming a **different** product while the active project is locked to another
+  fails closed — start a new project to change it.
+
+The same rule already applied to the cast: requesting a different set of
+characters on a locked project is rejected.
 
 ### Project lifecycle
 
@@ -608,6 +629,15 @@ evidence the film is done — the owner may say "ต่อ Scene 2" next. Only
 `cloudbath_ugc_project_finalize` moves a project to `Completed`. It is
 owner-only, bound to the active project, and performs **no provider call**, so
 finalization can never incur cost.
+
+Finalization is **durable**: the project instance records `finalizedAt`, and a
+finalized project is closed for good.
+
+- continuing a finalized project fails closed;
+- it never returns to `Ready` or `Generating`;
+- finalizing again is idempotent, returning `already_finalized` with the
+  original timestamp and writing nothing further;
+- `startNewProject: true` begins a fresh project normally.
 
 `Final R2 Object Key`, `Final Video URL` and project `Completed At` are written
 **only at finalization**, from the highest-numbered completed scene. Nothing is
