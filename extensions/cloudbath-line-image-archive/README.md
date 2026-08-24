@@ -566,33 +566,55 @@ Both UGC databases expose exactly `Draft`, `Ready`, `Generating`, `Completed`,
 Startup schema validation checks these options exist, so a drifted database
 fails closed at validation instead of when a paid scene tries to report.
 
-### Project identity without a Record ID
+### Project identity
 
-Live UGC_PROJECTS has no `Record ID`, and `Project ID` is a Notion-managed
-`unique_id` that cannot be written. Create-or-reuse therefore resolves identity
-from what the database already stores: the `Product` relation plus the exact set
-of `Character` relations. F1+F2 is a different project from F1 alone, and a
-replayed preparation reuses the same row.
+A project is a **piece of work**, not a product/cast combination. The same
+product with the same characters can be three unrelated stories, each needing
+its own scenes, character lock, costs and outputs.
 
-**No new property is required.** The deterministic record id still exists but is
-a durable-state key only (character lock, frozen scope) and is never written to
-Notion.
+Identity is therefore an application-owned **project instance id** held in
+durable state and bound to the created Notion page. Notion's own `Project ID` is
+Notion-managed and cannot be chosen by us, and neither UGC database has a
+`Record ID` — **no new property is required**.
 
-Scenes resolve the same way — by `Project` relation plus `Shot Order`.
+Each conversation has an **active project**, persisted restart-safely and scoped
+to the trusted LINE account + native group + owner triple. Nothing the model
+emits can retarget it.
 
-### Project-level result
+- `cloudbath_ugc_video_prepare` **continues** the active project by default.
+- `startNewProject: true` mints a new instance, a new Notion row and a new
+  character lock — even when product and cast are identical.
+- Replaying a scene preparation on the active project is idempotent: scenes
+  resolve by `Project` relation plus `Shot Order`.
 
-UGC_PROJECTS is written with `Status`, `Actual Cost USD`, `Video Model`,
-`Failure Reason`, and — only once every scene in the project is settled —
-`Final R2 Object Key`, `Final Video URL` and `Completed At`.
+### Character lock is per project instance
 
-Project status is **derived, never assumed**: a completed scene promotes the
-project only when no sibling scene is still `Draft`/`Ready`/`Generating`.
-Finishing scene 1 of a two-scene project leaves the project `Generating`. If
-sibling state cannot be read, the project is not promoted.
+Project A and Project B freeze independently. Editing the Character Library
+later cannot touch Project A, but a deliberately new Project B freezes the
+then-current references. That is intentional: a new film may want the new art.
 
-Nothing is stitched, so `Final Video URL` is the last completed scene's asset,
-not a combined reel.
+### Project lifecycle
+
+| State                                              | Status       |
+| -------------------------------------------------- | ------------ |
+| project created                                    | `Draft`      |
+| scenes prepared, awaiting owner                    | `Ready`      |
+| scenes generating or generated, project still open | `Generating` |
+| explicit owner finalization                        | `Completed`  |
+| fatal failure                                      | `Failed`     |
+
+**A finished scene never completes the project.** Absence of a scene 2 row is not
+evidence the film is done — the owner may say "ต่อ Scene 2" next. Only
+`cloudbath_ugc_project_finalize` moves a project to `Completed`. It is
+owner-only, bound to the active project, and performs **no provider call**, so
+finalization can never incur cost.
+
+`Final R2 Object Key`, `Final Video URL` and project `Completed At` are written
+**only at finalization**, from the highest-numbered completed scene. Nothing is
+stitched, so that is the last scene's asset rather than a combined reel.
+
+Scene-level `Generated R2 Object Key`, `Generated Asset URL` and `Completed At`
+are written after each scene, as before.
 
 ### Project prompt
 

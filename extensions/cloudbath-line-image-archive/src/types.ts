@@ -252,11 +252,46 @@ export type UgcCharacterLock = Readonly<{
 }>;
 
 /**
- * Durable per-project cast. Outlives the pending-scope TTL so a scene prepared
- * days later reuses the same references instead of re-resolving them.
+ * A distinct piece of work. Product + cast is NOT an identity: the same product
+ * with the same characters can be three unrelated stories, each needing its own
+ * scenes, lock, costs and outputs. This application-owned id is what separates
+ * them; Notion's own Project ID is Notion-managed and cannot be chosen by us.
+ */
+export type UgcProjectInstance = Readonly<{
+  version: 1;
+  projectInstanceId: string;
+  projectPageId: string;
+  accountId: string;
+  lineGroupId: string;
+  ownerSenderId: string;
+  productPageId: string;
+  characterPageIds: readonly string[];
+  createdAt: string;
+}>;
+
+/**
+ * The project a conversation is currently working on. Persisted so "ต่อ Scene 2"
+ * lands on the same project after a restart, and scoped to the trusted
+ * account/group/owner triple rather than to model-supplied text.
+ */
+export type ActiveUgcProject = Readonly<{
+  version: 1;
+  projectInstanceId: string;
+  accountId: string;
+  lineGroupId: string;
+  ownerSenderId: string;
+  updatedAt: string;
+}>;
+
+/**
+ * Durable per-project cast, keyed by project INSTANCE. Two projects sharing a
+ * product and cast freeze independently: editing the Character Library later
+ * cannot touch an existing project, but a deliberately new project may freeze
+ * the then-current references.
  */
 export type UgcProjectCharacterLock = Readonly<{
   version: 1;
+  projectInstanceId: string;
   projectPageId: string;
   projectRecordId: string;
   accountId: string;
@@ -293,6 +328,7 @@ export type FrozenUgcVideoScope = Readonly<{
   characterPageId?: string;
   /** Frozen cast for this scene, in submission order. */
   characterLocks: readonly UgcCharacterLock[];
+  projectInstanceId: string;
   projectPageId: string;
   projectRecordId: string;
   shotPageIds: readonly string[];

@@ -507,60 +507,16 @@ class VideoLibraryNotionClient implements LineVideoLibrary {
   }
 
   /**
-   * Sibling scene states for this project. A read failure reports an unknown
-   * outstanding scene so the project can never be promoted to Completed on
-   * missing information.
+   * Project status for a scene-level event.
+   *
+   * A finished scene never completes the project. Absence of a Draft scene 2 is
+   * not evidence the film is done -- the owner may say "ต่อ Scene 2" next, and
+   * an auto-Completed project would then be reopened by a later scene. Only an
+   * explicit owner finalization moves a project to Completed, so a successful
+   * scene leaves the project Generating (still open for more scenes).
    */
-  private async siblingSceneStatuses(
-    scope: LineVideoUgcScope,
-  ): Promise<Array<{ pageId: string; status: string | undefined }>> {
-    try {
-      const response = await this.request<{
-        results?: Array<{
-          id?: string;
-          properties?: Record<string, { select?: { name?: string } }>;
-        }>;
-      }>(
-        `/v1/data_sources/${encodeURIComponent(scope.capabilities.UGC_SHOTS.dataSourceId)}/query`,
-        {
-          method: "POST",
-          body: JSON.stringify({
-            filter: { property: "Project", relation: { contains: scope.projectPageId } },
-            page_size: 100,
-          }),
-        },
-      );
-      return (response.results ?? []).map((page) => ({
-        pageId: page.id ?? "",
-        status: page.properties?.Status?.select?.name,
-      }));
-    } catch {
-      return [{ pageId: "unknown", status: "Generating" }];
-    }
-  }
-
-  /**
-   * Project status is derived, never assumed. A completed scene promotes the
-   * project only when no sibling scene is still Draft/Ready/Generating -- so
-   * finishing scene 1 of a two-scene project leaves the project Generating.
-   */
-  private async resolveProjectStatus(params: {
-    scope: LineVideoUgcScope;
-    sceneStatus: UgcLiveStatus;
-  }): Promise<{ status: UgcLiveStatus; projectComplete: boolean }> {
-    if (params.sceneStatus !== "Completed") {
-      return { status: params.sceneStatus, projectComplete: false };
-    }
-    const scenes = await this.siblingSceneStatuses(params.scope);
-    const outstanding = scenes.filter(
-      (scene) =>
-        scene.pageId !== params.scope.scenePageId &&
-        scene.status !== "Completed" &&
-        scene.status !== "Failed",
-    );
-    return outstanding.length === 0
-      ? { status: "Completed", projectComplete: true }
-      : { status: "Generating", projectComplete: false };
+  private projectStatusForScene(sceneStatus: UgcLiveStatus): UgcLiveStatus {
+    return sceneStatus === "Completed" ? "Generating" : sceneStatus;
   }
 
   private async updateUgcStatus(params: {
@@ -574,10 +530,7 @@ class VideoLibraryNotionClient implements LineVideoLibrary {
     model?: string;
   }): Promise<void> {
     await this.updateSceneLedger(params);
-    const project = await this.resolveProjectStatus({
-      scope: params.scope,
-      sceneStatus: params.status,
-    });
+    const projectStatus = this.projectStatusForScene(params.status);
     const available = await this.sceneSchema(params.scope.capabilities.UGC_PROJECTS);
     const optional: Record<string, unknown> = {};
     const put = (name: string, value: unknown): void => {
@@ -594,23 +547,13 @@ class VideoLibraryNotionClient implements LineVideoLibrary {
     if (params.failureReason) {
       put("Failure Reason", richText(params.failureReason.slice(0, 400)));
     }
-    // "Final" belongs to a finished project only. Nothing is stitched here, so
-    // this is the last completed scene's asset, not a combined reel.
-    if (project.projectComplete) {
-      if (params.r2ObjectKey) {
-        put("Final R2 Object Key", richText(params.r2ObjectKey));
-      }
-      if (params.assetUrl) {
-        put("Final Video URL", { url: params.assetUrl });
-      }
-      if (params.completedAt !== undefined) {
-        put("Completed At", { date: { start: new Date(params.completedAt).toISOString() } });
-      }
-    }
+    // Final R2 Object Key / Final Video URL / Completed At describe a FINISHED
+    // project. Writing them after a scene would claim the film is done while it
+    // is still open for more scenes, so they belong to finalization only.
     await this.updateScopedPage({
       pageId: params.scope.projectPageId,
       target: params.scope.capabilities.UGC_PROJECTS,
-      properties: { Status: { select: { name: project.status } }, ...optional },
+      properties: { Status: { select: { name: projectStatus } }, ...optional },
     });
   }
 

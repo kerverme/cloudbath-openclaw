@@ -51,6 +51,7 @@ const SCOPE: LineVideoUgcScope = {
       frozenAt: "2026-08-23T00:00:00.000Z",
     },
   ],
+  projectInstanceId: "project-instance",
   projectPageId: "project-page",
   projectRecordId: "project-record",
   scene: {

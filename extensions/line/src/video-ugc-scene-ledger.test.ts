@@ -36,6 +36,7 @@ function scopeForScene(sceneNumber: number, scenePageId: string): LineVideoUgcSc
         frozenAt: "2026-08-23T00:00:00.000Z",
       },
     ],
+    projectInstanceId: "project-instance",
     projectPageId: "project-page",
     projectRecordId: "project-record",
     scene: {
@@ -56,22 +57,10 @@ function scopeForScene(sceneNumber: number, scenePageId: string): LineVideoUgcSc
 }
 
 /** `sceneProperties` controls which optional ledger columns the stub advertises. */
-function stubNotion(
-  sceneProperties: string[],
-  siblingScenes: Array<{ id: string; status: string }> = [],
-) {
+function stubNotion(sceneProperties: string[]) {
   const patches: Array<{ pageId: string; properties: Record<string, any> }> = [];
   const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
     const url = new URL(typeof input === "string" ? input : (input as URL).href);
-    // Sibling scenes for the derived project status.
-    if (url.pathname.endsWith("/query")) {
-      return Response.json({
-        results: siblingScenes.map((scene) => ({
-          id: scene.id,
-          properties: { Status: { select: { name: scene.status } } },
-        })),
-      });
-    }
     if (url.pathname.startsWith("/v1/data_sources/")) {
       const id = url.pathname.split("/").at(-1)!;
       return Response.json({
@@ -270,11 +259,24 @@ describe("project status semantics", () => {
     ...FULL_SCHEMA,
   ];
 
-  it("leaves the project Generating when a later scene is still outstanding", async () => {
-    const notion = stubNotion(PROJECT_SCHEMA, [
-      { id: "scene-1", status: "Completed" },
-      { id: "scene-2", status: "Draft" },
-    ]);
+  it("never completes the project just because a scene finished", async () => {
+    const notion = stubNotion(PROJECT_SCHEMA);
+
+    await notion.library.markUgcCompleted!(scopeForScene(1, "scene-1"), 0.51, {
+      r2ObjectKey: "outbound/line-video/scene-1.mp4",
+      assetUrl: "https://r2.example/scene-1.mp4",
+      completedAt: Date.now(),
+    });
+
+    // No scene 2 row exists yet, but the owner may still say "ต่อ Scene 2".
+    // Absence of a future row is not evidence the film is finished.
+    expect(notion.projectPatches()[0]!.properties.Status).toEqual({
+      select: { name: "Generating" },
+    });
+  });
+
+  it("does not write project Final fields after a scene completes", async () => {
+    const notion = stubNotion(PROJECT_SCHEMA);
 
     await notion.library.markUgcCompleted!(scopeForScene(1, "scene-1"), 0.51, {
       r2ObjectKey: "outbound/line-video/scene-1.mp4",
@@ -283,54 +285,45 @@ describe("project status semantics", () => {
     });
 
     const project = notion.projectPatches()[0]!.properties;
-    // Scene 1 finishing must not declare a two-scene project done.
-    expect(project.Status).toEqual({ select: { name: "Generating" } });
     expect(project["Final R2 Object Key"]).toBeUndefined();
     expect(project["Final Video URL"]).toBeUndefined();
+    expect(project["Completed At"]).toBeUndefined();
   });
 
-  it("completes the project only when every scene is settled", async () => {
-    const notion = stubNotion(PROJECT_SCHEMA, [
-      { id: "scene-1", status: "Completed" },
-      { id: "scene-2", status: "Completed" },
-    ]);
+  it("still records the scene's own output and cost", async () => {
+    const notion = stubNotion(PROJECT_SCHEMA);
 
-    await notion.library.markUgcCompleted!(scopeForScene(2, "scene-2"), 0.62, {
-      r2ObjectKey: "outbound/line-video/scene-2.mp4",
-      assetUrl: "https://r2.example/scene-2.mp4",
-      completedAt: Date.parse("2026-08-23T02:00:00.000Z"),
-      model: "bytedance/seedance-2.5",
-    });
-
-    const project = notion.projectPatches()[0]!.properties;
-    expect(project.Status).toEqual({ select: { name: "Completed" } });
-    expect(project["Final R2 Object Key"].rich_text[0].text.content).toBe(
-      "outbound/line-video/scene-2.mp4",
-    );
-    expect(project["Video Model"].rich_text[0].text.content).toBe("bytedance/seedance-2.5");
-  });
-
-  it("does not promote the project when sibling state cannot be read", async () => {
-    const notion = stubNotion(PROJECT_SCHEMA, []);
-    // An empty result set means no outstanding siblings, so a single-scene
-    // project completes; this pins that the single-scene case still works.
     await notion.library.markUgcCompleted!(scopeForScene(1, "scene-1"), 0.51, {
       r2ObjectKey: "outbound/line-video/scene-1.mp4",
-      completedAt: Date.now(),
+      assetUrl: "https://r2.example/scene-1.mp4",
+      completedAt: Date.parse("2026-08-23T01:00:00.000Z"),
     });
 
-    expect(notion.projectPatches()[0]!.properties.Status).toEqual({
-      select: { name: "Completed" },
-    });
+    const scene = notion.scenePatches()[0]!.properties;
+    expect(scene.Status).toEqual({ select: { name: "Completed" } });
+    expect(scene["Generated R2 Object Key"].rich_text[0].text.content).toBe(
+      "outbound/line-video/scene-1.mp4",
+    );
+    expect(scene["Completed At"]).toEqual({ date: { start: "2026-08-23T01:00:00.000Z" } });
   });
 
   it("marks the project Failed with a sanitized reason", async () => {
-    const notion = stubNotion(PROJECT_SCHEMA, [{ id: "scene-1", status: "Failed" }]);
+    const notion = stubNotion(PROJECT_SCHEMA);
 
     await notion.library.markUgcFailed!(scopeForScene(1, "scene-1"), "provider rejected request");
 
     const project = notion.projectPatches()[0]!.properties;
     expect(project.Status).toEqual({ select: { name: "Failed" } });
     expect(project["Failure Reason"].rich_text[0].text.content).toBe("provider rejected request");
+  });
+
+  it("keeps the project Generating while a scene is generating", async () => {
+    const notion = stubNotion(PROJECT_SCHEMA);
+
+    await notion.library.markUgcProcessing!(scopeForScene(2, "scene-2"));
+
+    expect(notion.projectPatches()[0]!.properties.Status).toEqual({
+      select: { name: "Generating" },
+    });
   });
 });

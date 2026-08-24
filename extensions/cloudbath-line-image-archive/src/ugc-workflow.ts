@@ -12,7 +12,9 @@ import type {
   NotionTarget,
   PendingUgcVideoScope,
   UgcCharacterLock,
+  ActiveUgcProject,
   UgcProjectCharacterLock,
+  UgcProjectInstance,
   UgcSceneContinuity,
   SafeLogger,
   UgcCapabilityId,
@@ -35,11 +37,14 @@ const MAX_REFERENCE_ASSETS = 8;
 const PENDING_TTL_MS = 15 * 60 * 1_000;
 const UGC_R2_PREFIX = "outbound/line-video" as const;
 
+export const CLOUDBATH_UGC_PROJECT_FINALIZE_TOOL_NAME = "cloudbath_ugc_project_finalize";
 export const CLOUDBATH_UGC_VIDEO_PREPARE_TOOL_NAME = "cloudbath_ugc_video_prepare";
 export const CLOUDBATH_UGC_PENDING_NAMESPACE = "ugc-video-pending-v1";
 export const CLOUDBATH_UGC_DRAFT_SCOPE_NAMESPACE = "ugc-video-draft-scopes-v1";
 export const CLOUDBATH_UGC_ACTIVE_SESSION_NAMESPACE = "ugc-video-active-sessions-v1";
 export const CLOUDBATH_UGC_PROJECT_LOCK_NAMESPACE = "ugc-project-character-lock-v1";
+export const CLOUDBATH_UGC_PROJECT_INSTANCE_NAMESPACE = "ugc-project-instance-v1";
+export const CLOUDBATH_UGC_ACTIVE_PROJECT_NAMESPACE = "ugc-active-project-v1";
 export const CLOUDBATH_UGC_SCOPE_MAX_ENTRIES = 20_000;
 
 type NotionPropertySchema = {
@@ -54,6 +59,7 @@ type NotionPropertyValue = {
   rich_text?: Array<{ plain_text?: string }>;
   number?: number | null;
   relation?: Array<{ id?: string }>;
+  select?: { name?: string } | null;
   url?: string | null;
   files?: Array<{
     type?: string;
@@ -86,6 +92,8 @@ type NotionQueryResponse = {
 type UgcPrepareInput = {
   productName: string;
   characterNames: string[];
+  /** Explicit "start a new project" rather than continuing the active one. */
+  startNewProject?: boolean;
   /** Scene to prepare. Omitted means "next scene in this project". */
   sceneNumber?: number;
   prompt: string;
@@ -210,28 +218,29 @@ export function ugcPendingKey(sessionKey: string): string {
   return hashKey("ugc-pending", sessionKey);
 }
 
-export /** Durable key for a project's frozen cast. */
-function ugcProjectLockKey(projectRecordId: string): string {
-  return `ugc-project-lock:${projectRecordId}`;
+export /** Durable key for a project instance's frozen cast. */
+function ugcProjectLockKey(projectInstanceId: string): string {
+  return `ugc-project-lock:${projectInstanceId}`;
+}
+
+function ugcProjectInstanceKey(projectInstanceId: string): string {
+  return `ugc-project-instance:${projectInstanceId}`;
+}
+
+/**
+ * Active-project pointer for one conversation. Keyed by the trusted
+ * account/group/owner triple so nothing the model emits can retarget it.
+ */
+function ugcActiveProjectKey(params: {
+  accountId: string;
+  lineGroupId: string;
+  ownerSenderId: string;
+}): string {
+  return `ugc-active-project:${hashKey(params.accountId, params.lineGroupId, params.ownerSenderId)}`;
 }
 
 export function ugcDraftScopeKey(draftId: string): string {
   return hashKey("ugc-draft", draftId);
-}
-
-function recordId(params: {
-  accountId: string;
-  groupId: string;
-  productPageId: string;
-  characterPageId?: string;
-}): string {
-  return hashKey(
-    "ugc-project-v1",
-    params.accountId,
-    params.groupId,
-    params.productPageId,
-    params.characterPageId ?? "",
-  );
 }
 
 function safeR2Key(value: string): string | undefined {
@@ -527,71 +536,96 @@ export class UgcNotionWorkflowClient {
   }
 
   /**
-   * Finds the project for this exact cast.
+   * Creates a UGC Project row.
    *
-   * Live UGC_PROJECTS has no `Record ID`, and `Project ID` is a Notion-managed
-   * unique_id we cannot write, so identity comes from what the database
-   * actually stores: the Product relation plus the exact set of Character
-   * relations. F1+F2 is therefore a different project from F1 alone, and a
-   * replayed preparation reuses the same row instead of forking one.
+   * Deliberately does NOT look for an existing row by product and cast: the
+   * same product with the same characters can be several unrelated stories, and
+   * collapsing them into one row would share scenes, costs and a character lock
+   * between them. Reuse is decided by the caller's project instance instead.
    */
-  private async findProjectByCast(params: {
-    target: NotionTarget;
-    productPageId: string;
-    characterPageIds: readonly string[];
-  }): Promise<NotionPage | undefined> {
-    const wanted = [...params.characterPageIds].toSorted().join("|");
-    const pages = await this.queryAll(params.target, {
-      filter: { property: "Product", relation: { contains: params.productPageId } },
-    });
-    return pages.find((page) => {
-      const cast = (page.properties?.Character?.relation ?? [])
-        .map((entry) => entry.id ?? "")
-        .filter(Boolean)
-        .toSorted()
-        .join("|");
-      return cast === wanted;
-    });
-  }
-
-  async createOrReuseProject(params: {
+  async createProject(params: {
     capabilities: Readonly<Record<UgcCapabilityId, NotionTarget>>;
-    accountId: string;
-    groupId: string;
     product: NotionPage;
     characterPageIds: readonly string[];
     characterLabel?: string;
-  }): Promise<{ page: NotionPage; recordId: string }> {
+    projectInstanceId: string;
+  }): Promise<NotionPage> {
     const target = params.capabilities.UGC_PROJECTS;
     await this.schema("UGC_PROJECTS", target, params.capabilities);
-    // Durable-state key only (character lock, scene scope). Never written to
-    // Notion -- the live schema has no column for it.
-    const id = recordId({
-      accountId: params.accountId,
-      groupId: params.groupId,
-      productPageId: params.product.id!,
-      characterPageId: [...params.characterPageIds].toSorted().join("|") || undefined,
-    });
-    const existing = await this.findProjectByCast({
-      target,
-      productPageId: params.product.id!,
-      characterPageIds: params.characterPageIds,
-    });
-    if (existing) {
-      return { page: existing, recordId: id };
-    }
     const productName = plainText(params.product.properties?.Name);
-    const page = await this.createPage(target, {
+    return await this.createPage(target, {
       Name: title(`${productName}${params.characterLabel ? ` × ${params.characterLabel}` : ""}`),
       Status: { select: { name: "Draft" satisfies UgcStatus } },
       Product: relation(params.product.id),
-      // The whole frozen cast, not just the first character: a project running
-      // F1 and F2 must relate to both library pages.
+      // The whole frozen cast, not just the first character.
       Character: { relation: params.characterPageIds.map((pageId) => ({ id: pageId })) },
       "Estimated Cost USD": { number: null },
       "Actual Cost USD": { number: null },
     });
-    return { page, recordId: id };
+  }
+
+  /** Reads a project page by id, confirming it still belongs to the target. */
+  async readProjectPage(params: {
+    capabilities: Readonly<Record<UgcCapabilityId, NotionTarget>>;
+    projectPageId: string;
+  }): Promise<NotionPage> {
+    const page = await this.request<NotionPage>(
+      `/v1/pages/${encodeURIComponent(params.projectPageId)}`,
+    );
+    return this.assertPage(page, params.capabilities.UGC_PROJECTS);
+  }
+
+  /**
+   * Scene rows for a project with the fields finalization reads. Read-only.
+   */
+  async listScenes(params: {
+    capabilities: Readonly<Record<UgcCapabilityId, NotionTarget>>;
+    projectPageId: string;
+  }): Promise<
+    Array<{
+      pageId: string;
+      order: number | undefined;
+      status: string | undefined;
+      r2ObjectKey: string;
+      assetUrl: string | undefined;
+    }>
+  > {
+    const pages = await this.queryAll(params.capabilities.UGC_SHOTS, {
+      filter: { property: "Project", relation: { contains: params.projectPageId } },
+    });
+    return pages.map((page) => ({
+      pageId: page.id ?? "",
+      order: sceneOrder(page),
+      status: page.properties?.Status?.select?.name,
+      r2ObjectKey: plainText(page.properties?.["Generated R2 Object Key"]),
+      assetUrl: page.properties?.["Generated Asset URL"]?.url ?? undefined,
+    }));
+  }
+
+  /**
+   * Marks a project Completed and records its final asset. No provider call
+   * happens here -- finalization is bookkeeping over already-generated scenes.
+   */
+  async finalizeProject(params: {
+    capabilities: Readonly<Record<UgcCapabilityId, NotionTarget>>;
+    projectPageId: string;
+    finalR2ObjectKey?: string;
+    finalAssetUrl?: string;
+    completedAt: number;
+  }): Promise<void> {
+    await this.request(`/v1/pages/${encodeURIComponent(params.projectPageId)}`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        properties: {
+          Status: { select: { name: "Completed" satisfies UgcStatus } },
+          "Completed At": { date: { start: new Date(params.completedAt).toISOString() } },
+          ...(params.finalR2ObjectKey
+            ? { "Final R2 Object Key": richText(params.finalR2ObjectKey) }
+            : {}),
+          ...(params.finalAssetUrl ? { "Final Video URL": { url: params.finalAssetUrl } } : {}),
+        },
+      }),
+    });
   }
 
   /** Read-only scene lookup by order. Never creates. */
@@ -704,6 +738,7 @@ function parseInput(value: unknown): UgcPrepareInput {
   return {
     productName,
     characterNames,
+    ...(input.startNewProject === true ? { startNewProject: true } : {}),
     ...(sceneNumber !== undefined ? { sceneNumber } : {}),
     prompt,
     ...(typeof input.durationSeconds === "number"
@@ -737,6 +772,10 @@ export class CloudbathUgcVideoWorkflow {
      * same references scene 1 did, however long the gap.
      */
     private readonly projectLocks: PluginStateKeyedStore<UgcProjectCharacterLock>,
+    /** Durable project instances: the real identity of a piece of work. */
+    private readonly projectInstances: PluginStateKeyedStore<UgcProjectInstance>,
+    /** Which project each trusted conversation is currently working on. */
+    private readonly activeProjects: PluginStateKeyedStore<ActiveUgcProject>,
     private readonly now: () => number = Date.now,
   ) {}
 
@@ -795,6 +834,7 @@ export class CloudbathUgcVideoWorkflow {
       parameters: Type.Object({
         productName: Type.String(),
         characterNames: Type.Optional(Type.Array(Type.String())),
+        startNewProject: Type.Optional(Type.Boolean()),
         characterName: Type.Optional(Type.String()),
         sceneNumber: Type.Optional(Type.Integer({ minimum: 1 })),
         prompt: Type.String(),
@@ -834,21 +874,74 @@ export class CloudbathUgcVideoWorkflow {
           });
         }
         const characterPageIds = characterPages.map((entry) => entry.page.id!);
-        const project = await this.notion.createOrReuseProject({
-          capabilities: this.config.capabilities,
-          accountId,
-          groupId,
-          product,
-          characterPageIds,
-          ...(input.characterNames.length > 0
-            ? { characterLabel: input.characterNames.join(" × ") }
-            : {}),
-        });
 
-        // The cast is frozen once per project. A later scene reuses the stored
-        // lock verbatim rather than re-reading the Character Library, so edits
-        // to a library row cannot reach an in-flight project.
-        const lockKey = ugcProjectLockKey(project.recordId);
+        // Continue the conversation's active project unless the owner asked for
+        // a new one. Product + cast is NOT an identity: the same product and
+        // characters can be several unrelated stories, so reuse is decided here
+        // by the durable project instance, never by matching Notion relations.
+        const activeKey = ugcActiveProjectKey({
+          accountId,
+          lineGroupId: groupId,
+          ownerSenderId,
+        });
+        const active = input.startNewProject
+          ? undefined
+          : await this.activeProjects.lookup(activeKey);
+        const existingInstance = active
+          ? await this.projectInstances.lookup(ugcProjectInstanceKey(active.projectInstanceId))
+          : undefined;
+        const nowIso = new Date(this.now()).toISOString();
+        let instance: UgcProjectInstance;
+        let projectPage: NotionPage;
+        if (existingInstance) {
+          // Same project: its cast is already frozen and must not change.
+          instance = existingInstance;
+          projectPage = await this.notion.readProjectPage({
+            capabilities: this.config.capabilities,
+            projectPageId: instance.projectPageId,
+          });
+        } else {
+          // Random, not derived: two projects for the same product and cast
+          // created in the same millisecond must still be distinct pieces of
+          // work, so nothing about their content may feed this id.
+          const projectInstanceId = crypto.randomUUID();
+          projectPage = await this.notion.createProject({
+            capabilities: this.config.capabilities,
+            product,
+            characterPageIds,
+            ...(input.characterNames.length > 0
+              ? { characterLabel: input.characterNames.join(" × ") }
+              : {}),
+            projectInstanceId,
+          });
+          instance = {
+            version: 1,
+            projectInstanceId,
+            projectPageId: projectPage.id!,
+            accountId,
+            lineGroupId: groupId,
+            ownerSenderId,
+            productPageId: product.id!,
+            characterPageIds: Object.freeze([...characterPageIds]),
+            createdAt: nowIso,
+          };
+          await this.projectInstances.register(ugcProjectInstanceKey(projectInstanceId), instance);
+        }
+        await this.activeProjects.register(activeKey, {
+          version: 1,
+          projectInstanceId: instance.projectInstanceId,
+          accountId,
+          lineGroupId: groupId,
+          ownerSenderId,
+          updatedAt: nowIso,
+        });
+        const project = { page: projectPage, recordId: instance.projectInstanceId };
+
+        // The cast is frozen once per PROJECT INSTANCE. A later scene reuses the
+        // stored lock verbatim rather than re-reading the Character Library, so
+        // edits to a library row cannot reach an existing project -- while a
+        // deliberately new project freezes the then-current references.
+        const lockKey = ugcProjectLockKey(instance.projectInstanceId);
         const existingLock = await this.projectLocks.lookup(lockKey);
         const frozenAt = new Date(this.now()).toISOString();
         let characterLocks: readonly UgcCharacterLock[];
@@ -876,6 +969,7 @@ export class CloudbathUgcVideoWorkflow {
           );
           await this.projectLocks.register(lockKey, {
             version: 1,
+            projectInstanceId: instance.projectInstanceId,
             projectPageId: project.page.id!,
             projectRecordId: project.recordId,
             accountId,
@@ -937,6 +1031,7 @@ export class CloudbathUgcVideoWorkflow {
           productPageId: product.id!,
           ...(characterLocks[0] ? { characterPageId: characterLocks[0].pageId } : {}),
           characterLocks: Object.freeze(characterLocks),
+          projectInstanceId: instance.projectInstanceId,
           projectPageId: project.page.id!,
           projectRecordId: project.recordId,
           shotPageIds: Object.freeze(shots.map((shot) => shot.id!)),
@@ -970,12 +1065,94 @@ export class CloudbathUgcVideoWorkflow {
             ...(frozen.resolution ? { resolution: frozen.resolution } : {}),
             ...(frozen.audio !== undefined ? { audio: frozen.audio } : {}),
           },
+          projectInstanceId: frozen.projectInstanceId,
           sceneNumber: frozen.scene.sceneNumber,
           characters: frozen.characterLocks.map((lock) => lock.code),
           identityReferenceCount: frozen.referenceAssets.filter(
             (asset) => asset.kind === "identity",
           ).length,
           referenceCount: frozen.referenceAssets.length,
+        });
+      },
+    };
+  }
+
+  /**
+   * Owner-only project finalization. Marks the ACTIVE project Completed and
+   * records its final asset from the highest completed scene.
+   *
+   * Deliberately separate from scene generation: a scene finishing never
+   * completes a project, because the owner may add another scene next. This
+   * makes "the film is done" an explicit decision. No provider call happens
+   * here, so finalization can never incur cost.
+   */
+  createFinalizeTool(context: UgcPrepareToolContext) {
+    if (
+      context.messageChannel !== "line" ||
+      context.senderIsOwner !== true ||
+      !context.requesterSenderId?.trim() ||
+      !context.accountId?.trim() ||
+      !nativeGroupId(context.nativeConversationId)
+    ) {
+      return null;
+    }
+    return {
+      name: CLOUDBATH_UGC_PROJECT_FINALIZE_TOOL_NAME,
+      label: "Cloudbath UGC Project Finalize",
+      description:
+        "OWNER-ONLY. Marks this conversation's active UGC project finished and records its final asset from the last completed scene. Never generates video and never costs anything. Use only when the owner explicitly says the project/film is done.",
+      parameters: Type.Object({}),
+      execute: async () => {
+        const accountId = context.accountId!.trim();
+        const groupId = nativeGroupId(context.nativeConversationId)!;
+        const ownerSenderId = context.requesterSenderId!.trim();
+        const binding = await this.registry.requirePolicy(accountId, groupId, "UGC");
+        if (binding.boundByOwnerId !== ownerSenderId) {
+          throw new Error("UGC workflow is restricted to the owner who paired this group");
+        }
+        const active = await this.activeProjects.lookup(
+          ugcActiveProjectKey({ accountId, lineGroupId: groupId, ownerSenderId }),
+        );
+        const instance = active
+          ? await this.projectInstances.lookup(ugcProjectInstanceKey(active.projectInstanceId))
+          : undefined;
+        // Scoped to the trusted triple: a project from another group or owner
+        // is never reachable from here.
+        if (
+          !instance ||
+          instance.accountId !== accountId ||
+          instance.lineGroupId !== groupId ||
+          instance.ownerSenderId !== ownerSenderId
+        ) {
+          return jsonResult({ resolution: "no_active_project" });
+        }
+        await this.notion.validateCapabilities(this.config.capabilities);
+        const scenes = await this.notion.listScenes({
+          capabilities: this.config.capabilities,
+          projectPageId: instance.projectPageId,
+        });
+        const completed = scenes
+          .filter((scene) => scene.status === "Completed")
+          .toSorted((left, right) => (left.order ?? 0) - (right.order ?? 0));
+        const last = completed.at(-1);
+        if (!last) {
+          return jsonResult({
+            resolution: "no_completed_scene",
+            projectInstanceId: instance.projectInstanceId,
+          });
+        }
+        await this.notion.finalizeProject({
+          capabilities: this.config.capabilities,
+          projectPageId: instance.projectPageId,
+          ...(last.r2ObjectKey ? { finalR2ObjectKey: last.r2ObjectKey } : {}),
+          ...(last.assetUrl ? { finalAssetUrl: last.assetUrl } : {}),
+          completedAt: this.now(),
+        });
+        return jsonResult({
+          resolution: "project_finalized",
+          projectInstanceId: instance.projectInstanceId,
+          completedScenes: completed.length,
+          finalR2ObjectKey: last.r2ObjectKey || undefined,
         });
       },
     };

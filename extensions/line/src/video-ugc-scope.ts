@@ -63,6 +63,8 @@ export type LineVideoUgcScope = Readonly<{
   productPageId: string;
   characterPageId?: string;
   characterLocks: readonly LineVideoUgcCharacterLock[];
+  /** Application-owned project identity; the same product and cast may run several. */
+  projectInstanceId: string;
   projectPageId: string;
   projectRecordId: string;
   scene: LineVideoUgcSceneContinuity;

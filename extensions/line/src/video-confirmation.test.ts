@@ -444,6 +444,7 @@ describe("createLineVideoConfirmationGate", () => {
       // character reference execution is covered in
       // video-ugc-multi-character-execution.e2e.test.ts, which mocks R2.
       characterLocks: [],
+      projectInstanceId: "project-instance",
       projectPageId: "project-page",
       projectRecordId: "project-record",
       scene: {

@@ -70,6 +70,7 @@ function scopeFor(params: {
     ownerSenderId: "U-owner",
     productPageId: "product-page",
     characterLocks: locks,
+    projectInstanceId: "project-instance",
     projectPageId: "project-page",
     projectRecordId: "project-record",
     scene: {

@@ -13,7 +13,9 @@ import type {
   PendingUgcVideoScope,
   SafeLogger,
   UgcCapabilityId,
+  ActiveUgcProject,
   UgcProjectCharacterLock,
+  UgcProjectInstance,
   WorkspacePolicyConfig,
 } from "./types.js";
 import {
@@ -301,6 +303,14 @@ function stubNotion(characters: CharacterRow[]) {
       pages.push(page);
       return Response.json(page);
     }
+    // Reading back an active project's page.
+    if (url.pathname.startsWith("/v1/pages/") && init?.method !== "PATCH") {
+      const pageId = decodeURIComponent(url.pathname.split("/").at(-1)!);
+      const stored = pages.find((page) => page.id === pageId);
+      if (stored) {
+        return Response.json(stored);
+      }
+    }
     if (url.pathname.startsWith("/v1/pages/") && init?.method === "PATCH") {
       return Response.json({ object: "page", id: url.pathname.split("/").at(-1) });
     }
@@ -319,6 +329,8 @@ function buildWorkflow(characters: CharacterRow[]) {
   const notion = stubNotion(characters);
   const pending = memoryStore<PendingUgcVideoScope>();
   const projectLocks = memoryStore<UgcProjectCharacterLock>();
+  const projectInstances = memoryStore<UgcProjectInstance>();
+  const activeProjects = memoryStore<ActiveUgcProject>();
   const binding = {
     accountId: "primary",
     groupId: "C-ugc",
@@ -339,6 +351,8 @@ function buildWorkflow(characters: CharacterRow[]) {
     memoryStore<FrozenUgcVideoScope>(),
     memoryStore<ActiveUgcLineSession>(),
     projectLocks,
+    projectInstances,
+    activeProjects,
   );
   const tool = workflow.createTool({
     messageChannel: "line",
@@ -352,7 +366,16 @@ function buildWorkflow(characters: CharacterRow[]) {
     await tool.execute("call", input);
     return (await pending.lookup(ugcPendingKey(SESSION_KEY)))!;
   };
-  return { ...notion, workflow, prepare, projectLocks, pending };
+  return {
+    ...notion,
+    workflow,
+    tool,
+    prepare,
+    projectLocks,
+    projectInstances,
+    activeProjects,
+    pending,
+  };
 }
 
 const CAST: CharacterRow[] = [
@@ -651,5 +674,198 @@ describe("previous scene is never invented", () => {
 
     expect(scene2.scene.previousScenePageId).toBe(scene1.scenePageId);
     expect(scene2.scenePageId).not.toBe(scene1.scenePageId);
+  });
+});
+
+describe("project instance identity", () => {
+  it("keeps the same active project across scenes", async () => {
+    const flow = buildWorkflow(CAST);
+
+    const scene1 = await flow.prepare({
+      productName: "Cloudbath Serum",
+      characterNames: ["F1", "F2"],
+      prompt: "F1 เล่นกับ F2 ในสวน",
+    });
+    const scene2 = await flow.prepare({
+      productName: "Cloudbath Serum",
+      characterNames: ["F1", "F2"],
+      sceneNumber: 2,
+      prompt: "F1 พา F2 เข้าบ้าน",
+    });
+
+    expect(scene2.projectInstanceId).toBe(scene1.projectInstanceId);
+    expect(scene2.projectPageId).toBe(scene1.projectPageId);
+    expect(
+      flow.created.filter((entry) => entry.target === TARGETS.UGC_PROJECTS.dataSourceId),
+    ).toHaveLength(1);
+  });
+
+  it("creates an independent project for the same product and cast on request", async () => {
+    const flow = buildWorkflow(CAST);
+
+    const storyA = await flow.prepare({
+      productName: "Cloudbath Serum",
+      characterNames: ["F1", "F2"],
+      prompt: "Story A scene 1",
+    });
+    const storyB = await flow.prepare({
+      productName: "Cloudbath Serum",
+      characterNames: ["F1", "F2"],
+      startNewProject: true,
+      prompt: "Story B scene 1",
+    });
+
+    // Same product, same cast, different films.
+    expect(storyB.projectInstanceId).not.toBe(storyA.projectInstanceId);
+    expect(storyB.projectPageId).not.toBe(storyA.projectPageId);
+    expect(
+      flow.created.filter((entry) => entry.target === TARGETS.UGC_PROJECTS.dataSourceId),
+    ).toHaveLength(2);
+  });
+
+  it("gives each project its own character lock", async () => {
+    const characters = structuredClone(CAST);
+    const flow = buildWorkflow(characters);
+
+    const storyA = await flow.prepare({
+      productName: "Cloudbath Serum",
+      characterNames: ["F1", "F2"],
+      prompt: "Story A scene 1",
+    });
+
+    // The library moves on between films.
+    characters[1]!.identity = ["characters/f2/SEASON-TWO.png"];
+
+    const storyB = await flow.prepare({
+      productName: "Cloudbath Serum",
+      characterNames: ["F1", "F2"],
+      startNewProject: true,
+      prompt: "Story B scene 1",
+    });
+
+    // Project A is untouched; project B is free to freeze the new references.
+    expect(storyA.referenceAssets.some((asset) => asset.locator.includes("SEASON-TWO"))).toBe(
+      false,
+    );
+    expect(storyB.referenceAssets.some((asset) => asset.locator.includes("SEASON-TWO"))).toBe(true);
+    expect(await flow.projectLocks.entries()).toHaveLength(2);
+  });
+
+  it("continues story B, not story A, after an explicit new project", async () => {
+    const flow = buildWorkflow(CAST);
+
+    await flow.prepare({
+      productName: "Cloudbath Serum",
+      characterNames: ["F1", "F2"],
+      prompt: "Story A scene 1",
+    });
+    const storyB = await flow.prepare({
+      productName: "Cloudbath Serum",
+      characterNames: ["F1", "F2"],
+      startNewProject: true,
+      prompt: "Story B scene 1",
+    });
+    const storyBScene2 = await flow.prepare({
+      productName: "Cloudbath Serum",
+      characterNames: ["F1", "F2"],
+      sceneNumber: 2,
+      prompt: "Story B scene 2",
+    });
+
+    expect(storyBScene2.projectInstanceId).toBe(storyB.projectInstanceId);
+    expect(storyBScene2.scene.sceneNumber).toBe(2);
+  });
+
+  it("replaying a scene preparation stays idempotent", async () => {
+    const flow = buildWorkflow(CAST);
+
+    const first = await flow.prepare({
+      productName: "Cloudbath Serum",
+      characterNames: ["F1", "F2"],
+      prompt: "F1 เล่นกับ F2 ในสวน",
+    });
+    const replay = await flow.prepare({
+      productName: "Cloudbath Serum",
+      characterNames: ["F1", "F2"],
+      sceneNumber: 1,
+      prompt: "F1 เล่นกับ F2 ในสวน",
+    });
+
+    expect(replay.projectInstanceId).toBe(first.projectInstanceId);
+    expect(replay.scenePageId).toBe(first.scenePageId);
+    expect(
+      flow.created.filter((entry) => entry.target === TARGETS.UGC_SHOTS.dataSourceId),
+    ).toHaveLength(1);
+  });
+
+  it("scopes the active project to the trusted account, group and owner", async () => {
+    const flow = buildWorkflow(CAST);
+
+    await flow.prepare({
+      productName: "Cloudbath Serum",
+      characterNames: ["F1", "F2"],
+      prompt: "Story A scene 1",
+    });
+
+    const [entry] = await flow.activeProjects.entries();
+    expect(entry!.value).toMatchObject({
+      accountId: "primary",
+      lineGroupId: "C-ugc",
+      ownerSenderId: OWNER,
+    });
+  });
+});
+
+describe("explicit project finalization", () => {
+  function finalizeTool(flow: ReturnType<typeof buildWorkflow>) {
+    return flow.workflow.createFinalizeTool({
+      messageChannel: "line",
+      senderIsOwner: true,
+      requesterSenderId: OWNER,
+      sessionKey: SESSION_KEY,
+      accountId: "primary",
+      nativeConversationId: "line:group:C-ugc",
+    })!;
+  }
+
+  it("reports no completed scene rather than finalizing an empty project", async () => {
+    const flow = buildWorkflow(CAST);
+    await flow.prepare({
+      productName: "Cloudbath Serum",
+      characterNames: ["F1", "F2"],
+      prompt: "Story A scene 1",
+    });
+
+    const result = (await finalizeTool(flow).execute()) as {
+      details?: { resolution?: string };
+    };
+
+    expect(result.details?.resolution).toBe("no_completed_scene");
+    expect(flow.paidVideoCalls()).toHaveLength(0);
+  });
+
+  it("refuses when the conversation has no active project", async () => {
+    const flow = buildWorkflow(CAST);
+
+    const result = (await finalizeTool(flow).execute()) as {
+      details?: { resolution?: string };
+    };
+
+    expect(result.details?.resolution).toBe("no_active_project");
+  });
+
+  it("is not available to a non-owner", () => {
+    const flow = buildWorkflow(CAST);
+
+    expect(
+      flow.workflow.createFinalizeTool({
+        messageChannel: "line",
+        senderIsOwner: false,
+        requesterSenderId: "U-someone-else",
+        sessionKey: SESSION_KEY,
+        accountId: "primary",
+        nativeConversationId: "line:group:C-ugc",
+      }),
+    ).toBeNull();
   });
 });

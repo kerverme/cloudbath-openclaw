@@ -32,14 +32,19 @@ import type {
   SchemaProfile,
   FrozenUgcVideoScope,
   PendingUgcVideoScope,
+  ActiveUgcProject,
   UgcProjectCharacterLock,
+  UgcProjectInstance,
 } from "./src/types.js";
 import {
   CLOUDBATH_UGC_DRAFT_SCOPE_NAMESPACE,
   CLOUDBATH_UGC_ACTIVE_SESSION_NAMESPACE,
+  CLOUDBATH_UGC_ACTIVE_PROJECT_NAMESPACE,
+  CLOUDBATH_UGC_PROJECT_INSTANCE_NAMESPACE,
   CLOUDBATH_UGC_PROJECT_LOCK_NAMESPACE,
   CLOUDBATH_UGC_PENDING_NAMESPACE,
   CLOUDBATH_UGC_SCOPE_MAX_ENTRIES,
+  CLOUDBATH_UGC_PROJECT_FINALIZE_TOOL_NAME,
   CLOUDBATH_UGC_VIDEO_PREPARE_TOOL_NAME,
   CloudbathUgcVideoWorkflow,
   UgcNotionWorkflowClient,
@@ -113,6 +118,18 @@ export default definePluginEntry({
         }) ?? null,
       { names: [CLOUDBATH_UGC_VIDEO_PREPARE_TOOL_NAME], optional: true },
     );
+    api.registerTool(
+      (ctx) =>
+        ugcWorkflow?.createFinalizeTool({
+          messageChannel: ctx.messageChannel,
+          senderIsOwner: ctx.senderIsOwner,
+          requesterSenderId: ctx.requesterSenderId,
+          sessionKey: ctx.sessionKey,
+          accountId: ctx.agentAccountId,
+          nativeConversationId: ctx.nativeChannelId ?? ctx.deliveryContext?.to,
+        }) ?? null,
+      { names: [CLOUDBATH_UGC_PROJECT_FINALIZE_TOOL_NAME], optional: true },
+    );
 
     api.registerService({
       id: "cloudbath-line-image-archive",
@@ -164,6 +181,19 @@ export default definePluginEntry({
             maxEntries: CLOUDBATH_UGC_SCOPE_MAX_ENTRIES,
             overflowPolicy: "evict-oldest",
           });
+          // Project identity and the conversation's active project both outlive
+          // any scope window: "ต่อ Scene 2" must land on the same project after
+          // a restart.
+          const projectInstances = api.runtime.state.openKeyedStore<UgcProjectInstance>({
+            namespace: CLOUDBATH_UGC_PROJECT_INSTANCE_NAMESPACE,
+            maxEntries: CLOUDBATH_UGC_SCOPE_MAX_ENTRIES,
+            overflowPolicy: "evict-oldest",
+          });
+          const activeProjects = api.runtime.state.openKeyedStore<ActiveUgcProject>({
+            namespace: CLOUDBATH_UGC_ACTIVE_PROJECT_NAMESPACE,
+            maxEntries: CLOUDBATH_UGC_SCOPE_MAX_ENTRIES,
+            overflowPolicy: "evict-oldest",
+          });
           ugcWorkflow = new CloudbathUgcVideoWorkflow(
             workspaceConfig.ugc,
             workspaceRegistry,
@@ -172,6 +202,8 @@ export default definePluginEntry({
             ugcDraftScopes,
             activeSessions,
             projectLocks,
+            projectInstances,
+            activeProjects,
           );
         }
 

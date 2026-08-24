@@ -4,7 +4,9 @@ import type {
   ActiveUgcLineSession,
   FrozenUgcVideoScope,
   PendingUgcVideoScope,
+  ActiveUgcProject,
   UgcProjectCharacterLock,
+  UgcProjectInstance,
   SafeLogger,
   UgcCapabilityId,
   WorkspacePolicyConfig,
@@ -340,6 +342,8 @@ describe("Cloudbath UGC workflow", () => {
       scopes,
       activeSessions,
       memoryStore<UgcProjectCharacterLock>(),
+      memoryStore<UgcProjectInstance>(),
+      memoryStore<ActiveUgcProject>(),
       () => Date.UTC(2026, 7, 23),
     );
     await workflow.observeTurn({
@@ -447,6 +451,8 @@ describe("Cloudbath UGC workflow", () => {
       memoryStore<FrozenUgcVideoScope>(),
       memoryStore<ActiveUgcLineSession>(),
       memoryStore<UgcProjectCharacterLock>(),
+      memoryStore<UgcProjectInstance>(),
+      memoryStore<ActiveUgcProject>(),
     );
     await workflow.observeTurn({
       channelId: "line",
@@ -481,6 +487,8 @@ describe("Cloudbath UGC workflow", () => {
       memoryStore<FrozenUgcVideoScope>(),
       memoryStore<ActiveUgcLineSession>(),
       memoryStore<UgcProjectCharacterLock>(),
+      memoryStore<UgcProjectInstance>(),
+      memoryStore<ActiveUgcProject>(),
     );
     expect(
       workflow.createTool({
