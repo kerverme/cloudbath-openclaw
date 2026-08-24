@@ -13,7 +13,8 @@
       "wellness_notion_search",
       "construction_upload_create",
       "construction_upload_update",
-      "cloudbath_ugc_video_prepare"
+      "cloudbath_ugc_video_prepare",
+      "cloudbath_ugc_project_finalize"
     ]
   },
   "toolMetadata": {
@@ -33,6 +34,9 @@
       "optional": true
     },
     "cloudbath_ugc_video_prepare": {
+      "optional": true
+    },
+    "cloudbath_ugc_project_finalize": {
       "optional": true
     }
   },
