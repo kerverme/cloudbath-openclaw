@@ -72,7 +72,8 @@ jobs:
             extensions/cloudbath-line-image-archive/src/profiles.test.ts \
             extensions/cloudbath-line-image-archive/src/r2.test.ts \
             extensions/cloudbath-line-image-archive/src/retry.test.ts \
-            extensions/cloudbath-line-image-archive/src/ugc-workflow.test.ts
+            extensions/cloudbath-line-image-archive/src/ugc-workflow.test.ts \
+            extensions/cloudbath-line-image-archive/workspace-policy-runtime.integration.test.ts
 
       - name: Run setup-script Vitest suite
         if: steps.dependencies.outcome == 'success' && !cancelled()
@@ -256,6 +257,7 @@ jobs:
               test -f /app/extensions/cloudbath-line-image-archive/src/group-workspace-policy.ts
               test -f /app/extensions/cloudbath-line-image-archive/src/keep-watching.ts
               test -f /app/extensions/cloudbath-line-image-archive/src/ugc-workflow.ts
+              test -f /app/extensions/cloudbath-line-image-archive/src/workspace-policy-runtime.ts
               test -f /app/extensions/cloudbath-line-image-archive/profiles/construction-site-progress.v1.json
               test -f /app/extensions/line/index.ts
               test -f /app/extensions/line/openclaw.plugin.json
