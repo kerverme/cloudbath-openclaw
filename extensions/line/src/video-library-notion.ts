@@ -12,7 +12,7 @@ const NOTION_BASE_URL = "https://api.notion.com";
 const NOTION_API_VERSION = "2026-03-11";
 // All OpenClaw Notion writers use the canonical write credential. Runtime
 // never falls back to a legacy or read-only Notion token.
-const NOTION_TOKEN_ENV = "OPENCLAW_NOTION_WRITE_TOKEN";
+const NOTION_TOKEN_ENV = "OPEN_CLAW_NOTION_WRITE_TOKEN";
 const REQUEST_TIMEOUT_MS = 15_000;
 const NOTION_ID_PATTERN = /^[0-9a-f]{32}$/u;
 const MAX_RICH_TEXT_CHUNK_LENGTH = 1_900;

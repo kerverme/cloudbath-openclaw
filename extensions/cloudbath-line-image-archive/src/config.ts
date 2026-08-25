@@ -201,8 +201,8 @@ export function resolveArchiveConfig(
     },
     notion: {
       apiKey: enabled
-        ? readRequired(env, "OPENCLAW_NOTION_WRITE_TOKEN")
-        : env.OPENCLAW_NOTION_WRITE_TOKEN?.trim() || "",
+        ? readRequired(env, "OPEN_CLAW_NOTION_WRITE_TOKEN")
+        : env.OPEN_CLAW_NOTION_WRITE_TOKEN?.trim() || "",
     },
     retry: {
       maxAttempts: DEFAULT_RETRY_ATTEMPTS,

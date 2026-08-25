@@ -96,7 +96,9 @@ describe("generic Notion Schema Profile setup", () => {
     const reads: string[] = [];
     const env = new Proxy(
       {
-        OPENCLAW_NOTION_WRITE_TOKEN: "token-placeholder",
+        OPEN_CLAW_NOTION_WRITE_TOKEN: "token-placeholder",
+        OPENCLAW_NOTION_WRITE_TOKEN: "legacy-placeholder",
+        NOTION_CONSTRUCTION_WRITE_TOKEN: "legacy-placeholder",
         NOTION_PARENT_PAGE_ID: "parent-1",
         NOTION_DATABASE_ID: undefined,
       },
@@ -115,7 +117,7 @@ describe("generic Notion Schema Profile setup", () => {
       databaseId: undefined,
     });
     expect(reads).toEqual([
-      "OPENCLAW_NOTION_WRITE_TOKEN",
+      "OPEN_CLAW_NOTION_WRITE_TOKEN",
       "NOTION_PARENT_PAGE_ID",
       "NOTION_DATABASE_ID",
     ]);

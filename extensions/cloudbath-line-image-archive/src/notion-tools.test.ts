@@ -110,7 +110,7 @@ function validConstructionCreate() {
 
 beforeEach(() => {
   vi.stubEnv("NOTION_WELLNESS_READ_TOKEN", WELLNESS_TEST_CREDENTIAL);
-  vi.stubEnv("OPENCLAW_NOTION_WRITE_TOKEN", CONSTRUCTION_TEST_CREDENTIAL);
+  vi.stubEnv("OPEN_CLAW_NOTION_WRITE_TOKEN", CONSTRUCTION_TEST_CREDENTIAL);
 });
 
 afterEach(() => {
@@ -584,7 +584,9 @@ describe("Cloudbath scoped Notion tools", () => {
 
   it("fails safely when either scoped connection is not configured", async () => {
     vi.stubEnv("NOTION_WELLNESS_READ_TOKEN", "");
-    vi.stubEnv("OPENCLAW_NOTION_WRITE_TOKEN", "");
+    vi.stubEnv("OPEN_CLAW_NOTION_WRITE_TOKEN", "");
+    vi.stubEnv("OPENCLAW_NOTION_WRITE_TOKEN", "legacy-placeholder");
+    vi.stubEnv("NOTION_CONSTRUCTION_WRITE_TOKEN", "legacy-placeholder");
     const fetchImpl = vi.fn() as typeof fetch;
 
     await expect(tool("wellness_notion_query", fetchImpl).execute("call", {})).rejects.toThrow(

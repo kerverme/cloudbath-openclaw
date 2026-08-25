@@ -90,7 +90,7 @@ function stubNotion(sceneProperties: string[]) {
   });
   const library = createLineVideoLibraryNotion({
     target: { databaseId: "9".repeat(32), dataSourceId: "8".repeat(32) },
-    env: { OPENCLAW_NOTION_WRITE_TOKEN: "secret" } as NodeJS.ProcessEnv,
+    env: { OPEN_CLAW_NOTION_WRITE_TOKEN: "secret" } as NodeJS.ProcessEnv,
     fetchImpl: fetchImpl as unknown as typeof fetch,
   });
   const scenePatches = () => patches.filter((patch) => patch.pageId.startsWith("scene-"));

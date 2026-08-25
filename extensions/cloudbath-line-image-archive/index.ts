@@ -157,7 +157,7 @@ export default definePluginEntry({
 
         if (workspaceConfig.ugc) {
           if (!config.notion.apiKey) {
-            throw new Error("UGC is configured but OPENCLAW_NOTION_WRITE_TOKEN is missing");
+            throw new Error("UGC is configured but OPEN_CLAW_NOTION_WRITE_TOKEN is missing");
           }
           const pending = api.runtime.state.openKeyedStore<PendingUgcVideoScope>({
             namespace: CLOUDBATH_UGC_PENDING_NAMESPACE,
@@ -214,7 +214,7 @@ export default definePluginEntry({
             R2_SECRET_ACCESS_KEY: config.r2.secretAccessKey,
             R2_BUCKET_NAME: config.r2.bucketName,
             R2_ENDPOINT: config.r2.endpoint,
-            OPENCLAW_NOTION_WRITE_TOKEN: config.notion.apiKey,
+            OPEN_CLAW_NOTION_WRITE_TOKEN: config.notion.apiKey,
           };
           const missing = Object.entries(requiredRuntimeValues)
             .filter(([, value]) => !value)

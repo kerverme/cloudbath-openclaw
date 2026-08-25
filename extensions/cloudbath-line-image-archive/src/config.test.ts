@@ -77,7 +77,7 @@ function enabledEnv(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
     R2_SECRET_ACCESS_KEY: "secret-placeholder",
     R2_BUCKET_NAME: "bucket-placeholder",
     R2_KEY_PREFIX: "cloudbath/images",
-    OPENCLAW_NOTION_WRITE_TOKEN: "notion-placeholder",
+    OPEN_CLAW_NOTION_WRITE_TOKEN: "notion-placeholder",
     ...overrides,
   };
 }
@@ -99,8 +99,21 @@ describe("resolveArchiveConfig", () => {
 
   it("fails closed without the canonical Notion write credential when enabled", () => {
     expect(() =>
-      resolveArchiveConfig(enabledEnv({ OPENCLAW_NOTION_WRITE_TOKEN: "" }), pluginConfig()),
-    ).toThrow("OPENCLAW_NOTION_WRITE_TOKEN is required");
+      resolveArchiveConfig(enabledEnv({ OPEN_CLAW_NOTION_WRITE_TOKEN: "" }), pluginConfig()),
+    ).toThrow("OPEN_CLAW_NOTION_WRITE_TOKEN is required");
+  });
+
+  it("does not accept legacy Notion write credential names", () => {
+    expect(() =>
+      resolveArchiveConfig(
+        enabledEnv({
+          OPEN_CLAW_NOTION_WRITE_TOKEN: "",
+          OPENCLAW_NOTION_WRITE_TOKEN: "legacy-placeholder",
+          NOTION_CONSTRUCTION_WRITE_TOKEN: "legacy-placeholder",
+        }),
+        pluginConfig(),
+      ),
+    ).toThrow("OPEN_CLAW_NOTION_WRITE_TOKEN is required");
   });
 
   it("rejects non-HTTPS R2 endpoints", () => {

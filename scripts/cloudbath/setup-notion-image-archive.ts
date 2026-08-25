@@ -22,7 +22,7 @@ const NOTION_BASE_URL = "https://api.notion.com";
 export type NotionSetupMode = "plan" | "create" | "bind" | "validate" | "migration-plan";
 type FetchLike = typeof fetch;
 type SetupEnvironment = {
-  OPENCLAW_NOTION_WRITE_TOKEN?: string;
+  OPEN_CLAW_NOTION_WRITE_TOKEN?: string;
   NOTION_PARENT_PAGE_ID?: string;
   NOTION_DATABASE_ID?: string;
 };
@@ -98,7 +98,7 @@ export function readNotionSetupEnvironment(env: SetupEnvironment): {
   databaseId?: string;
 } {
   return {
-    apiKey: env.OPENCLAW_NOTION_WRITE_TOKEN?.trim() || undefined,
+    apiKey: env.OPEN_CLAW_NOTION_WRITE_TOKEN?.trim() || undefined,
     parentPageId: env.NOTION_PARENT_PAGE_ID?.trim() || undefined,
     databaseId: env.NOTION_DATABASE_ID?.trim() || undefined,
   };
@@ -303,7 +303,7 @@ export async function runNotionSetup(
     return { kind: "planned", proposal };
   }
   const client = new NotionSetupClient(
-    requiredValue(config.apiKey, "OPENCLAW_NOTION_WRITE_TOKEN"),
+    requiredValue(config.apiKey, "OPEN_CLAW_NOTION_WRITE_TOKEN"),
     options.fetchImpl ?? fetch,
   );
   if (config.mode === "create") {
@@ -417,7 +417,7 @@ async function loadSchemaProfile(options: CliOptions): Promise<SchemaProfile> {
 async function main(): Promise<void> {
   const cli = parseCliArgs(process.argv.slice(2));
   const env = readNotionSetupEnvironment({
-    OPENCLAW_NOTION_WRITE_TOKEN: process.env.OPENCLAW_NOTION_WRITE_TOKEN,
+    OPEN_CLAW_NOTION_WRITE_TOKEN: process.env.OPEN_CLAW_NOTION_WRITE_TOKEN,
     NOTION_PARENT_PAGE_ID: process.env.NOTION_PARENT_PAGE_ID,
     NOTION_DATABASE_ID: process.env.NOTION_DATABASE_ID,
   });
