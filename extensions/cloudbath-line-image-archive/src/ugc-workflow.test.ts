@@ -4,6 +4,9 @@ import type {
   ActiveUgcLineSession,
   FrozenUgcVideoScope,
   PendingUgcVideoScope,
+  ActiveUgcProject,
+  UgcProjectCharacterLock,
+  UgcProjectInstance,
   SafeLogger,
   UgcCapabilityId,
   WorkspacePolicyConfig,
@@ -102,9 +105,20 @@ function requestBody(body: BodyInit | null | undefined): string {
 function schema(id: UgcCapabilityId) {
   const properties: Record<string, unknown> = { Name: { type: "title" } };
   if (id === "UGC_PROJECTS") {
+    // LIVE UGC_PROJECTS: no Record ID, no Prompt.
     Object.assign(properties, {
-      "Record ID": { type: "rich_text" },
-      Status: { type: "select" },
+      Status: {
+        type: "select",
+        select: {
+          options: [
+            { name: "Draft" },
+            { name: "Ready" },
+            { name: "Generating" },
+            { name: "Completed" },
+            { name: "Failed" },
+          ],
+        },
+      },
       Product: {
         type: "relation",
         relation: { data_source_id: LIVE_TARGETS.PRODUCT_LIBRARY.dataSourceId },
@@ -113,24 +127,46 @@ function schema(id: UgcCapabilityId) {
         type: "relation",
         relation: { data_source_id: LIVE_TARGETS.CHARACTER_LIBRARY.dataSourceId },
       },
-      Prompt: { type: "rich_text" },
       "Estimated Cost USD": { type: "number" },
       "Actual Cost USD": { type: "number" },
     });
   } else if (id === "UGC_SHOTS") {
+    // LIVE UGC_SHOTS: Shot Order, not Shot Number.
     Object.assign(properties, {
-      "Record ID": { type: "rich_text" },
-      Status: { type: "select" },
+      Status: {
+        type: "select",
+        select: {
+          options: [
+            { name: "Draft" },
+            { name: "Ready" },
+            { name: "Generating" },
+            { name: "Completed" },
+            { name: "Failed" },
+          ],
+        },
+      },
       Project: {
         type: "relation",
         relation: { data_source_id: LIVE_TARGETS.UGC_PROJECTS.dataSourceId },
       },
-      "Shot Number": { type: "number" },
+      "Shot Order": { type: "number" },
       Prompt: { type: "rich_text" },
+      Duration: { type: "number" },
     });
   } else if (id === "AI_VIDEO_LIBRARY") {
     Object.assign(properties, {
-      Status: { type: "select" },
+      Status: {
+        type: "select",
+        select: {
+          options: [
+            { name: "Draft" },
+            { name: "Ready" },
+            { name: "Generating" },
+            { name: "Completed" },
+            { name: "Failed" },
+          ],
+        },
+      },
       "Video Job ID": { type: "rich_text" },
       "UGC Project": {
         type: "relation",
@@ -204,11 +240,11 @@ function liveFetch() {
               parent: { type: "data_source_id", data_source_id: dataSourceId },
               properties: {
                 Name: { type: "title", title: [{ plain_text: "Mae Kampong Host" }] },
-                "Identity References": {
+                "Identity Reference R2 Keys": {
                   type: "url",
                   url: "https://assets.example/identity.png",
                 },
-                "Style References": {
+                "Style Reference R2 Keys": {
                   type: "url",
                   url: "https://assets.example/style.png",
                 },
@@ -218,10 +254,17 @@ function liveFetch() {
           has_more: false,
         });
       }
+      // Live schemas have no Record ID; create-or-reuse resolves by relation.
       if (
-        body.filter?.property === "Record ID" &&
-        (dataSourceId === LIVE_TARGETS.UGC_PROJECTS.dataSourceId ||
-          dataSourceId === LIVE_TARGETS.UGC_SHOTS.dataSourceId)
+        body.filter?.property === "Product" &&
+        dataSourceId === LIVE_TARGETS.UGC_PROJECTS.dataSourceId
+      ) {
+        return Response.json({ results: [], has_more: false });
+      }
+      // Scene-number lookup for a project with no scenes yet.
+      if (
+        body.filter?.property === "Project" &&
+        dataSourceId === LIVE_TARGETS.UGC_SHOTS.dataSourceId
       ) {
         return Response.json({ results: [], has_more: false });
       }
@@ -298,6 +341,9 @@ describe("Cloudbath UGC workflow", () => {
       pending,
       scopes,
       activeSessions,
+      memoryStore<UgcProjectCharacterLock>(),
+      memoryStore<UgcProjectInstance>(),
+      memoryStore<ActiveUgcProject>(),
       () => Date.UTC(2026, 7, 23),
     );
     await workflow.observeTurn({
@@ -339,18 +385,20 @@ describe("Cloudbath UGC workflow", () => {
       Product: { relation: [{ id: "product-page" }] },
       Character: { relation: [{ id: "character-page" }] },
     });
+    // One ledger row per scene: preparation creates Scene 1 only, and later
+    // scenes are added on request rather than by a fixed three-shot plan.
     const shots = created.filter((entry) => entry.target === LIVE_TARGETS.UGC_SHOTS.dataSourceId);
-    expect(shots).toHaveLength(3);
+    expect(shots).toHaveLength(1);
     expect(shots[0]?.properties).toMatchObject({
       Project: { relation: [{ id: "created-page-1" }] },
-      "Shot Number": { number: 1 },
+      "Shot Order": { number: 1 },
     });
 
     const pendingScope = await pending.lookup(ugcPendingKey("line-session"));
     expect(pendingScope).toMatchObject({
       policyId: "UGC",
       projectPageId: "created-page-1",
-      shotPageIds: ["created-page-2", "created-page-3", "created-page-4"],
+      shotPageIds: ["created-page-2"],
       frozenPrompt: "Review the serum in a calm wellness setting",
     });
     await expect(
@@ -402,6 +450,9 @@ describe("Cloudbath UGC workflow", () => {
       memoryStore<PendingUgcVideoScope>(),
       memoryStore<FrozenUgcVideoScope>(),
       memoryStore<ActiveUgcLineSession>(),
+      memoryStore<UgcProjectCharacterLock>(),
+      memoryStore<UgcProjectInstance>(),
+      memoryStore<ActiveUgcProject>(),
     );
     await workflow.observeTurn({
       channelId: "line",
@@ -435,6 +486,9 @@ describe("Cloudbath UGC workflow", () => {
       memoryStore<PendingUgcVideoScope>(),
       memoryStore<FrozenUgcVideoScope>(),
       memoryStore<ActiveUgcLineSession>(),
+      memoryStore<UgcProjectCharacterLock>(),
+      memoryStore<UgcProjectInstance>(),
+      memoryStore<ActiveUgcProject>(),
     );
     expect(
       workflow.createTool({

@@ -474,3 +474,188 @@ implement:
 
 All automated tests mock R2, Notion, LINE, and model boundaries. They do not access production
 services or secrets.
+
+## Multi-character identity lock and scenes
+
+A UGC project may cast several characters by name (`characterNames: ["F1", "F2"]`;
+the older single `characterName` still works). Every requested code must resolve
+to exactly one Character Library row before anything is created — a partial cast
+never reaches a scene.
+
+### Character Library properties this reads
+
+Identity references, in order:
+
+- `Identity Reference R2 Keys`
+- `Canonical Reference Set`
+- `Preview`
+
+Style references: `Style Reference R2 Keys`.
+
+Only these live names are read. Values are still validated as R2 keys or HTTPS
+URLs exactly as before; nothing about that check was relaxed.
+
+A character with no usable identity reference fails closed rather than being
+cast invisibly.
+
+### What the lock guarantees
+
+The first preparation for a project freezes each character's references into a
+durable project lock (`ugc-project-character-lock-v1`, no TTL). Later scenes in
+that project reuse the stored lock verbatim — the Character Library is never
+re-queried for them, so editing a library row cannot change an in-flight
+project's references. Asking for a different cast on a locked project is
+rejected; start a new project instead.
+
+This guarantees the same reference assets are **submitted** for every scene. It
+does not mean the generative model renders identical subjects across scenes, and
+nothing here should be described as preventing visual drift.
+
+### Reference allocation
+
+Each scene gets at most `MAX_REFERENCE_ASSETS` (8) references. Allocation gives
+every cast member one identity slot first, then distributes the remainder
+round-robin, then product, then style. If the cast is larger than the budget the
+request fails closed — a character is never silently dropped to fit.
+
+### Scenes
+
+Scenes are rows in `UGC_SHOTS`, one per scene, keyed by project + scene number so
+a replayed preparation reuses the row. Omitting `sceneNumber` prepares the next
+scene in the project. This replaces PR #32's fixed three-shot Hook/Product/Close
+plan.
+
+Each prepared scene carries continuity metadata: scene number, previous scene
+page id, participating character page ids and codes, prompt, and duration.
+
+### Scene result ledger (live UGC_SHOTS columns)
+
+Writes use the **actual production column names**. There is no `Shot Number`,
+`Duration Seconds` or `Output R2 Key`, and neither UGC database has a
+`Record ID`.
+
+| Workflow value      | Live UGC_SHOTS column     |
+| ------------------- | ------------------------- |
+| scene order         | `Shot Order`              |
+| scene duration      | `Duration`                |
+| archived object key | `Generated R2 Object Key` |
+| hosted result URL   | `Generated Asset URL`     |
+| provider model      | `Model`                   |
+| cost                | `Actual Cost USD`         |
+| completion time     | `Completed At`            |
+| sanitized failure   | `Failure Reason`          |
+
+After a confirmed generation only the **confirmed scene** is written —
+completing scene 1 never marks scene 2 completed. Optional columns are written
+only when the live data source has them; Notion rejects a PATCH naming an
+unknown property, so an absent column would otherwise lose the Status write too.
+
+### Status values
+
+Both UGC databases expose exactly `Draft`, `Ready`, `Generating`, `Completed`,
+`Failed`. Nothing writes `Processing` or `Awaiting Confirmation`. The mapping:
+
+| Workflow state                        | Status       |
+| ------------------------------------- | ------------ |
+| new project / scene                   | `Draft`      |
+| prepared, awaiting owner confirmation | `Ready`      |
+| paid execution started                | `Generating` |
+| success                               | `Completed`  |
+| failure                               | `Failed`     |
+
+Startup schema validation checks these options exist, so a drifted database
+fails closed at validation instead of when a paid scene tries to report.
+
+### Project identity
+
+A project is a **piece of work**, not a product/cast combination. The same
+product with the same characters can be three unrelated stories, each needing
+its own scenes, character lock, costs and outputs.
+
+Identity is therefore an application-owned **project instance id** held in
+durable state and bound to the created Notion page. Notion's own `Project ID` is
+Notion-managed and cannot be chosen by us, and neither UGC database has a
+`Record ID` — **no new property is required**.
+
+Each conversation has an **active project**, persisted restart-safely and scoped
+to the trusted LINE account + native group + owner triple. Nothing the model
+emits can retarget it.
+
+- `cloudbath_ugc_video_prepare` **continues** the active project by default.
+- `startNewProject: true` mints a new instance, a new Notion row and a new
+  character lock — even when product and cast are identical.
+- Replaying a scene preparation on the active project is idempotent: scenes
+  resolve by `Project` relation plus `Shot Order`.
+
+### Product is optional
+
+A project may be **character-only**: F1 + F2 with no product at all. No
+placeholder product row is invented, and the Notion `Product` relation is simply
+left empty. `productName` is optional; only `prompt` is required.
+
+### Product and character identity both freeze at project creation
+
+A project with a product freezes its product page id **and its generation
+reference assets** alongside the character lock. Editing the Product Library
+afterwards cannot reach that project; a deliberately new project is free to
+freeze the updated references.
+
+### Continuation runs on frozen identity
+
+`ต่อ Scene 2 ...` reuses the active project's frozen product and cast. Neither
+the Product Library nor the Character Library is re-resolved as authoritative
+identity, so:
+
+- the owner does not need to repeat `productName` when continuing;
+- renaming or editing a library row cannot retarget an in-flight project;
+- naming a **different** product while the active project is locked to another
+  fails closed — start a new project to change it.
+
+The same rule already applied to the cast: requesting a different set of
+characters on a locked project is rejected.
+
+### Project lifecycle
+
+| State                                              | Status       |
+| -------------------------------------------------- | ------------ |
+| project created                                    | `Draft`      |
+| scenes prepared, awaiting owner                    | `Ready`      |
+| scenes generating or generated, project still open | `Generating` |
+| explicit owner finalization                        | `Completed`  |
+| fatal failure                                      | `Failed`     |
+
+**A finished scene never completes the project.** Absence of a scene 2 row is not
+evidence the film is done — the owner may say "ต่อ Scene 2" next. Only
+`cloudbath_ugc_project_finalize` moves a project to `Completed`. It is
+owner-only, bound to the active project, and performs **no provider call**, so
+finalization can never incur cost.
+
+Finalization is **durable**: the project instance records `finalizedAt`, and a
+finalized project is closed for good.
+
+- continuing a finalized project fails closed;
+- it never returns to `Ready` or `Generating`;
+- finalizing again is idempotent, returning `already_finalized` with the
+  original timestamp and writing nothing further;
+- `startNewProject: true` begins a fresh project normally.
+
+`Final R2 Object Key`, `Final Video URL` and project `Completed At` are written
+**only at finalization**, from the highest-numbered completed scene. Nothing is
+stitched, so that is the last scene's asset rather than a combined reel.
+
+Scene-level `Generated R2 Object Key`, `Generated Asset URL` and `Completed At`
+are written after each scene, as before.
+
+### Project prompt
+
+Live UGC_PROJECTS has no `Prompt` column. `Script` was considered and rejected —
+it is a script field, not a generation prompt, and reusing it would misrepresent
+its meaning. The prompt is preserved per scene in `Prompt` on UGC_SHOTS and in
+the durable frozen scope.
+
+### No automatic schema mutation
+
+This plugin never provisions or alters Notion schema. Every column above already
+exists in production; nothing further needs to be added for the current flow.
+`Characters` and `Previous Scene` relations on UGC_SHOTS are **not** written —
+cast and continuity live in the frozen scope, which is what execution reads.

@@ -275,7 +275,14 @@ async function executeConfirmedLineVideoJob(params: {
       if (!notionLibrary.markUgcCompleted) {
         throw new Error("UGC video library workflow is unavailable");
       }
-      await notionLibrary.markUgcCompleted(params.ugcScope, actualCostUsd);
+      // Scene ledger records the archived R2 key, not the transient provider
+      // URL, and only for the scene this confirmation approved.
+      await notionLibrary.markUgcCompleted(params.ugcScope, actualCostUsd, {
+        r2ObjectKey: stagedVideo.objectKey,
+        assetUrl: videoUrl,
+        completedAt: params.now(),
+        model: params.draft.model,
+      });
     }
 
     if (params.draft.deliveryTo) {

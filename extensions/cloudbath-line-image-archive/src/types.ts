@@ -236,16 +236,116 @@ export type UgcReferenceAsset = Readonly<{
   locator: string;
 }>;
 
+/**
+ * One character frozen into a project. `identityReferences` is the exact set
+ * every scene in the project resubmits; the Character Library is not consulted
+ * again after this is written.
+ */
+export type UgcCharacterLock = Readonly<{
+  code: string;
+  pageId: string;
+  /** Notion last-edit stamp at freeze time. Audit evidence, never a re-resolve key. */
+  contentIdentity?: string;
+  identityReferences: readonly UgcReferenceAsset[];
+  styleReferences: readonly UgcReferenceAsset[];
+  frozenAt: string;
+}>;
+
+/**
+ * A distinct piece of work. Product + cast is NOT an identity: the same product
+ * with the same characters can be three unrelated stories, each needing its own
+ * scenes, lock, costs and outputs. This application-owned id is what separates
+ * them; Notion's own Project ID is Notion-managed and cannot be chosen by us.
+ */
+export type UgcProjectInstance = Readonly<{
+  version: 1;
+  projectInstanceId: string;
+  projectPageId: string;
+  accountId: string;
+  lineGroupId: string;
+  ownerSenderId: string;
+  /** Absent for a character-only project; no placeholder product is invented. */
+  productPageId?: string;
+  /**
+   * Product references frozen at project creation, alongside the character
+   * lock. Editing the Product Library later cannot reach this project.
+   */
+  productReferences: readonly UgcReferenceAsset[];
+  characterPageIds: readonly string[];
+  createdAt: string;
+  /**
+   * Set once the owner finalizes. A finalized project is durably closed: it
+   * never returns to Ready or Generating, and continuation fails closed.
+   */
+  finalizedAt?: string;
+}>;
+
+/**
+ * The project a conversation is currently working on. Persisted so "ต่อ Scene 2"
+ * lands on the same project after a restart, and scoped to the trusted
+ * account/group/owner triple rather than to model-supplied text.
+ */
+export type ActiveUgcProject = Readonly<{
+  version: 1;
+  projectInstanceId: string;
+  accountId: string;
+  lineGroupId: string;
+  ownerSenderId: string;
+  updatedAt: string;
+}>;
+
+/**
+ * Durable per-project cast, keyed by project INSTANCE. Two projects sharing a
+ * product and cast freeze independently: editing the Character Library later
+ * cannot touch an existing project, but a deliberately new project may freeze
+ * the then-current references.
+ */
+export type UgcProjectCharacterLock = Readonly<{
+  version: 1;
+  projectInstanceId: string;
+  projectPageId: string;
+  projectRecordId: string;
+  accountId: string;
+  lineGroupId: string;
+  ownerSenderId: string;
+  characterLocks: readonly UgcCharacterLock[];
+  frozenAt: string;
+}>;
+
+/** Continuity trail a later film-director pass can read without re-deriving it. */
+export type UgcSceneContinuity = Readonly<{
+  sceneNumber: number;
+  previousScenePageId?: string;
+  characterPageIds: readonly string[];
+  characterCodes: readonly string[];
+  prompt: string;
+  durationSeconds?: number;
+  outputR2Key?: string;
+  /**
+   * Provider-neutral slot for a still carried forward from the previous scene.
+   * Populated only when a provider documents support for it; nothing here
+   * implies video-to-video capability.
+   */
+  previousSceneFrameR2Key?: string;
+}>;
+
 export type FrozenUgcVideoScope = Readonly<{
   version: 1;
   policyId: "UGC";
   accountId: string;
   lineGroupId: string;
   ownerSenderId: string;
-  productPageId: string;
+  productPageId?: string;
   characterPageId?: string;
+  /** Frozen cast for this scene, in submission order. */
+  characterLocks: readonly UgcCharacterLock[];
+  projectInstanceId: string;
   projectPageId: string;
+  projectRecordId: string;
   shotPageIds: readonly string[];
+  /** The scene this scope will generate. Scene 1 for a fresh project. */
+  scene: UgcSceneContinuity;
+  scenePageId: string;
   referenceAssets: readonly UgcReferenceAsset[];
   frozenPrompt: string;
   durationSeconds?: number;
