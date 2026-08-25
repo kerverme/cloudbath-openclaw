@@ -106,7 +106,7 @@ workflow type, source capabilities, Notion target, and R2 prefix before processi
 KEEP_WATCHING target and KEEP_WATCHING cannot resolve UGC capability slots.
 
 Database IDs are deployment configuration, not Railway environment variables. The only Notion
-write credential is `OPENCLAW_NOTION_WRITE_TOKEN`.
+write credential is `OPEN_CLAW_NOTION_WRITE_TOKEN`.
 
 UGC schema validation requires the documented production fields but permits unrelated additional
 properties. In particular, the live relations `Product`, `Character`, `Project`, and `UGC Project`
@@ -317,7 +317,7 @@ pnpm exec tsx scripts/cloudbath/setup-notion-image-archive.ts \
 Review the proposal, then explicitly approve its exact `proposalId`:
 
 ```bash
-OPENCLAW_NOTION_WRITE_TOKEN="$OPENCLAW_NOTION_WRITE_TOKEN" \
+OPEN_CLAW_NOTION_WRITE_TOKEN="$OPEN_CLAW_NOTION_WRITE_TOKEN" \
 NOTION_PARENT_PAGE_ID="$NOTION_PARENT_PAGE_ID" \
 pnpm exec tsx scripts/cloudbath/setup-notion-image-archive.ts \
   --mode create \
@@ -330,7 +330,7 @@ pnpm exec tsx scripts/cloudbath/setup-notion-image-archive.ts \
 Bind or validate an existing database without changing it:
 
 ```bash
-OPENCLAW_NOTION_WRITE_TOKEN="$OPENCLAW_NOTION_WRITE_TOKEN" \
+OPEN_CLAW_NOTION_WRITE_TOKEN="$OPEN_CLAW_NOTION_WRITE_TOKEN" \
 NOTION_DATABASE_ID="$NOTION_DATABASE_ID" \
 pnpm exec tsx scripts/cloudbath/setup-notion-image-archive.ts \
   --mode bind \
@@ -342,7 +342,7 @@ pnpm exec tsx scripts/cloudbath/setup-notion-image-archive.ts \
 Create a migration proposal:
 
 ```bash
-OPENCLAW_NOTION_WRITE_TOKEN="$OPENCLAW_NOTION_WRITE_TOKEN" \
+OPEN_CLAW_NOTION_WRITE_TOKEN="$OPEN_CLAW_NOTION_WRITE_TOKEN" \
 NOTION_DATABASE_ID="$NOTION_DATABASE_ID" \
 pnpm exec tsx scripts/cloudbath/setup-notion-image-archive.ts \
   --mode migration-plan \
@@ -356,9 +356,9 @@ A migration proposal reports missing, incompatible, possible-rename, and unrelat
 It never applies them. Administrators must review and make any schema changes separately.
 
 `NOTION_PARENT_PAGE_ID` and `NOTION_DATABASE_ID` are setup inputs. Runtime reads only
-`OPENCLAW_NOTION_WRITE_TOKEN`; each runtime database ID comes from its Agent Profile. After setup, copy the
+`OPEN_CLAW_NOTION_WRITE_TOKEN`; each runtime database ID comes from its Agent Profile. After setup, copy the
 reported database ID into that Agent Profile's `notionDatabaseId` configuration field. Add only
-`OPENCLAW_NOTION_WRITE_TOKEN` to Railway for Notion runtime write access; do not create a global
+`OPEN_CLAW_NOTION_WRITE_TOKEN` to Railway for Notion runtime write access; do not create a global
 `NOTION_DATABASE_ID` runtime variable.
 
 ## Environment variables
@@ -374,7 +374,7 @@ reported database ID into that Agent Profile's `notionDatabaseId` configuration 
 | `R2_BUCKET_NAME`                   | Existing private bucket.                                     |
 | `R2_ENDPOINT`                      | Optional HTTPS S3 endpoint.                                  |
 | `R2_KEY_PREFIX`                    | Optional prefix before `assets/`.                            |
-| `OPENCLAW_NOTION_WRITE_TOKEN`      | Canonical credential for allowlisted OpenClaw Notion writes. |
+| `OPEN_CLAW_NOTION_WRITE_TOKEN`     | Canonical credential for allowlisted OpenClaw Notion writes. |
 | `NOTION_WELLNESS_READ_TOKEN`       | Read-only Wellness tool credential.                          |
 
 LINE group allowlists and Notion database IDs are no longer global environment variables.
@@ -396,7 +396,7 @@ tool is explicitly allowlisted:
   reads/writes only the six configured capability targets and never calls a paid provider.
 
 Read and write access remain independently authenticated. Wellness tools use only
-`NOTION_WELLNESS_READ_TOKEN`; Construction writes use only `OPENCLAW_NOTION_WRITE_TOKEN`. The Wellness
+`NOTION_WELLNESS_READ_TOKEN`; Construction writes use only `OPEN_CLAW_NOTION_WRITE_TOKEN`. The Wellness
 integration should have read-content capability only and must be shared with the configured
 Wellness root page so its direct child databases are visible. The Construction integration needs read,
 insert, and update-content capabilities on the Upload Inbox so the plugin can validate its schema,

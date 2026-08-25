@@ -14,7 +14,7 @@ const TARGET = { databaseId: DATABASE_ID, dataSourceId: DATA_SOURCE_ID };
 const UGC_PROJECT_DATA_SOURCE_ID = "27452a84-24c5-4651-93e4-8bdbf3772f53";
 
 const ENV = {
-  OPENCLAW_NOTION_WRITE_TOKEN: TOKEN,
+  OPEN_CLAW_NOTION_WRITE_TOKEN: TOKEN,
 };
 
 function sourceResponse(overrides?: {
@@ -336,6 +336,15 @@ describe("LINE video library Notion writer", () => {
     expect(() => createLineVideoLibraryNotion({ target: TARGET, env: {} })).toThrow(
       LineVideoLibraryNotionError,
     );
+    expect(() =>
+      createLineVideoLibraryNotion({
+        target: TARGET,
+        env: {
+          OPENCLAW_NOTION_WRITE_TOKEN: TOKEN,
+          NOTION_CONSTRUCTION_WRITE_TOKEN: TOKEN,
+        },
+      }),
+    ).toThrow(LineVideoLibraryNotionError);
 
     const fetchImpl = vi.fn(async () =>
       jsonResponse(sourceResponse({ removeProperty: "R2 Object Key" })),
