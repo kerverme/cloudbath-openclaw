@@ -73,7 +73,8 @@ jobs:
             extensions/cloudbath-line-image-archive/src/r2.test.ts \
             extensions/cloudbath-line-image-archive/src/retry.test.ts \
             extensions/cloudbath-line-image-archive/src/ugc-workflow.test.ts \
-            extensions/cloudbath-line-image-archive/workspace-policy-runtime.integration.test.ts
+            extensions/cloudbath-line-image-archive/workspace-policy-runtime.integration.test.ts \
+            test/cloudbath-workspace-policy-prewarm.integration.test.ts
 
       - name: Run setup-script Vitest suite
         if: steps.dependencies.outcome == 'success' && !cancelled()
@@ -146,6 +147,7 @@ jobs:
         run: |
           paths=(
             extensions/cloudbath-line-image-archive
+            test/cloudbath-workspace-policy-prewarm.integration.test.ts
             extensions/line/index.ts
             extensions/line/src/bot-handlers.ts
             extensions/line/src/bot-handlers.test.ts
@@ -187,7 +189,8 @@ jobs:
           node scripts/run-oxlint.mjs \
             --tsconfig config/tsconfig/oxlint.extensions.json \
             extensions/line/index.ts \
-            extensions/cloudbath-line-image-archive
+            extensions/cloudbath-line-image-archive \
+            test/cloudbath-workspace-policy-prewarm.integration.test.ts
 
       - name: Lint scoped LINE changes
         if: steps.dependencies.outcome == 'success' && !cancelled()

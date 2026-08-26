@@ -23,7 +23,6 @@ export { runWithDiagnosticTraceContext } from "../infra/diagnostic-trace-context
 export { logMessageDispatchStarted, logMessageProcessed } from "../logging/diagnostic.js";
 export { resolveBundledExplicitProviderContractsFromPublicArtifacts } from "../plugins/provider-contract-public-artifacts.js";
 export {
-  getGlobalHookRunner,
   initializeGlobalHookRunner,
   resetGlobalHookRunner,
 } from "../plugins/hook-runner-global.js";
