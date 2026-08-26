@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
-import { readMediaBuffer, resolveMediaBufferPath } from "openclaw/plugin-sdk/media-store";
+import { readMediaBuffer } from "openclaw/plugin-sdk/media-store";
 import { detectCanonicalImageExtensionFromBytes } from "./r2.js";
 
 const SCOPE_PATTERN = /^[a-f0-9]{64}$/u;
@@ -66,14 +66,11 @@ async function readAuthoritativeManagedMedia(
 ): Promise<Buffer> {
   const id = mediaIdFromManagedPath(sourcePath);
   try {
-    const [sourceRealPath, authoritativePath] = await Promise.all([
-      fsp.realpath(sourcePath),
-      resolveMediaBufferPath(id, "inbound"),
-    ]);
-    if (sourceRealPath !== authoritativePath) {
+    const media = await readMediaBuffer(id, "inbound", maxBytes);
+    const sourceRealPath = await fsp.realpath(sourcePath);
+    if (sourceRealPath !== media.path) {
       return failure("MANAGED_MEDIA_UNAVAILABLE");
     }
-    const media = await readMediaBuffer(id, "inbound", maxBytes);
     if (media.size <= 0 || media.size !== media.buffer.byteLength) {
       return failure("MANAGED_MEDIA_UNAVAILABLE");
     }
@@ -150,6 +147,44 @@ export class UgcCharacterPendingMediaStore {
     this.rootDir = path.join(stateDir, UGC_CHARACTER_PENDING_MEDIA_RELATIVE_DIR);
   }
 
+  private async resolveDurableFilePath(params: {
+    scopeKey: string;
+    sha256: string;
+    extension: string;
+  }): Promise<string> {
+    try {
+      const rootRealPath = await fsp.realpath(this.rootDir);
+      const scopePath = path.join(this.rootDir, params.scopeKey);
+      const scopeStat = await fsp.lstat(scopePath);
+      if (!scopeStat.isDirectory() || scopeStat.isSymbolicLink()) {
+        return failure("DURABLE_MEDIA_UNAVAILABLE");
+      }
+      const scopeRealPath = await fsp.realpath(scopePath);
+      if (path.relative(rootRealPath, scopeRealPath) !== params.scopeKey) {
+        return failure("DURABLE_MEDIA_UNAVAILABLE");
+      }
+      const expectedRelativePath = path.join(
+        params.scopeKey,
+        `${params.sha256}${params.extension}`,
+      );
+      const candidatePath = path.join(scopeRealPath, `${params.sha256}${params.extension}`);
+      const candidateStat = await fsp.lstat(candidatePath);
+      if (!candidateStat.isFile() || candidateStat.isSymbolicLink()) {
+        return failure("DURABLE_MEDIA_UNAVAILABLE");
+      }
+      const candidateRealPath = await fsp.realpath(candidatePath);
+      if (path.relative(rootRealPath, candidateRealPath) !== expectedRelativePath) {
+        return failure("DURABLE_MEDIA_UNAVAILABLE");
+      }
+      return candidateRealPath;
+    } catch (error) {
+      if (error instanceof UgcCharacterMediaError) {
+        throw error;
+      }
+      return failure("DURABLE_MEDIA_UNAVAILABLE");
+    }
+  }
+
   async capture(sourcePath: string, scopeKey: string): Promise<CapturedCharacterMedia> {
     if (!SCOPE_PATTERN.test(scopeKey)) {
       return failure("DURABLE_COPY_FAILED");
@@ -159,8 +194,8 @@ export class UgcCharacterPendingMediaStore {
     const sha256 = crypto.createHash("sha256").update(bytes).digest("hex");
     const durableMediaKey = `${scopeKey}/${sha256}${extension}`;
     const scopeDir = path.join(this.rootDir, scopeKey);
-    const destination = path.join(scopeDir, `${sha256}${extension}`);
-    const temporary = path.join(scopeDir, `.${sha256}.${crypto.randomUUID()}.tmp`);
+    let destination: string;
+    let temporary = "";
     let handle: fsp.FileHandle | undefined;
     try {
       await fsp.mkdir(scopeDir, { recursive: true, mode: 0o700 });
@@ -171,6 +206,8 @@ export class UgcCharacterPendingMediaStore {
       if (path.relative(rootRealPath, scopeRealPath) !== scopeKey) {
         return failure("DURABLE_COPY_FAILED");
       }
+      destination = path.join(scopeRealPath, `${sha256}${extension}`);
+      temporary = path.join(scopeRealPath, `.${sha256}.${crypto.randomUUID()}.tmp`);
       handle = await fsp.open(
         temporary,
         fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | noFollowFlag(),
@@ -189,7 +226,9 @@ export class UgcCharacterPendingMediaStore {
       return failure("DURABLE_COPY_FAILED");
     } finally {
       await handle?.close().catch(() => undefined);
-      await fsp.unlink(temporary).catch(() => undefined);
+      if (temporary) {
+        await fsp.unlink(temporary).catch(() => undefined);
+      }
     }
   }
 
@@ -207,11 +246,7 @@ export class UgcCharacterPendingMediaStore {
     ) {
       return failure("HASH_MISMATCH");
     }
-    const filePath = path.join(
-      this.rootDir,
-      parsed.scopeKey,
-      `${parsed.sha256}${parsed.extension}`,
-    );
+    const filePath = await this.resolveDurableFilePath(parsed);
     const bytes = await readRegularFile(filePath, this.maxBytes);
     if (bytes.byteLength !== params.expectedSize) {
       return failure("HASH_MISMATCH");
@@ -235,11 +270,7 @@ export class UgcCharacterPendingMediaStore {
 
   async delete(durableMediaKey: string): Promise<void> {
     const parsed = parseDurableMediaKey(durableMediaKey);
-    const filePath = path.join(
-      this.rootDir,
-      parsed.scopeKey,
-      `${parsed.sha256}${parsed.extension}`,
-    );
+    const filePath = await this.resolveDurableFilePath(parsed);
     await fsp.unlink(filePath).catch(() => undefined);
     await fsp.rmdir(path.join(this.rootDir, parsed.scopeKey)).catch(() => undefined);
   }

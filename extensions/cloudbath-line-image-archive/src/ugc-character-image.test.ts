@@ -332,6 +332,43 @@ describe("UGC latest-image character workflow", () => {
     });
   });
 
+  it("honors the configured image limit above the media-store default", async () => {
+    const largeImage = Buffer.concat([PNG_BYTES, Buffer.alloc(6 * 1024 * 1024, 0x61)]);
+    mediaPath = (
+      await saveMediaBuffer(largeImage, "image/png", "inbound", 10 * 1024 * 1024, "large.png")
+    ).path;
+    const { workflow, latestImages } = harness(10 * 1024 * 1024);
+    await workflow.rememberImage(job());
+    expect(Array.from(latestImages.values.values())[0]?.contentLength).toBe(largeImage.byteLength);
+  });
+
+  it("does not follow a replaced durable scope directory symlink", async () => {
+    const { workflow, r2, latestImages } = harness();
+    await workflow.rememberImage(job());
+    const latest = Array.from(latestImages.values.values())[0];
+    expect(latest).toBeDefined();
+    const [scopeKey, filename] = latest?.durableMediaKey.split("/") ?? [];
+    const rootDir = path.join(stateDir, UGC_CHARACTER_PENDING_MEDIA_RELATIVE_DIR);
+    const scopeDir = path.join(rootDir, scopeKey ?? "");
+    const displacedDir = path.join(stateDir, "displaced-durable-media");
+    await fsp.rename(scopeDir, displacedDir);
+    await fsp.symlink(displacedDir, scopeDir, "dir");
+    expect(await fsp.stat(path.join(displacedDir, filename ?? ""))).toBeDefined();
+
+    const result = await workflow.handleBeforeDispatch(
+      {
+        content: "เก็บรูปนี้เป็นตัวละครชื่อ Kerver",
+        senderId: "U-owner",
+        senderIsOwner: true,
+        isGroup: true,
+      },
+      { channelId: "line", accountId: "primary", conversationId: "line:group:C-ugc" },
+    );
+
+    expect(result?.text).toContain("บันทึกตัวละครไม่สำเร็จ");
+    expect(r2.ensureObject).not.toHaveBeenCalled();
+  });
+
   it("cleans expired unreferenced media without deleting another active scope", async () => {
     const { workflow, latestImages } = harness();
     await workflow.rememberImage(job("C-expired"));
