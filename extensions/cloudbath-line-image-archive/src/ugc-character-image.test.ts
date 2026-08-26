@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import type { PluginStateKeyedStore } from "openclaw/plugin-sdk/plugin-state-runtime";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { EnsureR2ObjectParams } from "./r2.js";
 import type { InboundImageJob, LineGroupPolicyBinding, SafeLogger } from "./types.js";
 import {
   buildCanonicalR2AssetUrl,
@@ -77,8 +78,12 @@ describe("UGC latest-image character workflow", () => {
     const registry = {
       lookup: vi.fn(async (_accountId: string | undefined, groupId: string) => binding(groupId)),
     };
+    const ensureObjectInputs: EnsureR2ObjectParams[] = [];
     const r2 = {
-      ensureObject: vi.fn(async () => ({ kind: "uploaded" as const })),
+      ensureObject: vi.fn(async (input: EnsureR2ObjectParams) => {
+        ensureObjectInputs.push(input);
+        return { kind: "uploaded" as const };
+      }),
     };
     const notion = {
       saveCharacterAsset: vi.fn(async (input: { nameOrCode: string }) => ({
@@ -110,7 +115,7 @@ describe("UGC latest-image character workflow", () => {
       logger,
       () => Date.UTC(2026, 7, 26),
     );
-    return { workflow, r2, notion };
+    return { workflow, r2, notion, ensureObjectInputs };
   }
 
   function job(groupId = "C-ugc", userId = "U-owner"): InboundImageJob {
@@ -138,7 +143,7 @@ describe("UGC latest-image character workflow", () => {
   });
 
   it("safely uploads the owner's latest same-group image and returns one canonical URL", async () => {
-    const { workflow, r2, notion } = harness();
+    const { workflow, r2, notion, ensureObjectInputs } = harness();
     await workflow.rememberImage(job());
 
     const result = await workflow.handleBeforeDispatch(
@@ -152,12 +157,12 @@ describe("UGC latest-image character workflow", () => {
     );
 
     expect(r2.ensureObject).toHaveBeenCalledOnce();
-    expect(r2.ensureObject.mock.calls[0]?.[0]).toMatchObject({
+    expect(ensureObjectInputs[0]).toMatchObject({
       bucketName: "cloudbath",
       contentType: "image/png",
       contentLength: PNG_BYTES.byteLength,
     });
-    expect(r2.ensureObject.mock.calls[0]![0].objectKey).toMatch(
+    expect(ensureObjectInputs[0]?.objectKey).toMatch(
       /^ugc\/characters\/kerver\/sha256\/[a-f0-9]{2}\/[a-f0-9]{64}\.png$/u,
     );
     expect(notion.saveCharacterAsset).toHaveBeenCalledOnce();

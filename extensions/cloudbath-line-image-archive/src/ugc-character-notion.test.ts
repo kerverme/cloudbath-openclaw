@@ -102,11 +102,16 @@ function requestBody(init: RequestInit | undefined): string {
   return init.body;
 }
 
+function requestPathname(input: string | URL | Request): string {
+  const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+  return new URL(url).pathname;
+}
+
 describe("UGC Character Library live-schema writer", () => {
   it("creates Kerver without writing the generated Character ID or duplicate identity fields", async () => {
     const writes: Array<Record<string, unknown>> = [];
     const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
-      const pathname = new URL(typeof input === "string" ? input : input.url).pathname;
+      const pathname = requestPathname(input);
       if (pathname.startsWith("/v1/data_sources/") && !pathname.endsWith("/query")) {
         return Response.json(liveCharacterSource());
       }
@@ -152,7 +157,7 @@ describe("UGC Character Library live-schema writer", () => {
 
   it("accepts the live auto_increment_id shape and reads its generated value", async () => {
     const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
-      const pathname = new URL(typeof input === "string" ? input : input.url).pathname;
+      const pathname = requestPathname(input);
       if (pathname.startsWith("/v1/data_sources/") && !pathname.endsWith("/query")) {
         return Response.json(liveCharacterSource("auto_increment_id"));
       }
@@ -183,7 +188,7 @@ describe("UGC Character Library live-schema writer", () => {
     let createCount = 0;
     const existing = characterPage({ name: "Kerver", number: 5, objectKey: "old/key.png" });
     const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
-      const pathname = new URL(typeof input === "string" ? input : input.url).pathname;
+      const pathname = requestPathname(input);
       if (pathname.startsWith("/v1/data_sources/") && !pathname.endsWith("/query")) {
         return Response.json(liveCharacterSource());
       }
@@ -224,7 +229,7 @@ describe("UGC Character Library live-schema writer", () => {
     const filters: Array<Record<string, unknown> | undefined> = [];
     const existing = characterPage({ name: "Kerver", number: 5 });
     const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
-      const pathname = new URL(typeof input === "string" ? input : input.url).pathname;
+      const pathname = requestPathname(input);
       if (pathname.startsWith("/v1/data_sources/") && !pathname.endsWith("/query")) {
         return Response.json(liveCharacterSource());
       }

@@ -109,6 +109,7 @@ describe("Cloudbath workspace policy runtime across plugin registries", () => {
       {
         from: "line:group:Cpilotgroup",
         senderId: "owner-user",
+        content: "",
         messageId: "message-1",
         timestamp: Date.parse("2026-08-26T00:00:00.000Z"),
         metadata: {
