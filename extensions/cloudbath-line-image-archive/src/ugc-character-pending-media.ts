@@ -113,6 +113,10 @@ function noFollowFlag(): number {
   return typeof fs.constants.O_NOFOLLOW === "number" ? fs.constants.O_NOFOLLOW : 0;
 }
 
+function hasErrorCode(error: unknown, code: string): boolean {
+  return typeof error === "object" && error !== null && "code" in error && error.code === code;
+}
+
 async function readRegularFile(filePath: string, maxBytes: number): Promise<Buffer> {
   let handle: fsp.FileHandle | undefined;
   try {
@@ -138,13 +142,68 @@ async function readRegularFile(filePath: string, maxBytes: number): Promise<Buff
 }
 
 export class UgcCharacterPendingMediaStore {
-  private readonly rootDir: string;
-
   constructor(
-    stateDir: string,
+    private readonly stateDir: string,
     private readonly maxBytes: number,
-  ) {
-    this.rootDir = path.join(stateDir, UGC_CHARACTER_PENDING_MEDIA_RELATIVE_DIR);
+  ) {}
+
+  private async ensureOwnedRoot(): Promise<string> {
+    try {
+      const stateRealPath = await fsp.realpath(this.stateDir);
+      let currentRealPath = stateRealPath;
+      const expectedSegments = UGC_CHARACTER_PENDING_MEDIA_RELATIVE_DIR.split(path.sep).filter(
+        Boolean,
+      );
+      for (const [index, segment] of expectedSegments.entries()) {
+        const candidatePath = path.join(currentRealPath, segment);
+        await fsp.mkdir(candidatePath, { mode: 0o700 }).catch((error: unknown) => {
+          if (!hasErrorCode(error, "EEXIST")) {
+            throw error;
+          }
+        });
+        const candidateStat = await fsp.lstat(candidatePath);
+        if (!candidateStat.isDirectory() || candidateStat.isSymbolicLink()) {
+          return failure("DURABLE_COPY_FAILED");
+        }
+        const candidateRealPath = await fsp.realpath(candidatePath);
+        const expectedRelativePath = path.join(...expectedSegments.slice(0, index + 1));
+        if (path.relative(stateRealPath, candidateRealPath) !== expectedRelativePath) {
+          return failure("DURABLE_COPY_FAILED");
+        }
+        currentRealPath = candidateRealPath;
+      }
+      return currentRealPath;
+    } catch (error) {
+      if (error instanceof UgcCharacterMediaError) {
+        throw error;
+      }
+      return failure("DURABLE_COPY_FAILED");
+    }
+  }
+
+  private async ensureScopeDirectory(rootRealPath: string, scopeKey: string): Promise<string> {
+    try {
+      const scopePath = path.join(rootRealPath, scopeKey);
+      await fsp.mkdir(scopePath, { mode: 0o700 }).catch((error: unknown) => {
+        if (!hasErrorCode(error, "EEXIST")) {
+          throw error;
+        }
+      });
+      const scopeStat = await fsp.lstat(scopePath);
+      if (!scopeStat.isDirectory() || scopeStat.isSymbolicLink()) {
+        return failure("DURABLE_COPY_FAILED");
+      }
+      const scopeRealPath = await fsp.realpath(scopePath);
+      if (path.relative(rootRealPath, scopeRealPath) !== scopeKey) {
+        return failure("DURABLE_COPY_FAILED");
+      }
+      return scopeRealPath;
+    } catch (error) {
+      if (error instanceof UgcCharacterMediaError) {
+        throw error;
+      }
+      return failure("DURABLE_COPY_FAILED");
+    }
   }
 
   private async resolveDurableFilePath(params: {
@@ -153,8 +212,8 @@ export class UgcCharacterPendingMediaStore {
     extension: string;
   }): Promise<string> {
     try {
-      const rootRealPath = await fsp.realpath(this.rootDir);
-      const scopePath = path.join(this.rootDir, params.scopeKey);
+      const rootRealPath = await this.ensureOwnedRoot();
+      const scopePath = path.join(rootRealPath, params.scopeKey);
       const scopeStat = await fsp.lstat(scopePath);
       if (!scopeStat.isDirectory() || scopeStat.isSymbolicLink()) {
         return failure("DURABLE_MEDIA_UNAVAILABLE");
@@ -193,19 +252,12 @@ export class UgcCharacterPendingMediaStore {
     const extension = validateImage(bytes);
     const sha256 = crypto.createHash("sha256").update(bytes).digest("hex");
     const durableMediaKey = `${scopeKey}/${sha256}${extension}`;
-    const scopeDir = path.join(this.rootDir, scopeKey);
     let destination: string;
     let temporary = "";
     let handle: fsp.FileHandle | undefined;
     try {
-      await fsp.mkdir(scopeDir, { recursive: true, mode: 0o700 });
-      const [rootRealPath, scopeRealPath] = await Promise.all([
-        fsp.realpath(this.rootDir),
-        fsp.realpath(scopeDir),
-      ]);
-      if (path.relative(rootRealPath, scopeRealPath) !== scopeKey) {
-        return failure("DURABLE_COPY_FAILED");
-      }
+      const rootRealPath = await this.ensureOwnedRoot();
+      const scopeRealPath = await this.ensureScopeDirectory(rootRealPath, scopeKey);
       destination = path.join(scopeRealPath, `${sha256}${extension}`);
       temporary = path.join(scopeRealPath, `.${sha256}.${crypto.randomUUID()}.tmp`);
       handle = await fsp.open(
@@ -272,16 +324,17 @@ export class UgcCharacterPendingMediaStore {
     const parsed = parseDurableMediaKey(durableMediaKey);
     const filePath = await this.resolveDurableFilePath(parsed);
     await fsp.unlink(filePath).catch(() => undefined);
-    await fsp.rmdir(path.join(this.rootDir, parsed.scopeKey)).catch(() => undefined);
+    await fsp.rmdir(path.dirname(filePath)).catch(() => undefined);
   }
 
   async sweepExpired(activeKeys: ReadonlySet<string>, expiresBefore: number): Promise<void> {
-    const scopeEntries = await fsp.readdir(this.rootDir, { withFileTypes: true }).catch(() => []);
+    const rootRealPath = await this.ensureOwnedRoot();
+    const scopeEntries = await fsp.readdir(rootRealPath, { withFileTypes: true }).catch(() => []);
     for (const scopeEntry of scopeEntries) {
       if (!scopeEntry.isDirectory() || !SCOPE_PATTERN.test(scopeEntry.name)) {
         continue;
       }
-      const scopeDir = path.join(this.rootDir, scopeEntry.name);
+      const scopeDir = path.join(rootRealPath, scopeEntry.name);
       const fileEntries = await fsp.readdir(scopeDir, { withFileTypes: true }).catch(() => []);
       for (const fileEntry of fileEntries) {
         if (!fileEntry.isFile()) {

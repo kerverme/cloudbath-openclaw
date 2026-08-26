@@ -369,6 +369,40 @@ describe("UGC latest-image character workflow", () => {
     expect(r2.ensureObject).not.toHaveBeenCalled();
   });
 
+  it("does not follow a replaced plugin-owned pending-media root", async () => {
+    const { workflow, latestImages, logger } = harness();
+    await workflow.rememberImage(job());
+    const existing = Array.from(latestImages.values.values())[0];
+    expect(existing).toBeDefined();
+    const rootDir = path.join(stateDir, UGC_CHARACTER_PENDING_MEDIA_RELATIVE_DIR);
+    const displacedDir = path.join(stateDir, "displaced-pending-root");
+    const redirectedDir = path.join(stateDir, "redirected-pending-root");
+    await fsp.mkdir(redirectedDir, { mode: 0o700 });
+    await fsp.rename(rootDir, displacedDir);
+    await fsp.symlink(redirectedDir, rootDir, "dir");
+    mediaPath = (
+      await saveMediaBuffer(
+        Buffer.concat([PNG_BYTES, Buffer.from("-replacement")]),
+        "image/png",
+        "inbound",
+        10 * 1024 * 1024,
+        "replacement.png",
+      )
+    ).path;
+
+    await workflow.rememberImage({
+      ...job(),
+      messageId: "message-2",
+      receivedAt: "2026-08-26T00:01:00.000Z",
+    });
+
+    expect(Array.from(latestImages.values.values())[0]).toEqual(existing);
+    expect(await fsp.readdir(redirectedDir)).toHaveLength(0);
+    expect(logger.warn).toHaveBeenCalledWith("ugc_character_image_rejected", {
+      reason: "DURABLE_COPY_FAILED",
+    });
+  });
+
   it("cleans expired unreferenced media without deleting another active scope", async () => {
     const { workflow, latestImages } = harness();
     await workflow.rememberImage(job("C-expired"));
