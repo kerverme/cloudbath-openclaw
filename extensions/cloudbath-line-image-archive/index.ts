@@ -242,6 +242,7 @@ export default definePluginEntry({
             },
             logger,
           );
+          await ugcCharacterWorkflow.cleanupExpiredPendingImages();
         }
 
         if (workspaceConfig.keepWatching) {

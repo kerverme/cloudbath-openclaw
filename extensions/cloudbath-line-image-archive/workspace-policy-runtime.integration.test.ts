@@ -1,9 +1,15 @@
+import fsp from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { saveMediaStream } from "openclaw/plugin-sdk/media-store";
 import type { OpenClawPluginService } from "openclaw/plugin-sdk/plugin-entry";
 import {
   resetGlobalHookRunner,
   resetPluginRuntimeStateForTest,
 } from "openclaw/plugin-sdk/plugin-test-runtime";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { R2ArchiveClient } from "./src/r2.js";
+import { UgcNotionWorkflowClient } from "./src/ugc-workflow.js";
 import { tryGetCloudbathWorkspacePolicyRuntime } from "./src/workspace-policy-runtime.js";
 import {
   createWorkspacePolicyServiceContext,
@@ -12,6 +18,7 @@ import {
 } from "./workspace-policy-runtime.test-support.js";
 
 const startedServices: OpenClawPluginService[] = [];
+const temporaryStateDirs: string[] = [];
 
 beforeEach(() => {
   vi.stubEnv("CLOUDBATH_IMAGE_ARCHIVE_ENABLED", "false");
@@ -27,6 +34,9 @@ afterEach(async () => {
   }
   resetGlobalHookRunner();
   resetPluginRuntimeStateForTest();
+  for (const stateDir of temporaryStateDirs.splice(0)) {
+    await fsp.rm(stateDir, { recursive: true, force: true });
+  }
   vi.restoreAllMocks();
   vi.unstubAllEnvs();
 });
@@ -148,6 +158,100 @@ describe("Cloudbath workspace policy runtime across plugin registries", () => {
     );
     expect(handleCommand).toHaveBeenCalledOnce();
     expect(result).toEqual({ handled: true, text: "character-saved" });
+  });
+
+  it("captures managed LINE media durably before the transient file disappears", async () => {
+    const stateDir = await fsp.realpath(
+      await fsp.mkdtemp(path.join(os.tmpdir(), "cloudbath-line-character-hook-")),
+    );
+    temporaryStateDirs.push(stateDir);
+    vi.stubEnv("OPENCLAW_STATE_DIR", stateDir);
+    vi.stubEnv("R2_ACCOUNT_ID", "test-account");
+    vi.stubEnv("R2_ACCESS_KEY_ID", "test-access-key");
+    vi.stubEnv("R2_SECRET_ACCESS_KEY", "test-secret-key");
+    vi.stubEnv("R2_BUCKET_NAME", "test-bucket");
+    vi.stubEnv("R2_ENDPOINT", "https://test-account.r2.cloudflarestorage.com");
+    const imageBytes = Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      Buffer.from("production-equivalent-line-image"),
+    ]);
+    const saved = await saveMediaStream(
+      (async function* () {
+        yield imageBytes;
+      })(),
+      "image/png",
+      "inbound",
+      10 * 1024 * 1024,
+      "line-image.png",
+    );
+    const state = createWorkspacePolicyStateRuntime();
+    const gateway = registerWorkspacePolicyPlugin(state);
+    await gateway.service.start(createWorkspacePolicyServiceContext(stateDir));
+    startedServices.push(gateway.service);
+    const runtime = tryGetCloudbathWorkspacePolicyRuntime();
+    if (!runtime?.ugcCharacterWorkflow) {
+      throw new Error("Gateway UGC character workflow did not initialize");
+    }
+    vi.spyOn(runtime.workspaceRegistry, "lookup").mockResolvedValue({
+      accountId: "line-account",
+      groupId: "Cpilotgroup",
+      policyId: "UGC",
+      boundByOwnerId: "owner-user",
+      boundAt: "2026-08-26T00:00:00.000Z",
+    });
+    const ensureObject = vi
+      .spyOn(R2ArchiveClient.prototype, "ensureObject")
+      .mockResolvedValue({ kind: "uploaded" });
+    const saveCharacterAsset = vi
+      .spyOn(UgcNotionWorkflowClient.prototype, "saveCharacterAsset")
+      .mockResolvedValue({
+        name: "Kerver",
+        characterId: "CHAR-5",
+        status: "Active",
+        pageId: "character-page",
+      });
+    const prewarm = registerWorkspacePolicyPlugin(state);
+
+    await prewarm.messageReceived(
+      {
+        from: "line:group:Cpilotgroup",
+        senderId: "owner-user",
+        content: "",
+        messageId: "message-1",
+        timestamp: Date.parse("2026-08-26T00:00:00.000Z"),
+        metadata: {
+          originatingTo: "line:group:Cpilotgroup",
+          mediaPath: saved.path,
+          mediaType: "image/png",
+        },
+      },
+      {
+        channelId: "line",
+        accountId: "line-account",
+        conversationId: "line:group:Cpilotgroup",
+      },
+    );
+    await fsp.unlink(saved.path);
+    const result = await prewarm.beforeDispatch(
+      {
+        content: "เก็บรูปนี้เป็นตัวละครชื่อ Kerver",
+        senderId: "owner-user",
+        senderIsOwner: true,
+        isGroup: true,
+      },
+      {
+        channelId: "line",
+        accountId: "line-account",
+        conversationId: "line:group:Cpilotgroup",
+        sessionKey: "agent:main:line:group:Cpilotgroup",
+      },
+    );
+
+    expect(ensureObject).toHaveBeenCalledWith(
+      expect.objectContaining({ body: imageBytes, contentType: "image/png" }),
+    );
+    expect(saveCharacterAsset).toHaveBeenCalledOnce();
+    expect(result?.text).toContain("Character ID: CHAR-5");
   });
 
   it("clears the runtime when its owning service stops", async () => {
