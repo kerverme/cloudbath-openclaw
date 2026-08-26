@@ -82,6 +82,73 @@ describe("Cloudbath workspace policy runtime across plugin registries", () => {
     });
   });
 
+  it("routes latest-image capture and character commands through the active gateway runtime", async () => {
+    const state = createWorkspacePolicyStateRuntime();
+    const gateway = registerWorkspacePolicyPlugin(state);
+    await gateway.service.start(createWorkspacePolicyServiceContext());
+    startedServices.push(gateway.service);
+    const runtime = tryGetCloudbathWorkspacePolicyRuntime();
+    const workflow = runtime?.ugcCharacterWorkflow;
+    if (!workflow) {
+      throw new Error("Gateway UGC character workflow did not initialize");
+    }
+    vi.spyOn(runtime.workspaceRegistry, "lookup").mockResolvedValue({
+      accountId: "line-account",
+      groupId: "Cpilotgroup",
+      policyId: "UGC",
+      boundByOwnerId: "owner-user",
+      boundAt: "2026-08-26T00:00:00.000Z",
+    });
+    const rememberImage = vi.spyOn(workflow, "rememberImage").mockResolvedValue();
+    const handleCommand = vi
+      .spyOn(workflow, "handleBeforeDispatch")
+      .mockResolvedValue({ handled: true, text: "character-saved" });
+    const prewarm = registerWorkspacePolicyPlugin(state);
+
+    await prewarm.messageReceived(
+      {
+        from: "line:group:Cpilotgroup",
+        senderId: "owner-user",
+        messageId: "message-1",
+        timestamp: Date.parse("2026-08-26T00:00:00.000Z"),
+        metadata: {
+          originatingTo: "line:group:Cpilotgroup",
+          mediaPath: "/test/state/media/inbound/character.png",
+          mediaType: "image/png",
+        },
+      },
+      {
+        channelId: "line",
+        accountId: "line-account",
+        conversationId: "line:group:Cpilotgroup",
+      },
+    );
+    const result = await prewarm.beforeDispatch(
+      {
+        content: "เก็บรูปนี้เป็นตัวละครชื่อ Kerver",
+        senderId: "owner-user",
+        senderIsOwner: true,
+        isGroup: true,
+      },
+      {
+        channelId: "line",
+        accountId: "line-account",
+        conversationId: "line:group:Cpilotgroup",
+        sessionKey: "agent:main:line:group:Cpilotgroup",
+      },
+    );
+
+    expect(rememberImage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        accountId: "line-account",
+        groupId: "Cpilotgroup",
+        userId: "owner-user",
+      }),
+    );
+    expect(handleCommand).toHaveBeenCalledOnce();
+    expect(result).toEqual({ handled: true, text: "character-saved" });
+  });
+
   it("clears the runtime when its owning service stops", async () => {
     const gateway = registerWorkspacePolicyPlugin(createWorkspacePolicyStateRuntime());
     await gateway.service.start(createWorkspacePolicyServiceContext());

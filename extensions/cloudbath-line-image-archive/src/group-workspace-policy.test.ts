@@ -197,6 +197,7 @@ describe("persistent LINE group workspace policy registry", () => {
 describe("UGC capability and frozen job scope boundaries", () => {
   it("enforces fixed capability permissions and prevents cross-policy access", () => {
     expect(UGC_CAPABILITY_PERMISSIONS.PRODUCT_LIBRARY).toBe("READ");
+    expect(UGC_CAPABILITY_PERMISSIONS.CHARACTER_LIBRARY).toBe("READ_WRITE");
     expect(UGC_CAPABILITY_PERMISSIONS.UGC_PROJECTS).toBe("READ_WRITE");
     const binding: LineGroupPolicyBinding = {
       accountId: "primary",

@@ -113,6 +113,11 @@ type UgcPrepareToolContext = {
   nativeConversationId?: string;
 };
 
+type UgcCanonicalR2Identity = Readonly<{
+  endpoint: string;
+  bucketName: string;
+}>;
+
 /**
  * Status options the live UGC databases actually offer. Writing anything else
  * makes Notion reject the update, so the set is validated at startup rather
@@ -211,6 +216,30 @@ function relation(pageId: string | undefined): Record<string, unknown> {
   return { relation: pageId ? [{ id: pageId }] : [] };
 }
 
+function characterId(value: string): string {
+  return `CHAR-${crypto
+    .createHash("sha256")
+    .update(normalizedName(value), "utf8")
+    .digest("hex")
+    .slice(0, 8)
+    .toUpperCase()}`;
+}
+
+function assetPropertyValue(params: {
+  type: string;
+  canonicalUrl: string;
+  objectKey: string;
+  preferObjectKey: boolean;
+}): Record<string, unknown> {
+  if (params.type === "url") {
+    return { url: params.canonicalUrl };
+  }
+  if (params.type === "rich_text") {
+    return richText(params.preferObjectKey ? params.objectKey : params.canonicalUrl);
+  }
+  throw new Error("Character Library asset property has an incompatible type");
+}
+
 function hashKey(...parts: string[]): string {
   return crypto.createHash("sha256").update(parts.join("\0"), "utf8").digest("hex");
 }
@@ -264,10 +293,51 @@ function safeHttpsUrl(value: string): string | undefined {
   }
 }
 
+function canonicalR2ObjectKey(
+  value: string,
+  config: UgcCanonicalR2Identity | undefined,
+): string | undefined {
+  if (!config?.endpoint || !config.bucketName) {
+    return undefined;
+  }
+  try {
+    const valueUrl = new URL(value);
+    const endpointUrl = new URL(config.endpoint);
+    if (
+      valueUrl.protocol !== "https:" ||
+      valueUrl.origin !== endpointUrl.origin ||
+      valueUrl.search ||
+      valueUrl.hash
+    ) {
+      return undefined;
+    }
+    const endpointParts = endpointUrl.pathname
+      .split("/")
+      .filter(Boolean)
+      .map((part) => decodeURIComponent(part));
+    const parts = valueUrl.pathname
+      .split("/")
+      .filter(Boolean)
+      .map((part) => decodeURIComponent(part));
+    for (const endpointPart of endpointParts) {
+      if (parts.shift() !== endpointPart) {
+        return undefined;
+      }
+    }
+    if (parts.shift() !== config.bucketName) {
+      return undefined;
+    }
+    return safeR2Key(parts.join("/"));
+  } catch {
+    return undefined;
+  }
+}
+
 function propertyReferences(
   page: NotionPage,
   names: readonly string[],
   kind: UgcReferenceAsset["kind"],
+  r2Identity?: UgcCanonicalR2Identity,
 ): UgcReferenceAsset[] {
   const references: UgcReferenceAsset[] = [];
   for (const name of names) {
@@ -283,6 +353,11 @@ function propertyReferences(
     ]);
     for (const raw of [...textValues, ...urlValues, ...fileValues]) {
       if (!raw) {
+        continue;
+      }
+      const canonicalObjectKey = canonicalR2ObjectKey(raw, r2Identity);
+      if (canonicalObjectKey) {
+        references.push({ kind, source: "r2", locator: canonicalObjectKey });
         continue;
       }
       const https = safeHttpsUrl(raw);
@@ -513,7 +588,7 @@ export class UgcNotionWorkflowClient {
     capabilities: Readonly<Record<UgcCapabilityId, NotionTarget>>;
     name: string;
   }): Promise<NotionPage> {
-    await this.schema(params.capabilityId, params.target, params.capabilities);
+    const source = await this.schema(params.capabilityId, params.target, params.capabilities);
     const records = await this.queryAll(params.target, {
       filter: { property: "Name", title: { contains: params.name.trim() } },
     });
@@ -521,14 +596,137 @@ export class UgcNotionWorkflowClient {
     const exact = records.filter(
       (record) => normalizedName(plainText(record.properties?.Name)) === wanted,
     );
-    if (exact.length !== 1) {
-      throw new Error(
-        exact.length === 0
-          ? `${params.capabilityId} record was not found`
-          : `${params.capabilityId} record is ambiguous`,
-      );
+    if (exact.length === 1) {
+      return exact[0]!;
     }
-    return exact[0]!;
+    if (exact.length > 1) {
+      throw new Error(`${params.capabilityId} record is ambiguous`);
+    }
+    if (
+      params.capabilityId === "CHARACTER_LIBRARY" &&
+      source.properties?.["Character ID"]?.type === "rich_text"
+    ) {
+      const byCode = await this.queryAll(params.target, {
+        filter: { property: "Character ID", rich_text: { contains: params.name.trim() } },
+      });
+      const exactCode = byCode.filter(
+        (record) => normalizedName(plainText(record.properties?.["Character ID"])) === wanted,
+      );
+      if (exactCode.length === 1) {
+        return exactCode[0]!;
+      }
+      if (exactCode.length > 1) {
+        throw new Error(`${params.capabilityId} record is ambiguous`);
+      }
+    }
+    throw new Error(`${params.capabilityId} record was not found`);
+  }
+
+  async saveCharacterAsset(params: {
+    target: NotionTarget;
+    capabilities: Readonly<Record<UgcCapabilityId, NotionTarget>>;
+    nameOrCode: string;
+    canonicalUrl: string;
+    objectKey: string;
+    mode: "upsert" | "update";
+  }): Promise<{
+    name: string;
+    characterId: string;
+    status: "Active";
+    pageId: string;
+  }> {
+    const source = await this.schema("CHARACTER_LIBRARY", params.target, params.capabilities);
+    const primaryCandidates = [
+      { name: "Identity Asset URL", preferObjectKey: false },
+      { name: "Identity Reference R2 Keys", preferObjectKey: true },
+      { name: "Canonical Reference Set", preferObjectKey: true },
+    ] as const;
+    const primary = primaryCandidates.find((candidate) => {
+      const type = source.properties?.[candidate.name]?.type;
+      return type === "url" || type === "rich_text";
+    });
+    if (!primary) {
+      throw new Error("Character Library has no supported canonical identity property");
+    }
+    const statusSchema = source.properties?.Status;
+    if (statusSchema && statusSchema.type !== "select") {
+      throw new Error("Character Library Status property has an incompatible type");
+    }
+    if (
+      statusSchema?.type === "select" &&
+      !(statusSchema.select?.options ?? []).some((option) => option.name === "Active")
+    ) {
+      throw new Error("Character Library Status property is missing Active");
+    }
+    const idSchema = source.properties?.["Character ID"];
+    if (idSchema?.type !== "rich_text") {
+      throw new Error("Character Library requires a rich-text Character ID property");
+    }
+    if (statusSchema?.type !== "select") {
+      throw new Error("Character Library requires a select Status property");
+    }
+    const previewSchema = source.properties?.Preview;
+
+    let existing: NotionPage | undefined;
+    try {
+      existing = await this.resolveNamedRecord({
+        capabilityId: "CHARACTER_LIBRARY",
+        target: params.target,
+        capabilities: params.capabilities,
+        name: params.nameOrCode,
+      });
+    } catch (error) {
+      if (!(error instanceof Error) || !error.message.endsWith("record was not found")) {
+        throw error;
+      }
+    }
+    if (!existing && params.mode === "update") {
+      throw new Error("CHARACTER_LIBRARY record was not found");
+    }
+    const name = existing ? plainText(existing.properties?.Name) : params.nameOrCode.trim();
+    const idFromRecord = existing ? plainText(existing.properties?.["Character ID"]) : "";
+    const resolvedCharacterId = idFromRecord || characterId(name);
+    const primaryType = source.properties?.[primary.name]?.type;
+    if (primaryType !== "url" && primaryType !== "rich_text") {
+      throw new Error("Character Library canonical identity property became incompatible");
+    }
+    const properties: Record<string, unknown> = {
+      Name: title(name),
+      [primary.name]: assetPropertyValue({
+        type: primaryType,
+        canonicalUrl: params.canonicalUrl,
+        objectKey: params.objectKey,
+        preferObjectKey: primary.preferObjectKey,
+      }),
+      "Character ID": richText(resolvedCharacterId),
+      Status: { select: { name: "Active" } },
+      // A Notion files property requires a public or expiring external URL.
+      // The canonical R2 object is private and queryless, so an existing files
+      // Preview is left untouched rather than persisting signed credentials.
+      ...(previewSchema?.type === "url" || previewSchema?.type === "rich_text"
+        ? {
+            Preview: assetPropertyValue({
+              type: previewSchema.type,
+              canonicalUrl: params.canonicalUrl,
+              objectKey: params.objectKey,
+              preferObjectKey: false,
+            }),
+          }
+        : {}),
+    };
+    const page = existing?.id
+      ? await this.request<NotionPage>(`/v1/pages/${encodeURIComponent(existing.id)}`, {
+          method: "PATCH",
+          body: JSON.stringify({ properties }),
+        })
+      : await this.createPage(params.target, properties);
+    const safePage = this.assertPage(page, params.target);
+    return {
+      name,
+      characterId: resolvedCharacterId,
+      status: "Active",
+      pageId: safePage.id!,
+    };
   }
 
   private async createPage(
@@ -790,6 +988,7 @@ export class CloudbathUgcVideoWorkflow {
     /** Which project each trusted conversation is currently working on. */
     private readonly activeProjects: PluginStateKeyedStore<ActiveUgcProject>,
     private readonly now: () => number = Date.now,
+    private readonly r2Identity?: UgcCanonicalR2Identity,
   ) {}
 
   async observeTurn(params: {
@@ -1018,7 +1217,8 @@ export class CloudbathUgcVideoWorkflow {
               freezeCharacterLock({
                 code: entry.code,
                 page: entry.page,
-                readReferences: propertyReferences,
+                readReferences: (page, names, kind) =>
+                  propertyReferences(page, names, kind, this.r2Identity),
                 frozenAt,
               }),
             ),

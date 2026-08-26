@@ -40,7 +40,7 @@ owner-confirmed `line_video_draft` flow. Paid generation remains impossible unti
 confirmation. All six capability targets must be explicitly configured:
 
 - `PRODUCT_LIBRARY`: read
-- `CHARACTER_LIBRARY`: read
+- `CHARACTER_LIBRARY`: read/write (owner-only latest-image character saves)
 - `UGC_PROJECTS`: read/write
 - `UGC_SHOTS`: read/write
 - `AI_VIDEO_LIBRARY`: read/write
@@ -112,6 +112,42 @@ UGC schema validation requires the documented production fields but permits unre
 properties. In particular, the live relations `Product`, `Character`, `Project`, and `UGC Project`
 are validated against their configured data-source IDs and are never created, renamed, deleted, or
 retargeted by runtime.
+
+## Save the latest LINE image as a UGC character
+
+In a LINE group already paired to `UGC`, the verified owner can send one supported image and then
+use any of these deterministic commands:
+
+- `เก็บรูปนี้เป็นตัวละครชื่อ Kerver`
+- `บันทึกรูปล่าสุดเป็นตัวละครชื่อ Kerver`
+- `ใช้รูปล่าสุดสร้างตัวละครชื่อ Kerver`
+- `อัปเดตตัวละคร Kerver ด้วยรูปล่าสุด`
+- `เปลี่ยนรูปตัวละคร Kerver เป็นรูปล่าสุด`
+
+The command is handled before ordinary model dispatch. It fails closed for a non-owner, a group
+that is not paired to UGC, or an image from another account/group/owner scope. The managed media
+file is safely reopened and rehashed immediately before an immutable conditional R2 upload. No
+image generation or other paid provider call is involved.
+
+The object key is derived from the character slug and the actual image bytes:
+
+```text
+ugc/characters/<slug-name>/sha256/<first-two-hash-chars>/<sha256>.<detected-extension>
+```
+
+The Character Library writer prefers these primary identity properties in order and writes exactly
+one of them: `Identity Asset URL` (URL), `Identity Reference R2 Keys` (rich text), then
+`Canonical Reference Set` (rich text). If `Preview` is a URL or rich-text property it mirrors the
+same canonical URL for display only. A files-type Preview is left untouched because a private R2
+object has no durable public file URL and signed query credentials must not be persisted.
+
+For the normalized schema, add `Identity Asset URL` as a URL property while keeping `Name` as the
+title. Character saves require `Character ID` as rich text and `Status` as a select containing
+`Active`; `Preview` may be a display-only URL. Existing rows need no automatic migration: runtime
+reads the first usable property from the ordered primary list, never counts Preview as identity,
+and freezes only one canonical asset. Administrators can migrate legacy rows gradually by copying
+their chosen primary value into `Identity Asset URL`; runtime never creates or mutates database
+properties.
 
 ## Universal asset identity
 
@@ -484,16 +520,18 @@ never reaches a scene.
 
 ### Character Library properties this reads
 
-Identity references, in order:
+Identity references, in order (the first usable property wins):
 
+- `Identity Asset URL`
 - `Identity Reference R2 Keys`
 - `Canonical Reference Set`
-- `Preview`
 
 Style references: `Style Reference R2 Keys`.
 
-Only these live names are read. Values are still validated as R2 keys or HTTPS
-URLs exactly as before; nothing about that check was relaxed.
+`Preview` is display-only and is never submitted as another identity reference. Values in the
+primary fields are still validated as R2 keys or HTTPS URLs. A canonical queryless URL for the
+configured private R2 endpoint and bucket is converted back into an authenticated R2 object-key
+reference before generation; signed URL query credentials are neither required nor persisted.
 
 A character with no usable identity reference fails closed rather than being
 cast invisibly.

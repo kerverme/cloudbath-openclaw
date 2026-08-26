@@ -29,9 +29,9 @@ export type LockableCharacterPage = {
  * resolving would reintroduce exactly the drift the lock exists to prevent.
  */
 export const CHARACTER_IDENTITY_PROPERTIES = [
+  "Identity Asset URL",
   "Identity Reference R2 Keys",
   "Canonical Reference Set",
-  "Preview",
 ] as const;
 
 export const CHARACTER_STYLE_PROPERTIES = ["Style Reference R2 Keys"] as const;
@@ -64,9 +64,16 @@ export function freezeCharacterLock(params: {
   readReferences: CharacterReferenceReader;
   frozenAt: string;
 }): UgcCharacterLock {
-  const identityReferences = dedupe(
-    params.readReferences(params.page, CHARACTER_IDENTITY_PROPERTIES, "identity"),
-  );
+  let identityReferences: UgcReferenceAsset[] = [];
+  for (const property of CHARACTER_IDENTITY_PROPERTIES) {
+    const references = dedupe(params.readReferences(params.page, [property], "identity"));
+    if (references[0]) {
+      // One primary field and one asset are authoritative. Preview is display-only,
+      // and legacy secondary fields cannot silently add another identity source.
+      identityReferences = [references[0]];
+      break;
+    }
+  }
   if (identityReferences.length === 0) {
     throw new Error(
       `Character "${params.code}" has no usable identity reference in the Character Library`,

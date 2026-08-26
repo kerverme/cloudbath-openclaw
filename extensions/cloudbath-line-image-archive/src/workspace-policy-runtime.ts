@@ -3,6 +3,7 @@ import type { LineGroupWorkspacePolicyRegistry } from "./group-workspace-policy.
 import type { KeepWatchingPipeline } from "./keep-watching.js";
 import type { ArchivePipeline } from "./pipeline.js";
 import type { ArchiveConfig } from "./types.js";
+import type { UgcCharacterImageWorkflow } from "./ugc-character-image.js";
 import type { CloudbathUgcVideoWorkflow } from "./ugc-workflow.js";
 
 const WORKSPACE_POLICY_RUNTIME_KEY = "cloudbath.workspace-policy-runtime.v1";
@@ -12,6 +13,7 @@ export type CloudbathWorkspacePolicyRuntimeOwner = symbol;
 export type CloudbathWorkspacePolicyRuntime = {
   workspaceRegistry: LineGroupWorkspacePolicyRegistry;
   ugcWorkflow?: CloudbathUgcVideoWorkflow;
+  ugcCharacterWorkflow?: UgcCharacterImageWorkflow;
   keepWatchingPipeline?: KeepWatchingPipeline;
   pipeline?: ArchivePipeline;
   activeConfig?: ArchiveConfig;
