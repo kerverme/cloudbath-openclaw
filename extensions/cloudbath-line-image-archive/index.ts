@@ -49,6 +49,12 @@ import {
   CloudbathUgcVideoWorkflow,
   UgcNotionWorkflowClient,
 } from "./src/ugc-workflow.js";
+import {
+  clearCloudbathWorkspacePolicyRuntime,
+  createCloudbathWorkspacePolicyRuntimeOwner,
+  installCloudbathWorkspacePolicyRuntime,
+  tryGetCloudbathWorkspacePolicyRuntime,
+} from "./src/workspace-policy-runtime.js";
 
 function structuredLogger(logger: PluginLogger): SafeLogger {
   const write =
@@ -96,6 +102,7 @@ export default definePluginEntry({
   description: "Archives universal LINE image assets and profile-scoped Notion records",
   register(api: OpenClawPluginApi) {
     const logger = structuredLogger(api.logger);
+    const runtimeOwner = createCloudbathWorkspacePolicyRuntimeOwner();
     let pipeline: ArchivePipeline | undefined;
     let keepWatchingPipeline: KeepWatchingPipeline | undefined;
     let workspaceRegistry: LineGroupWorkspacePolicyRegistry | undefined;
@@ -108,7 +115,7 @@ export default definePluginEntry({
     });
     api.registerTool(
       (ctx) =>
-        ugcWorkflow?.createTool({
+        tryGetCloudbathWorkspacePolicyRuntime()?.ugcWorkflow?.createTool({
           messageChannel: ctx.messageChannel,
           senderIsOwner: ctx.senderIsOwner,
           requesterSenderId: ctx.requesterSenderId,
@@ -120,7 +127,7 @@ export default definePluginEntry({
     );
     api.registerTool(
       (ctx) =>
-        ugcWorkflow?.createFinalizeTool({
+        tryGetCloudbathWorkspacePolicyRuntime()?.ugcWorkflow?.createFinalizeTool({
           messageChannel: ctx.messageChannel,
           senderIsOwner: ctx.senderIsOwner,
           requesterSenderId: ctx.requesterSenderId,
@@ -134,7 +141,6 @@ export default definePluginEntry({
     api.registerService({
       id: "cloudbath-line-image-archive",
       start: async (ctx) => {
-        clearCloudbathLineVideoWorkspaceRuntime();
         const config = resolveArchiveConfig(process.env, api.pluginConfig ?? {});
         const workspaceConfig = resolveWorkspacePolicyConfig(api.pluginConfig ?? {});
         const bindings = api.runtime.state.openKeyedStore<LineGroupPolicyBinding>({
@@ -241,13 +247,26 @@ export default definePluginEntry({
           });
         }
 
-        installCloudbathLineVideoWorkspaceRuntime({
-          lookupBinding: async (accountId, groupId) =>
-            await workspaceRegistry?.lookup(accountId, groupId),
-          ...(ugcDraftScopes ? { ugcScopeStore: ugcDraftScopes } : {}),
-        });
+        const installRuntime = () => {
+          const registry = workspaceRegistry;
+          if (!registry) {
+            throw new Error("Workspace policy registry did not initialize");
+          }
+          installCloudbathWorkspacePolicyRuntime(runtimeOwner, {
+            workspaceRegistry: registry,
+            ...(ugcWorkflow ? { ugcWorkflow } : {}),
+            ...(keepWatchingPipeline ? { keepWatchingPipeline } : {}),
+            ...(pipeline ? { pipeline } : {}),
+            ...(activeConfig ? { activeConfig } : {}),
+          });
+          installCloudbathLineVideoWorkspaceRuntime(runtimeOwner, {
+            lookupBinding: async (accountId, groupId) => await registry.lookup(accountId, groupId),
+            ...(ugcDraftScopes ? { ugcScopeStore: ugcDraftScopes } : {}),
+          });
+        };
 
         if (!config.enabled) {
+          installRuntime();
           logger.info("archive_disabled", {
             groupPolicyRegistryEnabled: true,
             keepWatchingConfigured: Boolean(workspaceConfig.keepWatching),
@@ -288,6 +307,7 @@ export default definePluginEntry({
           },
         });
         const recovered = await pipeline.recoverIncomplete();
+        installRuntime();
         logger.info("archive_started", {
           activeAgentProfileCount: config.profiles.agentProfiles.filter((profile) => profile.active)
             .length,
@@ -298,7 +318,8 @@ export default definePluginEntry({
         });
       },
       stop: async () => {
-        clearCloudbathLineVideoWorkspaceRuntime();
+        clearCloudbathWorkspacePolicyRuntime(runtimeOwner);
+        clearCloudbathLineVideoWorkspaceRuntime(runtimeOwner);
         await pipeline?.waitForIdle();
         await keepWatchingPipeline?.waitForIdle();
         pipeline = undefined;
@@ -311,13 +332,14 @@ export default definePluginEntry({
     });
 
     api.on("before_dispatch", async (event, ctx) => {
-      const registry = workspaceRegistry;
+      const runtime = tryGetCloudbathWorkspacePolicyRuntime();
+      const registry = runtime?.workspaceRegistry;
       if (!registry) {
         return isWorkspacePolicyCommand(event.content)
           ? { handled: true, text: "Workspace policy service is unavailable." }
           : undefined;
       }
-      await ugcWorkflow?.observeTurn({
+      await runtime.ugcWorkflow?.observeTurn({
         channelId: ctx.channelId,
         accountId: ctx.accountId,
         conversationId: ctx.conversationId,
@@ -329,7 +351,7 @@ export default definePluginEntry({
     });
 
     api.on("before_tool_call", async (event, ctx) => {
-      return await ugcWorkflow?.beforeToolCall({
+      return await tryGetCloudbathWorkspacePolicyRuntime()?.ugcWorkflow?.beforeToolCall({
         toolName: event.toolName,
         toolParams: event.params,
         sessionKey: ctx.sessionKey,
@@ -337,7 +359,7 @@ export default definePluginEntry({
     });
 
     api.on("after_tool_call", async (event, ctx) => {
-      await ugcWorkflow?.afterToolCall({
+      await tryGetCloudbathWorkspacePolicyRuntime()?.ugcWorkflow?.afterToolCall({
         toolName: event.toolName,
         result: event.result,
         sessionKey: ctx.sessionKey,
@@ -347,23 +369,24 @@ export default definePluginEntry({
     api.on(
       "message_received",
       async (event, ctx) => {
+        const runtime = tryGetCloudbathWorkspacePolicyRuntime();
         const job = extractInboundLineImage(event, ctx);
         if (!job) {
           return;
         }
-        const binding = await workspaceRegistry?.lookup(job.accountId, job.groupId);
+        const binding = await runtime?.workspaceRegistry.lookup(job.accountId, job.groupId);
         if (binding?.policyId === "KEEP_WATCHING") {
-          if (!keepWatchingPipeline) {
+          if (!runtime?.keepWatchingPipeline) {
             logger.error("keep_watching_runtime_unavailable", {
               messageKey: job.messageId,
             });
             return;
           }
-          await keepWatchingPipeline.enqueue(job);
+          await runtime.keepWatchingPipeline.enqueue(job);
           return;
         }
-        const activePipeline = pipeline;
-        const config = activeConfig;
+        const activePipeline = runtime?.pipeline;
+        const config = runtime?.activeConfig;
         if (!activePipeline || !config) {
           return;
         }

@@ -32,6 +32,8 @@ const CONFIG = {
   },
 };
 
+const runtimeOwner = Symbol("line-video-workspace-test-owner");
+
 const SCOPE: LineVideoUgcScope = {
   version: 1,
   policyId: "UGC",
@@ -105,7 +107,7 @@ function memoryStore<T>(entries: Map<string, T>) {
 }
 
 afterEach(() => {
-  clearCloudbathLineVideoWorkspaceRuntime();
+  clearCloudbathLineVideoWorkspaceRuntime(runtimeOwner);
 });
 
 describe("LINE Cloudbath UGC scope", () => {
@@ -196,7 +198,7 @@ describe("LINE Cloudbath UGC scope", () => {
     };
     const bindingEntries = new Map([["binding-key", binding]]);
     const scopeEntries = new Map([[ugcDraftScopeKey("draft-1"), SCOPE]]);
-    installCloudbathLineVideoWorkspaceRuntime({
+    installCloudbathLineVideoWorkspaceRuntime(runtimeOwner, {
       lookupBinding: async () => bindingEntries.get("binding-key"),
       ugcScopeStore: memoryStore(scopeEntries),
     });
