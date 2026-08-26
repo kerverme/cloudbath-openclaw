@@ -311,6 +311,52 @@ describe("UGC latest-image character workflow", () => {
     expect((await fsp.stat(currentPath)).isFile()).toBe(true);
   });
 
+  it("does not let an older event overwrite or delete the active newer image", async () => {
+    const { workflow, latestImages } = harness();
+    await workflow.rememberImage({ ...job(), receivedAt: "2026-08-26T00:02:00.000Z" });
+    const newer = Array.from(latestImages.values.values())[0];
+    expect(newer).toBeDefined();
+    const newerPath = path.join(
+      stateDir,
+      UGC_CHARACTER_PENDING_MEDIA_RELATIVE_DIR,
+      ...(newer?.durableMediaKey.split("/") ?? []),
+    );
+    mediaPath = (
+      await saveMediaBuffer(
+        Buffer.concat([PNG_BYTES, Buffer.from("-older")]),
+        "image/png",
+        "inbound",
+        10 * 1024 * 1024,
+        "older.png",
+      )
+    ).path;
+
+    await workflow.rememberImage({
+      ...job(),
+      messageId: "message-older",
+      receivedAt: "2026-08-26T00:01:00.000Z",
+    });
+
+    expect(Array.from(latestImages.values.values())[0]).toEqual(newer);
+    expect((await fsp.stat(newerPath)).isFile()).toBe(true);
+  });
+
+  it("removes an unreferenced durable copy when atomic state registration fails", async () => {
+    const { workflow, latestImages, logger } = harness();
+    latestImages.update = vi.fn(async () => {
+      throw new Error("state unavailable");
+    });
+
+    await workflow.rememberImage(job());
+
+    const rootDir = path.join(stateDir, UGC_CHARACTER_PENDING_MEDIA_RELATIVE_DIR);
+    expect(latestImages.values.size).toBe(0);
+    expect(await fsp.readdir(rootDir)).toHaveLength(0);
+    expect(logger.warn).toHaveBeenCalledWith("ugc_character_image_rejected", {
+      reason: "STATE_REGISTER_FAILED",
+    });
+  });
+
   it("logs a sanitized managed-media reason without paths or LINE identifiers", async () => {
     const { workflow, latestImages, logger } = harness();
     await fsp.unlink(mediaPath);
