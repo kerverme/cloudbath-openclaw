@@ -43,17 +43,16 @@ describe("character identity lock", () => {
     expect(CHARACTER_IDENTITY_PROPERTIES).toEqual([
       "Identity Reference R2 Keys",
       "Canonical Reference Set",
-      "Preview",
     ]);
     expect(CHARACTER_STYLE_PROPERTIES).toEqual(["Style Reference R2 Keys"]);
   });
 
-  it("freezes F1 from Identity Reference R2 Keys, Canonical Reference Set and Preview", () => {
+  it("freezes only the canonical identity asset and ignores legacy duplicates and Preview", () => {
     const lock = freezeCharacterLock({
       code: "F1",
       page: { id: "page-f1", last_edited_time: FROZEN_AT },
       readReferences: readerFor({
-        "Identity Reference R2 Keys": ["characters/f1/identity-1.png"],
+        "Identity Reference R2 Keys": ["characters/f1/main.png"],
         "Canonical Reference Set": ["characters/f1/canonical.png"],
         Preview: ["https://example.com/f1-preview.png"],
         "Style Reference R2 Keys": ["characters/f1/style.png"],
@@ -64,11 +63,25 @@ describe("character identity lock", () => {
     expect(lock.pageId).toBe("page-f1");
     expect(lock.contentIdentity).toBe(FROZEN_AT);
     expect(lock.identityReferences.map((asset) => asset.locator)).toEqual([
-      "characters/f1/identity-1.png",
-      "characters/f1/canonical.png",
-      "https://example.com/f1-preview.png",
+      "characters/f1/main.png",
     ]);
     expect(lock.styleReferences.map((asset) => asset.locator)).toEqual(["characters/f1/style.png"]);
+  });
+
+  it("falls back to Canonical Reference Set for a legacy row and never reads Preview", () => {
+    const lock = freezeCharacterLock({
+      code: "F1",
+      page: { id: "page-f1" },
+      readReferences: readerFor({
+        "Canonical Reference Set": ["characters/f1/legacy.png"],
+        Preview: ["https://example.com/f1-preview.png"],
+      }),
+      frozenAt: FROZEN_AT,
+    });
+
+    expect(lock.identityReferences.map((asset) => asset.locator)).toEqual([
+      "characters/f1/legacy.png",
+    ]);
   });
 
   it("fails closed when a character has no usable identity reference", () => {
@@ -108,7 +121,7 @@ describe("scene reference allocation", () => {
       maxAssets: 8,
     });
 
-    expect(allocation.perCharacterIdentityCount).toEqual({ F1: 2, F2: 2 });
+    expect(allocation.perCharacterIdentityCount).toEqual({ F1: 1, F2: 1 });
     expect(allocation.assets.map((asset) => asset.locator)).toContain("f1/a.png");
     expect(allocation.assets.map((asset) => asset.locator)).toContain("f2/a.png");
   });
@@ -124,7 +137,7 @@ describe("scene reference allocation", () => {
       maxAssets: 3,
     });
 
-    expect(allocation.assets).toHaveLength(3);
+    expect(allocation.assets).toHaveLength(2);
     expect(allocation.perCharacterIdentityCount.F1).toBeGreaterThanOrEqual(1);
     expect(allocation.perCharacterIdentityCount.F2).toBeGreaterThanOrEqual(1);
     expect(allocation.assets.map((asset) => asset.locator)).toContain("f2/a.png");

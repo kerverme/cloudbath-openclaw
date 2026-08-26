@@ -37,6 +37,12 @@ import type {
   UgcProjectInstance,
 } from "./src/types.js";
 import {
+  CLOUDBATH_UGC_CHARACTER_IMAGE_MAX_ENTRIES,
+  CLOUDBATH_UGC_LATEST_CHARACTER_IMAGE_NAMESPACE,
+  type LatestCharacterImage,
+  UgcCharacterImageWorkflow,
+} from "./src/ugc-character-image.js";
+import {
   CLOUDBATH_UGC_DRAFT_SCOPE_NAMESPACE,
   CLOUDBATH_UGC_ACTIVE_SESSION_NAMESPACE,
   CLOUDBATH_UGC_ACTIVE_PROJECT_NAMESPACE,
@@ -107,6 +113,7 @@ export default definePluginEntry({
     let keepWatchingPipeline: KeepWatchingPipeline | undefined;
     let workspaceRegistry: LineGroupWorkspacePolicyRegistry | undefined;
     let ugcWorkflow: CloudbathUgcVideoWorkflow | undefined;
+    let ugcCharacterWorkflow: UgcCharacterImageWorkflow | undefined;
     let activeConfig: ArchiveConfig | undefined;
 
     api.registerTool(() => createCloudbathNotionTools(), {
@@ -200,16 +207,40 @@ export default definePluginEntry({
             maxEntries: CLOUDBATH_UGC_SCOPE_MAX_ENTRIES,
             overflowPolicy: "evict-oldest",
           });
+          const latestCharacterImages = api.runtime.state.openKeyedStore<LatestCharacterImage>({
+            namespace: CLOUDBATH_UGC_LATEST_CHARACTER_IMAGE_NAMESPACE,
+            maxEntries: CLOUDBATH_UGC_CHARACTER_IMAGE_MAX_ENTRIES,
+            overflowPolicy: "evict-oldest",
+          });
+          const ugcNotion = new UgcNotionWorkflowClient(config.notion.apiKey, config.retry, logger);
           ugcWorkflow = new CloudbathUgcVideoWorkflow(
             workspaceConfig.ugc,
             workspaceRegistry,
-            new UgcNotionWorkflowClient(config.notion.apiKey, config.retry, logger),
+            ugcNotion,
             pending,
             ugcDraftScopes,
             activeSessions,
             projectLocks,
             projectInstances,
             activeProjects,
+            Date.now,
+            { endpoint: config.r2.endpoint, bucketName: config.r2.bucketName },
+          );
+          ugcCharacterWorkflow = new UgcCharacterImageWorkflow(
+            workspaceRegistry,
+            latestCharacterImages,
+            new R2ArchiveClient(config.r2, config.retry, logger),
+            ugcNotion,
+            workspaceConfig.ugc.capabilities,
+            ctx.stateDir,
+            config.imageMaxBytes,
+            {
+              endpoint: config.r2.endpoint,
+              bucketName: config.r2.bucketName,
+              accessKeyId: config.r2.accessKeyId,
+              secretAccessKey: config.r2.secretAccessKey,
+            },
+            logger,
           );
         }
 
@@ -255,6 +286,7 @@ export default definePluginEntry({
           installCloudbathWorkspacePolicyRuntime(runtimeOwner, {
             workspaceRegistry: registry,
             ...(ugcWorkflow ? { ugcWorkflow } : {}),
+            ...(ugcCharacterWorkflow ? { ugcCharacterWorkflow } : {}),
             ...(keepWatchingPipeline ? { keepWatchingPipeline } : {}),
             ...(pipeline ? { pipeline } : {}),
             ...(activeConfig ? { activeConfig } : {}),
@@ -326,6 +358,7 @@ export default definePluginEntry({
         keepWatchingPipeline = undefined;
         workspaceRegistry = undefined;
         ugcWorkflow = undefined;
+        ugcCharacterWorkflow = undefined;
         activeConfig = undefined;
         logger.info("archive_stopped");
       },
@@ -338,6 +371,10 @@ export default definePluginEntry({
         return isWorkspacePolicyCommand(event.content)
           ? { handled: true, text: "Workspace policy service is unavailable." }
           : undefined;
+      }
+      const characterResult = await runtime.ugcCharacterWorkflow?.handleBeforeDispatch(event, ctx);
+      if (characterResult) {
+        return characterResult;
       }
       await runtime.ugcWorkflow?.observeTurn({
         channelId: ctx.channelId,
@@ -375,6 +412,10 @@ export default definePluginEntry({
           return;
         }
         const binding = await runtime?.workspaceRegistry.lookup(job.accountId, job.groupId);
+        if (binding?.policyId === "UGC") {
+          await runtime?.ugcCharacterWorkflow?.rememberImage(job);
+          return;
+        }
         if (binding?.policyId === "KEEP_WATCHING") {
           if (!runtime?.keepWatchingPipeline) {
             logger.error("keep_watching_runtime_unavailable", {

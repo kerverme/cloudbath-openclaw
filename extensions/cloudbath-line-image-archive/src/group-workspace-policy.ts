@@ -18,7 +18,7 @@ const UNPAIR_COMMAND = /^(?:ยกเลิก\s+pairing|unpair\s+group)$/iu;
 
 const UGC_CAPABILITY_ACCESS: Readonly<Record<UgcCapabilityId, UgcCapabilityAccess>> = {
   PRODUCT_LIBRARY: "READ",
-  CHARACTER_LIBRARY: "READ",
+  CHARACTER_LIBRARY: "READ_WRITE",
   UGC_PROJECTS: "READ_WRITE",
   UGC_SHOTS: "READ_WRITE",
   AI_VIDEO_LIBRARY: "READ_WRITE",

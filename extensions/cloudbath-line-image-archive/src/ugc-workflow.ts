@@ -60,6 +60,8 @@ type NotionPropertyValue = {
   number?: number | null;
   relation?: Array<{ id?: string }>;
   select?: { name?: string } | null;
+  unique_id?: { number?: number; prefix?: string | null } | null;
+  auto_increment_id?: { number?: number; prefix?: string | null } | null;
   url?: string | null;
   files?: Array<{
     type?: string;
@@ -112,6 +114,11 @@ type UgcPrepareToolContext = {
   accountId?: string;
   nativeConversationId?: string;
 };
+
+type UgcCanonicalR2Identity = Readonly<{
+  endpoint: string;
+  bucketName: string;
+}>;
 
 /**
  * Status options the live UGC databases actually offer. Writing anything else
@@ -199,6 +206,31 @@ function plainText(property: NotionPropertyValue | undefined): string {
     .trim();
 }
 
+function generatedIdText(property: NotionPropertyValue | undefined): string {
+  if (property?.type !== "unique_id" && property?.type !== "auto_increment_id") {
+    return "";
+  }
+  const value = property.unique_id ?? property.auto_increment_id;
+  const number = value?.number;
+  if (!Number.isSafeInteger(number) || (number ?? 0) < 1) {
+    return "";
+  }
+  const prefix = value?.prefix?.trim();
+  return prefix ? `${prefix}-${number}` : String(number);
+}
+
+function generatedIdNumber(value: string): number | undefined {
+  const match = value
+    .normalize("NFKC")
+    .trim()
+    .match(/(?:^|[-#])(\d+)$/u);
+  if (!match?.[1]) {
+    return undefined;
+  }
+  const parsed = Number(match[1]);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined;
+}
+
 function richText(value: string): Record<string, unknown> {
   return { rich_text: [{ type: "text", text: { content: value.slice(0, 1_900) } }] };
 }
@@ -264,10 +296,51 @@ function safeHttpsUrl(value: string): string | undefined {
   }
 }
 
+function canonicalR2ObjectKey(
+  value: string,
+  config: UgcCanonicalR2Identity | undefined,
+): string | undefined {
+  if (!config?.endpoint || !config.bucketName) {
+    return undefined;
+  }
+  try {
+    const valueUrl = new URL(value);
+    const endpointUrl = new URL(config.endpoint);
+    if (
+      valueUrl.protocol !== "https:" ||
+      valueUrl.origin !== endpointUrl.origin ||
+      valueUrl.search ||
+      valueUrl.hash
+    ) {
+      return undefined;
+    }
+    const endpointParts = endpointUrl.pathname
+      .split("/")
+      .filter(Boolean)
+      .map((part) => decodeURIComponent(part));
+    const parts = valueUrl.pathname
+      .split("/")
+      .filter(Boolean)
+      .map((part) => decodeURIComponent(part));
+    for (const endpointPart of endpointParts) {
+      if (parts.shift() !== endpointPart) {
+        return undefined;
+      }
+    }
+    if (parts.shift() !== config.bucketName) {
+      return undefined;
+    }
+    return safeR2Key(parts.join("/"));
+  } catch {
+    return undefined;
+  }
+}
+
 function propertyReferences(
   page: NotionPage,
   names: readonly string[],
   kind: UgcReferenceAsset["kind"],
+  r2Identity?: UgcCanonicalR2Identity,
 ): UgcReferenceAsset[] {
   const references: UgcReferenceAsset[] = [];
   for (const name of names) {
@@ -283,6 +356,11 @@ function propertyReferences(
     ]);
     for (const raw of [...textValues, ...urlValues, ...fileValues]) {
       if (!raw) {
+        continue;
+      }
+      const canonicalObjectKey = canonicalR2ObjectKey(raw, r2Identity);
+      if (canonicalObjectKey) {
+        references.push({ kind, source: "r2", locator: canonicalObjectKey });
         continue;
       }
       const https = safeHttpsUrl(raw);
@@ -513,7 +591,7 @@ export class UgcNotionWorkflowClient {
     capabilities: Readonly<Record<UgcCapabilityId, NotionTarget>>;
     name: string;
   }): Promise<NotionPage> {
-    await this.schema(params.capabilityId, params.target, params.capabilities);
+    const source = await this.schema(params.capabilityId, params.target, params.capabilities);
     const records = await this.queryAll(params.target, {
       filter: { property: "Name", title: { contains: params.name.trim() } },
     });
@@ -521,14 +599,119 @@ export class UgcNotionWorkflowClient {
     const exact = records.filter(
       (record) => normalizedName(plainText(record.properties?.Name)) === wanted,
     );
-    if (exact.length !== 1) {
-      throw new Error(
-        exact.length === 0
-          ? `${params.capabilityId} record was not found`
-          : `${params.capabilityId} record is ambiguous`,
-      );
+    if (exact.length === 1) {
+      return exact[0]!;
     }
-    return exact[0]!;
+    if (exact.length > 1) {
+      throw new Error(`${params.capabilityId} record is ambiguous`);
+    }
+    const idSchemaType = source.properties?.["Character ID"]?.type;
+    const idNumber = generatedIdNumber(params.name);
+    if (
+      params.capabilityId === "CHARACTER_LIBRARY" &&
+      (idSchemaType === "unique_id" || idSchemaType === "auto_increment_id") &&
+      idNumber !== undefined
+    ) {
+      const byCode = await this.queryAll(params.target, {
+        filter: { property: "Character ID", unique_id: { equals: idNumber } },
+      });
+      const exactCode = byCode.filter(
+        (record) => normalizedName(generatedIdText(record.properties?.["Character ID"])) === wanted,
+      );
+      if (exactCode.length === 1) {
+        return exactCode[0]!;
+      }
+      if (exactCode.length > 1) {
+        throw new Error(`${params.capabilityId} record is ambiguous`);
+      }
+    }
+    throw new Error(`${params.capabilityId} record was not found`);
+  }
+
+  async saveCharacterAsset(params: {
+    target: NotionTarget;
+    capabilities: Readonly<Record<UgcCapabilityId, NotionTarget>>;
+    nameOrCode: string;
+    objectKey: string;
+    mode: "upsert" | "update";
+  }): Promise<{
+    name: string;
+    characterId: string;
+    status: "Active" | "Archived";
+    pageId: string;
+  }> {
+    const source = await this.schema("CHARACTER_LIBRARY", params.target, params.capabilities);
+    if (source.properties?.["Identity Reference R2 Keys"]?.type !== "rich_text") {
+      throw new Error("Character Library requires Identity Reference R2 Keys as rich text");
+    }
+    const statusSchema = source.properties?.Status;
+    if (statusSchema && statusSchema.type !== "select") {
+      throw new Error("Character Library Status property has an incompatible type");
+    }
+    if (
+      statusSchema?.type === "select" &&
+      !(statusSchema.select?.options ?? []).some((option) => option.name === "Active")
+    ) {
+      throw new Error("Character Library Status property is missing Active");
+    }
+    const idSchema = source.properties?.["Character ID"];
+    if (idSchema?.type !== "unique_id" && idSchema?.type !== "auto_increment_id") {
+      throw new Error("Character Library requires a generated Character ID property");
+    }
+    if (statusSchema?.type !== "select") {
+      throw new Error("Character Library requires a select Status property");
+    }
+    let existing: NotionPage | undefined;
+    try {
+      existing = await this.resolveNamedRecord({
+        capabilityId: "CHARACTER_LIBRARY",
+        target: params.target,
+        capabilities: params.capabilities,
+        name: params.nameOrCode,
+      });
+    } catch (error) {
+      if (!(error instanceof Error) || !error.message.endsWith("record was not found")) {
+        throw error;
+      }
+    }
+    if (!existing && params.mode === "update") {
+      throw new Error("CHARACTER_LIBRARY record was not found");
+    }
+    const page = existing?.id
+      ? await this.request<NotionPage>(`/v1/pages/${encodeURIComponent(existing.id)}`, {
+          method: "PATCH",
+          body: JSON.stringify({
+            properties: { "Identity Reference R2 Keys": richText(params.objectKey) },
+          }),
+        })
+      : await this.createPage(params.target, {
+          Name: title(params.nameOrCode.trim()),
+          Status: { select: { name: "Active" } },
+          "Identity Reference R2 Keys": richText(params.objectKey),
+        });
+    let safePage = this.assertPage(page, params.target);
+    let resolvedCharacterId = generatedIdText((existing ?? safePage).properties?.["Character ID"]);
+    if (!resolvedCharacterId && !existing && safePage.id) {
+      safePage = this.assertPage(
+        await this.request<NotionPage>(`/v1/pages/${encodeURIComponent(safePage.id)}`),
+        params.target,
+      );
+      resolvedCharacterId = generatedIdText(safePage.properties?.["Character ID"]);
+    }
+    if (!resolvedCharacterId) {
+      throw new Error("Character Library generated Character ID is unavailable");
+    }
+    const name = existing
+      ? plainText(existing.properties?.Name)
+      : plainText(safePage.properties?.Name) || params.nameOrCode.trim();
+    const status =
+      existing?.properties?.Status?.select?.name === "Archived" ? "Archived" : "Active";
+    return {
+      name,
+      characterId: resolvedCharacterId,
+      status,
+      pageId: safePage.id!,
+    };
   }
 
   private async createPage(
@@ -790,6 +973,7 @@ export class CloudbathUgcVideoWorkflow {
     /** Which project each trusted conversation is currently working on. */
     private readonly activeProjects: PluginStateKeyedStore<ActiveUgcProject>,
     private readonly now: () => number = Date.now,
+    private readonly r2Identity?: UgcCanonicalR2Identity,
   ) {}
 
   async observeTurn(params: {
@@ -1018,7 +1202,8 @@ export class CloudbathUgcVideoWorkflow {
               freezeCharacterLock({
                 code: entry.code,
                 page: entry.page,
-                readReferences: propertyReferences,
+                readReferences: (page, names, kind) =>
+                  propertyReferences(page, names, kind, this.r2Identity),
                 frozenAt,
               }),
             ),
