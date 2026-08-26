@@ -41,7 +41,6 @@ function lockOf(code: string, identity: string[], style: string[] = []): UgcChar
 describe("character identity lock", () => {
   it("reads the live Character Library property names", () => {
     expect(CHARACTER_IDENTITY_PROPERTIES).toEqual([
-      "Identity Asset URL",
       "Identity Reference R2 Keys",
       "Canonical Reference Set",
     ]);
@@ -53,8 +52,7 @@ describe("character identity lock", () => {
       code: "F1",
       page: { id: "page-f1", last_edited_time: FROZEN_AT },
       readReferences: readerFor({
-        "Identity Asset URL": ["characters/f1/main.png"],
-        "Identity Reference R2 Keys": ["characters/f1/identity-1.png"],
+        "Identity Reference R2 Keys": ["characters/f1/main.png"],
         "Canonical Reference Set": ["characters/f1/canonical.png"],
         Preview: ["https://example.com/f1-preview.png"],
         "Style Reference R2 Keys": ["characters/f1/style.png"],
@@ -70,13 +68,12 @@ describe("character identity lock", () => {
     expect(lock.styleReferences.map((asset) => asset.locator)).toEqual(["characters/f1/style.png"]);
   });
 
-  it("falls back to the first supported legacy primary field", () => {
+  it("falls back to Canonical Reference Set for a legacy row and never reads Preview", () => {
     const lock = freezeCharacterLock({
       code: "F1",
       page: { id: "page-f1" },
       readReferences: readerFor({
-        "Identity Reference R2 Keys": ["characters/f1/legacy.png"],
-        "Canonical Reference Set": ["characters/f1/secondary.png"],
+        "Canonical Reference Set": ["characters/f1/legacy.png"],
         Preview: ["https://example.com/f1-preview.png"],
       }),
       frozenAt: FROZEN_AT,

@@ -57,7 +57,7 @@ type R2CharacterClient = {
 export type SavedCharacterAsset = Readonly<{
   name: string;
   characterId: string;
-  status: "Active";
+  status: "Active" | "Archived";
   pageId: string;
 }>;
 
@@ -66,7 +66,6 @@ type CharacterNotionClient = {
     target: NotionTarget;
     capabilities: Readonly<Record<UgcCapabilityId, NotionTarget>>;
     nameOrCode: string;
-    canonicalUrl: string;
     objectKey: string;
     mode: "upsert" | "update";
   }): Promise<SavedCharacterAsset>;
@@ -290,7 +289,6 @@ export class UgcCharacterImageWorkflow {
         target: this.capabilities.CHARACTER_LIBRARY,
         capabilities: this.capabilities,
         nameOrCode: command.name,
-        canonicalUrl,
         objectKey,
         mode: command.mode,
       });

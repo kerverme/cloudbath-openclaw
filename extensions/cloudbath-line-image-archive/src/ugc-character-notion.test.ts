@@ -11,9 +11,8 @@ const TARGETS = {
   AI_IMAGE_LIBRARY: { databaseId: "b".repeat(32), dataSourceId: "c".repeat(32) },
 } as const satisfies Readonly<Record<UgcCapabilityId, object>>;
 
-const CANONICAL_URL =
-  "https://account.r2.cloudflarestorage.com/cloudbath/ugc/characters/kerver/main.png";
-const OBJECT_KEY = "ugc/characters/kerver/main.png";
+const OBJECT_KEY =
+  "ugc/characters/kerver/sha256/ab/abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd.png";
 
 function logger(): SafeLogger {
   return { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
@@ -28,6 +27,33 @@ function client(fetchImpl: typeof fetch): UgcNotionWorkflowClient {
   );
 }
 
+function liveCharacterSource(idType: "unique_id" | "auto_increment_id" = "unique_id") {
+  return {
+    object: "data_source",
+    id: TARGETS.CHARACTER_LIBRARY.dataSourceId,
+    parent: { type: "database_id", database_id: TARGETS.CHARACTER_LIBRARY.databaseId },
+    properties: {
+      Name: { type: "title" },
+      "Character ID":
+        idType === "unique_id"
+          ? { type: "unique_id", unique_id: { prefix: "CHAR" } }
+          : { type: "auto_increment_id", auto_increment_id: { prefix: "CHAR" } },
+      Status: {
+        type: "select",
+        select: { options: [{ name: "Active" }, { name: "Archived" }] },
+      },
+      "Identity Reference R2 Keys": { type: "rich_text" },
+      "Canonical Reference Set": { type: "rich_text" },
+      Preview: { type: "files" },
+      "Look Description": { type: "rich_text" },
+      "Style Tags": { type: "rich_text" },
+      "Reference Notes": { type: "rich_text" },
+      "Created At": { type: "created_time" },
+      "UGC Projects": { type: "relation", relation: { data_source_id: "f".repeat(32) } },
+    },
+  };
+}
+
 function titleText(value: string) {
   return { type: "title", title: [{ plain_text: value }] };
 }
@@ -36,21 +62,36 @@ function richText(value: string) {
   return { type: "rich_text", rich_text: [{ plain_text: value }] };
 }
 
-function source(properties: Record<string, unknown>) {
-  return {
-    object: "data_source",
-    id: TARGETS.CHARACTER_LIBRARY.dataSourceId,
-    parent: { type: "database_id", database_id: TARGETS.CHARACTER_LIBRARY.databaseId },
-    properties: { Name: { type: "title" }, ...properties },
-  };
-}
-
-function createdPage(properties: Record<string, unknown>, id = "character-page") {
+function characterPage(params: {
+  name: string;
+  number: number;
+  status?: "Active" | "Archived";
+  objectKey?: string;
+  id?: string;
+  idType?: "unique_id" | "auto_increment_id";
+}) {
+  const idType = params.idType ?? "unique_id";
   return {
     object: "page",
-    id,
+    id: params.id ?? "character-page",
     parent: { type: "data_source_id", data_source_id: TARGETS.CHARACTER_LIBRARY.dataSourceId },
-    properties,
+    properties: {
+      Name: titleText(params.name),
+      "Character ID":
+        idType === "unique_id"
+          ? {
+              type: "unique_id",
+              unique_id: { prefix: "CHAR", number: params.number },
+            }
+          : {
+              type: "auto_increment_id",
+              auto_increment_id: { prefix: "CHAR", number: params.number },
+            },
+      Status: { type: "select", select: { name: params.status ?? "Active" } },
+      "Identity Reference R2 Keys": richText(params.objectKey ?? OBJECT_KEY),
+      "Canonical Reference Set": richText("legacy/character.png"),
+      Preview: { type: "files", files: [] },
+    },
   };
 }
 
@@ -61,144 +102,158 @@ function requestBody(init: RequestInit | undefined): string {
   return init.body;
 }
 
-describe("UGC Character Library single-asset writer", () => {
-  it("creates one row using only Identity Asset URL and mirrors it to display-only Preview", async () => {
+describe("UGC Character Library live-schema writer", () => {
+  it("creates Kerver without writing the generated Character ID or duplicate identity fields", async () => {
     const writes: Array<Record<string, unknown>> = [];
     const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
-      const path = new URL(typeof input === "string" ? input : input.url).pathname;
-      if (path.startsWith("/v1/data_sources/") && !path.endsWith("/query")) {
-        return Response.json(
-          source({
-            "Character ID": { type: "rich_text" },
-            Status: { type: "select", select: { options: [{ name: "Active" }] } },
-            "Identity Asset URL": { type: "url" },
-            "Identity Reference R2 Keys": { type: "rich_text" },
-            "Canonical Reference Set": { type: "rich_text" },
-            Preview: { type: "url" },
-          }),
-        );
+      const pathname = new URL(typeof input === "string" ? input : input.url).pathname;
+      if (pathname.startsWith("/v1/data_sources/") && !pathname.endsWith("/query")) {
+        return Response.json(liveCharacterSource());
       }
-      if (path.endsWith("/query")) {
+      if (pathname.endsWith("/query")) {
         return Response.json({ results: [], has_more: false });
       }
-      if (path === "/v1/pages" && init?.method === "POST") {
+      if (pathname === "/v1/pages" && init?.method === "POST") {
         const body = JSON.parse(requestBody(init)) as { properties: Record<string, unknown> };
         writes.push(body.properties);
-        return Response.json(createdPage(body.properties));
+        return Response.json(characterPage({ name: "Kerver", number: 5 }));
       }
-      throw new Error(`Unexpected Notion request: ${path}`);
+      throw new Error(`Unexpected Notion request: ${pathname}`);
     }) as unknown as typeof fetch;
 
     const result = await client(fetchImpl).saveCharacterAsset({
       target: TARGETS.CHARACTER_LIBRARY,
       capabilities: TARGETS,
       nameOrCode: "Kerver",
-      canonicalUrl: CANONICAL_URL,
       objectKey: OBJECT_KEY,
       mode: "upsert",
     });
 
-    const properties = writes[0] ?? {};
-    expect(result).toMatchObject({ name: "Kerver", status: "Active", pageId: "character-page" });
-    expect(properties["Identity Asset URL"]).toEqual({ url: CANONICAL_URL });
-    expect(properties.Preview).toEqual({ url: CANONICAL_URL });
-    expect(properties).not.toHaveProperty("Identity Reference R2 Keys");
-    expect(properties).not.toHaveProperty("Canonical Reference Set");
+    expect(result).toEqual({
+      name: "Kerver",
+      characterId: "CHAR-5",
+      status: "Active",
+      pageId: "character-page",
+    });
+    expect(writes).toEqual([
+      {
+        Name: { title: [{ type: "text", text: { content: "Kerver" } }] },
+        Status: { select: { name: "Active" } },
+        "Identity Reference R2 Keys": {
+          rich_text: [{ type: "text", text: { content: OBJECT_KEY } }],
+        },
+      },
+    ]);
+    expect(writes[0]).not.toHaveProperty("Character ID");
+    expect(writes[0]).not.toHaveProperty("Identity Asset URL");
+    expect(writes[0]).not.toHaveProperty("Canonical Reference Set");
+    expect(writes[0]).not.toHaveProperty("Preview");
   });
 
-  it("updates an existing row resolved by Character ID without creating another row", async () => {
-    const patches: Record<string, unknown>[] = [];
+  it("accepts the live auto_increment_id shape and reads its generated value", async () => {
     const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
-      const path = new URL(typeof input === "string" ? input : input.url).pathname;
-      if (path.startsWith("/v1/data_sources/") && !path.endsWith("/query")) {
+      const pathname = new URL(typeof input === "string" ? input : input.url).pathname;
+      if (pathname.startsWith("/v1/data_sources/") && !pathname.endsWith("/query")) {
+        return Response.json(liveCharacterSource("auto_increment_id"));
+      }
+      if (pathname.endsWith("/query")) {
+        return Response.json({ results: [], has_more: false });
+      }
+      if (pathname === "/v1/pages" && init?.method === "POST") {
         return Response.json(
-          source({
-            "Character ID": { type: "rich_text" },
-            Status: { type: "select", select: { options: [{ name: "Active" }] } },
-            "Identity Asset URL": { type: "url" },
-          }),
+          characterPage({ name: "Kerver", number: 5, idType: "auto_increment_id" }),
         );
       }
-      if (path.endsWith("/query")) {
-        const body = JSON.parse(requestBody(init)) as { filter?: { property?: string } };
+      throw new Error(`Unexpected Notion request: ${pathname}`);
+    }) as unknown as typeof fetch;
+
+    const result = await client(fetchImpl).saveCharacterAsset({
+      target: TARGETS.CHARACTER_LIBRARY,
+      capabilities: TARGETS,
+      nameOrCode: "Kerver",
+      objectKey: OBJECT_KEY,
+      mode: "upsert",
+    });
+
+    expect(result.characterId).toBe("CHAR-5");
+  });
+
+  it("updates Kerver by exact Name and replaces only the primary canonical identity field", async () => {
+    const patches: Array<Record<string, unknown>> = [];
+    let createCount = 0;
+    const existing = characterPage({ name: "Kerver", number: 5, objectKey: "old/key.png" });
+    const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const pathname = new URL(typeof input === "string" ? input : input.url).pathname;
+      if (pathname.startsWith("/v1/data_sources/") && !pathname.endsWith("/query")) {
+        return Response.json(liveCharacterSource());
+      }
+      if (pathname.endsWith("/query")) {
+        return Response.json({ results: [existing], has_more: false });
+      }
+      if (pathname === "/v1/pages/character-page" && init?.method === "PATCH") {
+        const body = JSON.parse(requestBody(init)) as { properties: Record<string, unknown> };
+        patches.push(body.properties);
+        return Response.json(characterPage({ name: "Kerver", number: 5 }));
+      }
+      if (pathname === "/v1/pages" && init?.method === "POST") {
+        createCount += 1;
+      }
+      throw new Error(`Unexpected Notion request: ${pathname}`);
+    }) as unknown as typeof fetch;
+
+    const result = await client(fetchImpl).saveCharacterAsset({
+      target: TARGETS.CHARACTER_LIBRARY,
+      capabilities: TARGETS,
+      nameOrCode: "Kerver",
+      objectKey: OBJECT_KEY,
+      mode: "update",
+    });
+
+    expect(result.characterId).toBe("CHAR-5");
+    expect(createCount).toBe(0);
+    expect(patches).toEqual([
+      {
+        "Identity Reference R2 Keys": {
+          rich_text: [{ type: "text", text: { content: OBJECT_KEY } }],
+        },
+      },
+    ]);
+  });
+
+  it("can resolve the existing Notion-generated Character ID without writing it", async () => {
+    const filters: Array<Record<string, unknown> | undefined> = [];
+    const existing = characterPage({ name: "Kerver", number: 5 });
+    const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const pathname = new URL(typeof input === "string" ? input : input.url).pathname;
+      if (pathname.startsWith("/v1/data_sources/") && !pathname.endsWith("/query")) {
+        return Response.json(liveCharacterSource());
+      }
+      if (pathname.endsWith("/query")) {
+        const body = JSON.parse(requestBody(init)) as { filter?: Record<string, unknown> };
+        filters.push(body.filter);
         return Response.json({
-          results:
-            body.filter?.property === "Character ID"
-              ? [
-                  createdPage({
-                    Name: titleText("Kerver"),
-                    "Character ID": richText("CHAR-5"),
-                  }),
-                ]
-              : [],
+          results: body.filter?.property === "Character ID" ? [existing] : [],
           has_more: false,
         });
       }
-      if (path === "/v1/pages/character-page" && init?.method === "PATCH") {
-        const body = JSON.parse(requestBody(init)) as { properties: Record<string, unknown> };
-        patches.push(body.properties);
-        return Response.json(createdPage(body.properties));
+      if (pathname === "/v1/pages/character-page" && init?.method === "PATCH") {
+        return Response.json(existing);
       }
-      throw new Error(`Unexpected Notion request: ${path}`);
+      throw new Error(`Unexpected Notion request: ${pathname}`);
     }) as unknown as typeof fetch;
 
     const result = await client(fetchImpl).saveCharacterAsset({
       target: TARGETS.CHARACTER_LIBRARY,
       capabilities: TARGETS,
       nameOrCode: "CHAR-5",
-      canonicalUrl: CANONICAL_URL,
       objectKey: OBJECT_KEY,
       mode: "update",
     });
 
     expect(result).toMatchObject({ name: "Kerver", characterId: "CHAR-5" });
-    expect(patches).toHaveLength(1);
-    expect(
-      fetchImpl.mock.calls.some(
-        ([, init]) => init?.method === "POST" && requestBody(init).includes("parent"),
-      ),
-    ).toBe(false);
-  });
-
-  it("uses only the first supported legacy primary field and leaves files Preview untouched", async () => {
-    let created: Record<string, unknown> | undefined;
-    const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
-      const path = new URL(typeof input === "string" ? input : input.url).pathname;
-      if (path.startsWith("/v1/data_sources/") && !path.endsWith("/query")) {
-        return Response.json(
-          source({
-            "Character ID": { type: "rich_text" },
-            Status: { type: "select", select: { options: [{ name: "Active" }] } },
-            "Identity Reference R2 Keys": { type: "rich_text" },
-            "Canonical Reference Set": { type: "rich_text" },
-            Preview: { type: "files" },
-          }),
-        );
-      }
-      if (path.endsWith("/query")) {
-        return Response.json({ results: [], has_more: false });
-      }
-      if (path === "/v1/pages" && init?.method === "POST") {
-        const body = JSON.parse(requestBody(init)) as { properties: Record<string, unknown> };
-        created = body.properties;
-        return Response.json(createdPage(body.properties));
-      }
-      throw new Error(`Unexpected Notion request: ${path}`);
-    }) as unknown as typeof fetch;
-
-    await client(fetchImpl).saveCharacterAsset({
-      target: TARGETS.CHARACTER_LIBRARY,
-      capabilities: TARGETS,
-      nameOrCode: "Kerver",
-      canonicalUrl: CANONICAL_URL,
-      objectKey: OBJECT_KEY,
-      mode: "upsert",
+    expect(filters).toContainEqual({
+      property: "Character ID",
+      unique_id: { equals: 5 },
     });
-
-    expect(created?.["Identity Reference R2 Keys"]).toEqual({
-      rich_text: [{ type: "text", text: { content: OBJECT_KEY } }],
-    });
-    expect(created).not.toHaveProperty("Canonical Reference Set");
-    expect(created).not.toHaveProperty("Preview");
   });
 });

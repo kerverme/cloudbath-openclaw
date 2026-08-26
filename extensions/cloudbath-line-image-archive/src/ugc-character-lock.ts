@@ -29,7 +29,6 @@ export type LockableCharacterPage = {
  * resolving would reintroduce exactly the drift the lock exists to prevent.
  */
 export const CHARACTER_IDENTITY_PROPERTIES = [
-  "Identity Asset URL",
   "Identity Reference R2 Keys",
   "Canonical Reference Set",
 ] as const;

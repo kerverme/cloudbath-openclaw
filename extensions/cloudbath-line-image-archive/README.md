@@ -135,19 +135,17 @@ The object key is derived from the character slug and the actual image bytes:
 ugc/characters/<slug-name>/sha256/<first-two-hash-chars>/<sha256>.<detected-extension>
 ```
 
-The Character Library writer prefers these primary identity properties in order and writes exactly
-one of them: `Identity Asset URL` (URL), `Identity Reference R2 Keys` (rich text), then
-`Canonical Reference Set` (rich text). If `Preview` is a URL or rich-text property it mirrors the
-same canonical URL for display only. A files-type Preview is left untouched because a private R2
-object has no durable public file URL and signed query credentials must not be persisted.
+The Character Library writer uses the live production schema without mutating it. It writes exactly
+one canonical identity locator to `Identity Reference R2 Keys` (rich text), plus `Name` and
+`Status: Active` when creating a row. `Character ID` is Notion's generated unique ID and is read
+back after creation; the plugin never writes it. `Identity Asset URL` is neither required nor
+written. `Preview` is a files property used only for display and is left unchanged because a
+private R2 object has no durable public file URL and signed query credentials must not be persisted.
 
-For the normalized schema, add `Identity Asset URL` as a URL property while keeping `Name` as the
-title. Character saves require `Character ID` as rich text and `Status` as a select containing
-`Active`; `Preview` may be a display-only URL. Existing rows need no automatic migration: runtime
-reads the first usable property from the ordered primary list, never counts Preview as identity,
-and freezes only one canonical asset. Administrators can migrate legacy rows gradually by copying
-their chosen primary value into `Identity Asset URL`; runtime never creates or mutates database
-properties.
+Existing rows need no automatic migration. Runtime reads `Identity Reference R2 Keys` first and
+falls back to `Canonical Reference Set` only for legacy rows. It never counts `Preview` as an
+identity source and freezes exactly one canonical asset into an active project's character lock,
+so updating a Character Library row cannot change already-frozen projects.
 
 ## Universal asset identity
 
@@ -522,9 +520,8 @@ never reaches a scene.
 
 Identity references, in order (the first usable property wins):
 
-- `Identity Asset URL`
 - `Identity Reference R2 Keys`
-- `Canonical Reference Set`
+- `Canonical Reference Set` (legacy-read fallback only)
 
 Style references: `Style Reference R2 Keys`.
 

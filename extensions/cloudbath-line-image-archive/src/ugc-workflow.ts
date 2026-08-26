@@ -60,6 +60,8 @@ type NotionPropertyValue = {
   number?: number | null;
   relation?: Array<{ id?: string }>;
   select?: { name?: string } | null;
+  unique_id?: { number?: number; prefix?: string | null } | null;
+  auto_increment_id?: { number?: number; prefix?: string | null } | null;
   url?: string | null;
   files?: Array<{
     type?: string;
@@ -204,6 +206,31 @@ function plainText(property: NotionPropertyValue | undefined): string {
     .trim();
 }
 
+function generatedIdText(property: NotionPropertyValue | undefined): string {
+  if (property?.type !== "unique_id" && property?.type !== "auto_increment_id") {
+    return "";
+  }
+  const value = property.unique_id ?? property.auto_increment_id;
+  const number = value?.number;
+  if (!Number.isSafeInteger(number) || (number ?? 0) < 1) {
+    return "";
+  }
+  const prefix = value?.prefix?.trim();
+  return prefix ? `${prefix}-${number}` : String(number);
+}
+
+function generatedIdNumber(value: string): number | undefined {
+  const match = value
+    .normalize("NFKC")
+    .trim()
+    .match(/(?:^|[-#])(\d+)$/u);
+  if (!match?.[1]) {
+    return undefined;
+  }
+  const parsed = Number(match[1]);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined;
+}
+
 function richText(value: string): Record<string, unknown> {
   return { rich_text: [{ type: "text", text: { content: value.slice(0, 1_900) } }] };
 }
@@ -214,30 +241,6 @@ function title(value: string): Record<string, unknown> {
 
 function relation(pageId: string | undefined): Record<string, unknown> {
   return { relation: pageId ? [{ id: pageId }] : [] };
-}
-
-function characterId(value: string): string {
-  return `CHAR-${crypto
-    .createHash("sha256")
-    .update(normalizedName(value), "utf8")
-    .digest("hex")
-    .slice(0, 8)
-    .toUpperCase()}`;
-}
-
-function assetPropertyValue(params: {
-  type: string;
-  canonicalUrl: string;
-  objectKey: string;
-  preferObjectKey: boolean;
-}): Record<string, unknown> {
-  if (params.type === "url") {
-    return { url: params.canonicalUrl };
-  }
-  if (params.type === "rich_text") {
-    return richText(params.preferObjectKey ? params.objectKey : params.canonicalUrl);
-  }
-  throw new Error("Character Library asset property has an incompatible type");
 }
 
 function hashKey(...parts: string[]): string {
@@ -602,15 +605,18 @@ export class UgcNotionWorkflowClient {
     if (exact.length > 1) {
       throw new Error(`${params.capabilityId} record is ambiguous`);
     }
+    const idSchemaType = source.properties?.["Character ID"]?.type;
+    const idNumber = generatedIdNumber(params.name);
     if (
       params.capabilityId === "CHARACTER_LIBRARY" &&
-      source.properties?.["Character ID"]?.type === "rich_text"
+      (idSchemaType === "unique_id" || idSchemaType === "auto_increment_id") &&
+      idNumber !== undefined
     ) {
       const byCode = await this.queryAll(params.target, {
-        filter: { property: "Character ID", rich_text: { contains: params.name.trim() } },
+        filter: { property: "Character ID", unique_id: { equals: idNumber } },
       });
       const exactCode = byCode.filter(
-        (record) => normalizedName(plainText(record.properties?.["Character ID"])) === wanted,
+        (record) => normalizedName(generatedIdText(record.properties?.["Character ID"])) === wanted,
       );
       if (exactCode.length === 1) {
         return exactCode[0]!;
@@ -626,27 +632,17 @@ export class UgcNotionWorkflowClient {
     target: NotionTarget;
     capabilities: Readonly<Record<UgcCapabilityId, NotionTarget>>;
     nameOrCode: string;
-    canonicalUrl: string;
     objectKey: string;
     mode: "upsert" | "update";
   }): Promise<{
     name: string;
     characterId: string;
-    status: "Active";
+    status: "Active" | "Archived";
     pageId: string;
   }> {
     const source = await this.schema("CHARACTER_LIBRARY", params.target, params.capabilities);
-    const primaryCandidates = [
-      { name: "Identity Asset URL", preferObjectKey: false },
-      { name: "Identity Reference R2 Keys", preferObjectKey: true },
-      { name: "Canonical Reference Set", preferObjectKey: true },
-    ] as const;
-    const primary = primaryCandidates.find((candidate) => {
-      const type = source.properties?.[candidate.name]?.type;
-      return type === "url" || type === "rich_text";
-    });
-    if (!primary) {
-      throw new Error("Character Library has no supported canonical identity property");
+    if (source.properties?.["Identity Reference R2 Keys"]?.type !== "rich_text") {
+      throw new Error("Character Library requires Identity Reference R2 Keys as rich text");
     }
     const statusSchema = source.properties?.Status;
     if (statusSchema && statusSchema.type !== "select") {
@@ -659,14 +655,12 @@ export class UgcNotionWorkflowClient {
       throw new Error("Character Library Status property is missing Active");
     }
     const idSchema = source.properties?.["Character ID"];
-    if (idSchema?.type !== "rich_text") {
-      throw new Error("Character Library requires a rich-text Character ID property");
+    if (idSchema?.type !== "unique_id" && idSchema?.type !== "auto_increment_id") {
+      throw new Error("Character Library requires a generated Character ID property");
     }
     if (statusSchema?.type !== "select") {
       throw new Error("Character Library requires a select Status property");
     }
-    const previewSchema = source.properties?.Preview;
-
     let existing: NotionPage | undefined;
     try {
       existing = await this.resolveNamedRecord({
@@ -683,48 +677,39 @@ export class UgcNotionWorkflowClient {
     if (!existing && params.mode === "update") {
       throw new Error("CHARACTER_LIBRARY record was not found");
     }
-    const name = existing ? plainText(existing.properties?.Name) : params.nameOrCode.trim();
-    const idFromRecord = existing ? plainText(existing.properties?.["Character ID"]) : "";
-    const resolvedCharacterId = idFromRecord || characterId(name);
-    const primaryType = source.properties?.[primary.name]?.type;
-    if (primaryType !== "url" && primaryType !== "rich_text") {
-      throw new Error("Character Library canonical identity property became incompatible");
-    }
-    const properties: Record<string, unknown> = {
-      Name: title(name),
-      [primary.name]: assetPropertyValue({
-        type: primaryType,
-        canonicalUrl: params.canonicalUrl,
-        objectKey: params.objectKey,
-        preferObjectKey: primary.preferObjectKey,
-      }),
-      "Character ID": richText(resolvedCharacterId),
-      Status: { select: { name: "Active" } },
-      // A Notion files property requires a public or expiring external URL.
-      // The canonical R2 object is private and queryless, so an existing files
-      // Preview is left untouched rather than persisting signed credentials.
-      ...(previewSchema?.type === "url" || previewSchema?.type === "rich_text"
-        ? {
-            Preview: assetPropertyValue({
-              type: previewSchema.type,
-              canonicalUrl: params.canonicalUrl,
-              objectKey: params.objectKey,
-              preferObjectKey: false,
-            }),
-          }
-        : {}),
-    };
     const page = existing?.id
       ? await this.request<NotionPage>(`/v1/pages/${encodeURIComponent(existing.id)}`, {
           method: "PATCH",
-          body: JSON.stringify({ properties }),
+          body: JSON.stringify({
+            properties: { "Identity Reference R2 Keys": richText(params.objectKey) },
+          }),
         })
-      : await this.createPage(params.target, properties);
-    const safePage = this.assertPage(page, params.target);
+      : await this.createPage(params.target, {
+          Name: title(params.nameOrCode.trim()),
+          Status: { select: { name: "Active" } },
+          "Identity Reference R2 Keys": richText(params.objectKey),
+        });
+    let safePage = this.assertPage(page, params.target);
+    let resolvedCharacterId = generatedIdText((existing ?? safePage).properties?.["Character ID"]);
+    if (!resolvedCharacterId && !existing && safePage.id) {
+      safePage = this.assertPage(
+        await this.request<NotionPage>(`/v1/pages/${encodeURIComponent(safePage.id)}`),
+        params.target,
+      );
+      resolvedCharacterId = generatedIdText(safePage.properties?.["Character ID"]);
+    }
+    if (!resolvedCharacterId) {
+      throw new Error("Character Library generated Character ID is unavailable");
+    }
+    const name = existing
+      ? plainText(existing.properties?.Name)
+      : plainText(safePage.properties?.Name) || params.nameOrCode.trim();
+    const status =
+      existing?.properties?.Status?.select?.name === "Archived" ? "Archived" : "Active";
     return {
       name,
       characterId: resolvedCharacterId,
-      status: "Active",
+      status,
       pageId: safePage.id!,
     };
   }
