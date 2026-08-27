@@ -1,9 +1,13 @@
 import crypto from "node:crypto";
 import type { PluginStateKeyedStore } from "openclaw/plugin-sdk/plugin-state-runtime";
 import type { LineGroupWorkspacePolicyRegistry } from "./group-workspace-policy.js";
-import { readSafeMediaFile } from "./pipeline.js";
-import { detectCanonicalImageExtensionFromBytes } from "./r2.js";
 import type { InboundImageJob, NotionTarget, SafeLogger, UgcCapabilityId } from "./types.js";
+import {
+  UgcCharacterMediaError,
+  UgcCharacterPendingMediaStore,
+  type CapturedCharacterMedia,
+  type UgcCharacterMediaFailureReason,
+} from "./ugc-character-pending-media.js";
 
 const LATEST_IMAGE_TTL_MS = 24 * 60 * 60 * 1_000;
 const CHARACTER_COMMAND =
@@ -11,17 +15,18 @@ const CHARACTER_COMMAND =
 const CHARACTER_UPDATE_COMMAND =
   /^(?:อัปเดต\s*ตัวละคร\s+(.+?)\s+ด้วย\s*รูปล่าสุด|เปลี่ยน\s*รูป\s*ตัวละคร\s+(.+?)\s+เป็น\s*รูปล่าสุด)\s*(?:ครับ|ค่ะ|คะ|หน่อย)?[.!。]?$/iu;
 
-export const CLOUDBATH_UGC_LATEST_CHARACTER_IMAGE_NAMESPACE = "ugc-latest-character-image-v1";
+export const CLOUDBATH_UGC_LATEST_CHARACTER_IMAGE_NAMESPACE = "ugc-latest-character-image-v2";
 export const CLOUDBATH_UGC_CHARACTER_IMAGE_MAX_ENTRIES = 10_000;
 
 export type LatestCharacterImage = Readonly<{
-  version: 1;
+  version: 2;
   accountId: string;
   lineGroupId: string;
   ownerSenderId: string;
-  job: InboundImageJob;
+  durableMediaKey: string;
   contentLength: number;
   sha256: string;
+  sourceReceivedAt: string;
   capturedAt: string;
 }>;
 
@@ -166,6 +171,8 @@ export function buildCanonicalR2AssetUrl(params: {
 }
 
 export class UgcCharacterImageWorkflow {
+  private readonly pendingMedia: UgcCharacterPendingMediaStore;
+
   constructor(
     private readonly registry: LineGroupWorkspacePolicyRegistry,
     private readonly latestImages: PluginStateKeyedStore<LatestCharacterImage>,
@@ -182,7 +189,31 @@ export class UgcCharacterImageWorkflow {
     }>,
     private readonly logger: SafeLogger,
     private readonly now: () => number = Date.now,
-  ) {}
+    pendingMedia?: UgcCharacterPendingMediaStore,
+  ) {
+    this.pendingMedia =
+      pendingMedia ?? new UgcCharacterPendingMediaStore(this.stateDir, this.imageMaxBytes);
+  }
+
+  private async activeDurableMediaKeys(): Promise<Set<string>> {
+    const entries = await this.latestImages.entries();
+    return new Set(entries.map((entry) => entry.value.durableMediaKey));
+  }
+
+  private reasonFor(error: unknown): UgcCharacterMediaFailureReason | "STATE_REGISTER_FAILED" {
+    return error instanceof UgcCharacterMediaError ? error.reason : "STATE_REGISTER_FAILED";
+  }
+
+  async cleanupExpiredPendingImages(): Promise<void> {
+    try {
+      const activeKeys = await this.activeDurableMediaKeys();
+      await this.pendingMedia.sweepExpired(activeKeys, this.now() - LATEST_IMAGE_TTL_MS);
+    } catch {
+      this.logger.warn("ugc_character_image_cleanup_failed", {
+        reason: "STATE_REGISTER_FAILED",
+      });
+    }
+  }
 
   async rememberImage(job: InboundImageJob): Promise<void> {
     const binding = await this.registry.lookup(job.accountId, job.groupId);
@@ -193,29 +224,70 @@ export class UgcCharacterImageWorkflow {
     ) {
       return;
     }
+    const scopeKey = latestImageKey(binding.accountId, binding.groupId, binding.boundByOwnerId);
+    let captured: CapturedCharacterMedia;
     try {
-      const media = await readSafeMediaFile({
-        filePath: job.mediaPath,
-        stateDir: this.stateDir,
-        maxBytes: this.imageMaxBytes,
-      });
-      await this.latestImages.register(
-        latestImageKey(binding.accountId, binding.groupId, binding.boundByOwnerId),
-        {
-          version: 1,
-          accountId: binding.accountId,
-          lineGroupId: binding.groupId,
-          ownerSenderId: binding.boundByOwnerId,
-          job,
-          contentLength: media.size,
-          sha256: media.sha256,
-          capturedAt: new Date(this.now()).toISOString(),
+      captured = await this.pendingMedia.capture(job.mediaPath, scopeKey);
+    } catch (error) {
+      this.logger.warn("ugc_character_image_rejected", { reason: this.reasonFor(error) });
+      return;
+    }
+    let previous: LatestCharacterImage | undefined;
+    let accepted = false;
+    const next: LatestCharacterImage = {
+      version: 2,
+      accountId: binding.accountId,
+      lineGroupId: binding.groupId,
+      ownerSenderId: binding.boundByOwnerId,
+      durableMediaKey: captured.durableMediaKey,
+      contentLength: captured.contentLength,
+      sha256: captured.sha256,
+      sourceReceivedAt: job.receivedAt,
+      capturedAt: new Date(this.now()).toISOString(),
+    };
+    try {
+      if (!this.latestImages.update) {
+        throw new Error("Atomic plugin state update is unavailable");
+      }
+      await this.latestImages.update(
+        scopeKey,
+        (current) => {
+          previous = current;
+          if (current && Date.parse(current.sourceReceivedAt) > Date.parse(next.sourceReceivedAt)) {
+            return undefined;
+          }
+          accepted = true;
+          return next;
         },
         { ttlMs: LATEST_IMAGE_TTL_MS },
       );
-      this.logger.info("ugc_character_image_remembered", { messageId: job.messageId });
+    } catch (error) {
+      const activeKeys = await this.activeDurableMediaKeys().catch(() => new Set<string>());
+      if (!activeKeys.has(captured.durableMediaKey)) {
+        await this.pendingMedia.delete(captured.durableMediaKey).catch(() => undefined);
+      }
+      this.logger.warn("ugc_character_image_rejected", { reason: this.reasonFor(error) });
+      return;
+    }
+    if (!accepted) {
+      const activeKeys = await this.activeDurableMediaKeys().catch(() => new Set<string>());
+      if (!activeKeys.has(captured.durableMediaKey)) {
+        await this.pendingMedia.delete(captured.durableMediaKey).catch(() => undefined);
+      }
+      return;
+    }
+    this.logger.info("ugc_character_image_remembered");
+    try {
+      if (previous && previous.durableMediaKey !== captured.durableMediaKey) {
+        const activeKeys = await this.activeDurableMediaKeys();
+        if (!activeKeys.has(previous.durableMediaKey)) {
+          await this.pendingMedia.delete(previous.durableMediaKey);
+        }
+      }
     } catch {
-      this.logger.warn("ugc_character_image_rejected");
+      this.logger.warn("ugc_character_image_cleanup_failed", {
+        reason: "STATE_REGISTER_FAILED",
+      });
     }
   }
 
@@ -262,22 +334,20 @@ export class UgcCharacterImageWorkflow {
       return { handled: true, text: "ไม่พบรูปล่าสุดจากเจ้าของในกลุ่มนี้ กรุณาส่งรูปก่อน" };
     }
     try {
-      const media = await readSafeMediaFile({
-        filePath: latest.job.mediaPath,
-        stateDir: this.stateDir,
-        maxBytes: this.imageMaxBytes,
+      const media = await this.pendingMedia.read({
+        durableMediaKey: latest.durableMediaKey,
+        scopeKey: latestImageKey(binding.accountId, binding.groupId, binding.boundByOwnerId),
         expectedSize: latest.contentLength,
         expectedSha256: latest.sha256,
       });
-      const extension = detectCanonicalImageExtensionFromBytes(media.bytes);
-      const contentType = contentTypeForExtension(extension);
-      const objectKey = characterObjectKey(command.name, media.sha256, extension);
+      const contentType = contentTypeForExtension(media.extension);
+      const objectKey = characterObjectKey(command.name, media.sha256, media.extension);
       await this.r2.ensureObject({
         body: media.bytes,
         bucketName: this.r2Config.bucketName,
         objectKey,
         contentType,
-        contentLength: media.size,
+        contentLength: media.contentLength,
         sha256: media.sha256,
       });
       const canonicalUrl = buildCanonicalR2AssetUrl({
@@ -303,8 +373,11 @@ export class UgcCharacterImageWorkflow {
           `Status: ${saved.status}`,
         ].join("\n"),
       };
-    } catch {
-      this.logger.warn("ugc_character_save_failed", { mode: command.mode });
+    } catch (error) {
+      this.logger.warn("ugc_character_save_failed", {
+        mode: command.mode,
+        reason: error instanceof UgcCharacterMediaError ? error.reason : "SAVE_FAILED",
+      });
       return {
         handled: true,
         text:

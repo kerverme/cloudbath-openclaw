@@ -124,10 +124,12 @@ function pluginConfig(): Record<string, unknown> {
   };
 }
 
-export function createWorkspacePolicyServiceContext(): OpenClawPluginServiceContext {
+export function createWorkspacePolicyServiceContext(
+  stateDir = "/test/state",
+): OpenClawPluginServiceContext {
   return {
     config: {},
-    stateDir: "/test/state",
+    stateDir,
     logger: { info() {}, warn() {}, error() {}, debug() {} },
   };
 }
