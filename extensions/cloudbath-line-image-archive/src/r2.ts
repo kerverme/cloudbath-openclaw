@@ -12,7 +12,11 @@ import type { ArchiveConfig, SafeLogger } from "./types.js";
 
 type S3Command = HeadObjectCommand | PutObjectCommand;
 type S3Like = { send(command: S3Command): Promise<unknown> };
-type PresignLike = typeof getSignedUrl;
+type PresignLike = (
+  client: S3Client,
+  command: GetObjectCommand,
+  options: { expiresIn: number },
+) => Promise<string>;
 
 const CHARACTER_VIEW_URL_EXPIRY_SECONDS = 15 * 60;
 

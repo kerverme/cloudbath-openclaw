@@ -136,7 +136,7 @@ describe("content-addressed R2 archive", () => {
       credentials: { accessKeyId: "access", secretAccessKey: "secret" },
     });
     const presign = vi.fn(
-      async () =>
+      async (_client: S3Client, _command: GetObjectCommand, _options: { expiresIn: number }) =>
         "https://account.r2.cloudflarestorage.com/bucket/ugc/characters/kerver/main.png?X-Amz-Expires=900&X-Amz-Signature=temporary",
     );
     const archive = new R2ArchiveClient(

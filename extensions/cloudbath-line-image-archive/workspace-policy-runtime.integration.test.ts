@@ -144,7 +144,6 @@ describe("Cloudbath workspace policy runtime across plugin registries", () => {
         isGroup: true,
       },
       {
-        runId: "save-run",
         channelId: "line",
         accountId: "line-account",
         conversationId: "line:group:Cpilotgroup",
@@ -251,7 +250,6 @@ describe("Cloudbath workspace policy runtime across plugin registries", () => {
       },
       {
         messageId: "message-1",
-        runId: "image-run",
         channelId: "line",
         accountId: "line-account",
         conversationId: "line:group:Cpilotgroup",
@@ -272,7 +270,6 @@ describe("Cloudbath workspace policy runtime across plugin registries", () => {
         isGroup: true,
       },
       {
-        runId: "save-run",
         channelId: "line",
         accountId: "line-account",
         conversationId: "line:group:Cpilotgroup",
