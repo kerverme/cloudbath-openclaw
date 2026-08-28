@@ -73,6 +73,7 @@ jobs:
             extensions/cloudbath-line-image-archive/src/r2.test.ts \
             extensions/cloudbath-line-image-archive/src/retry.test.ts \
             extensions/cloudbath-line-image-archive/src/ugc-character-image.test.ts \
+            extensions/cloudbath-line-image-archive/src/ugc-multi-character.test.ts \
             extensions/cloudbath-line-image-archive/src/ugc-workflow.test.ts \
             extensions/cloudbath-line-image-archive/workspace-policy-runtime.integration.test.ts \
             test/cloudbath-workspace-policy-prewarm.integration.test.ts

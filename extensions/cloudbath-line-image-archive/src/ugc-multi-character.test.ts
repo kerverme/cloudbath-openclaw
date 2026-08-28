@@ -332,7 +332,13 @@ function stubNotion(characters: CharacterRow[], products: ProductRow[] = [DEFAUL
       ([input]) => String(input).includes("/videos") && !String(input).includes("/videos/models"),
     );
 
-  return { fetchImpl, created, paidVideoCalls, storedPages, patchCount };
+  const productLookupCalls = () =>
+    (fetchImpl as unknown as { mock: { calls: Array<[string | URL]> } }).mock.calls.filter(
+      ([input]) =>
+        String(input).includes(`/v1/data_sources/${TARGETS.PRODUCT_LIBRARY.dataSourceId}/query`),
+    );
+
+  return { fetchImpl, created, paidVideoCalls, productLookupCalls, storedPages, patchCount };
 }
 
 function buildWorkflow(characters: CharacterRow[], products: ProductRow[] = [DEFAULT_PRODUCT]) {
@@ -881,6 +887,92 @@ describe("explicit project finalization", () => {
 });
 
 describe("A) character-only project", () => {
+  it("advertises one explicit character-only model contract without the legacy singular field", () => {
+    const flow = buildWorkflow(CAST);
+
+    expect(flow.tool.description).toContain(
+      "productName is optional and must be omitted for character-only requests",
+    );
+    expect(flow.tool.parameters).toMatchObject({
+      properties: {
+        productName: {
+          description: expect.stringContaining("Omit for character-only requests"),
+        },
+        characterNames: {
+          description: expect.stringContaining("Character Library names only"),
+        },
+      },
+    });
+    expect(flow.tool.parameters.properties).not.toHaveProperty("characterName");
+    expect(flow.tool.parameters.required).not.toContain("productName");
+  });
+
+  it("normalizes the production character-only scenario and reaches prepared scope", async () => {
+    const flow = buildWorkflow([
+      { id: "page-twong", name: "Twong", identity: ["characters/twong/main.webp"] },
+      { id: "page-twong2", name: "Twong2", identity: ["characters/twong2/main.webp"] },
+    ]);
+
+    const result = await flow.tool.execute("production-character-only", {
+      characterNames: ["Twong", "Twong2"],
+      prompt: "Twong walks past Twong2 while they talk quietly",
+      durationSeconds: 10,
+      aspectRatio: "9:16",
+      resolution: "720p",
+      audio: true,
+      sceneNumber: 1,
+      startNewProject: true,
+    });
+
+    expect(result.details).toMatchObject({
+      resolution: "ugc_scope_prepared",
+      characters: ["Twong", "Twong2"],
+      settings: {
+        durationSeconds: 10,
+        aspectRatio: "9:16",
+        resolution: "720p",
+        audio: true,
+      },
+    });
+    const pending = await flow.pending.lookup(ugcPendingKey(SESSION_KEY));
+    expect(pending).toMatchObject({
+      characterLocks: [{ code: "Twong" }, { code: "Twong2" }],
+      durationSeconds: 10,
+      aspectRatio: "9:16",
+      resolution: "720p",
+      audio: true,
+    });
+    expect(pending?.productPageId).toBeUndefined();
+    expect(flow.productLookupCalls()).toHaveLength(0);
+    expect(flow.paidVideoCalls()).toHaveLength(0);
+  });
+
+  it("rejects a duplicated product/character role before Product lookup or writes", async () => {
+    const flow = buildWorkflow([
+      { id: "page-twong", name: "Twong", identity: ["characters/twong/main.webp"] },
+      { id: "page-twong2", name: "Twong2", identity: ["characters/twong2/main.webp"] },
+    ]);
+
+    await expect(
+      flow.tool.execute("malformed-duplicate-role", {
+        productName: " twong ",
+        characterNames: ["Twong", "Twong2"],
+        characterName: "Twong",
+        prompt: "Twong walks past Twong2 while they talk quietly",
+        durationSeconds: 10,
+        aspectRatio: "9:16",
+        resolution: "720p",
+        audio: true,
+        sceneNumber: 1,
+        startNewProject: true,
+      }),
+    ).rejects.toThrow(/must not duplicate a characterNames entry/u);
+    expect(flow.productLookupCalls()).toHaveLength(0);
+    expect(flow.created).toHaveLength(0);
+    expect(flow.patchCount()).toBe(0);
+    expect(flow.paidVideoCalls()).toHaveLength(0);
+  });
+
   it("creates a project and two scenes with no product at all", async () => {
     const flow = buildWorkflow(CAST);
 
