@@ -3343,6 +3343,7 @@ async function dispatchReplyFromConfigInner(
                     senderIsOwner: dispatchSenderIsOwner,
                   },
                   {
+                    messageId: hookContext.messageId,
                     channelId: hookContext.channelId,
                     accountId: hookContext.accountId,
                     conversationId: inboundClaimContext.conversationId,

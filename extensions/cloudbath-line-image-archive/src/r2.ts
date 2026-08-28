@@ -1,15 +1,24 @@
 import fsp from "node:fs/promises";
 import {
+  GetObjectCommand,
   HeadObjectCommand,
   PutObjectCommand,
   S3Client,
   type HeadObjectCommandOutput,
 } from "@aws-sdk/client-s3";
+import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { retryableAwsError, withBoundedRetry, type RetryOptions } from "./retry.js";
 import type { ArchiveConfig, SafeLogger } from "./types.js";
 
 type S3Command = HeadObjectCommand | PutObjectCommand;
 type S3Like = { send(command: S3Command): Promise<unknown> };
+type PresignLike = (
+  client: S3Client,
+  command: GetObjectCommand,
+  options: { expiresIn: number },
+) => Promise<string>;
+
+const CHARACTER_VIEW_URL_EXPIRY_SECONDS = 15 * 60;
 
 export type EnsureR2ObjectParams = {
   body: Uint8Array;
@@ -107,22 +116,46 @@ export async function detectCanonicalImageExtension(filePath: string): Promise<s
 
 export class R2ArchiveClient {
   private readonly client: S3Like;
+  private readonly signingClient?: S3Client;
 
   constructor(
     config: ArchiveConfig["r2"],
     private readonly retry: ArchiveConfig["retry"],
     private readonly logger: SafeLogger,
     client?: S3Like,
+    private readonly presign: PresignLike = getSignedUrl,
   ) {
-    this.client = (client ??
-      new S3Client({
-        region: "auto",
-        endpoint: config.endpoint,
-        credentials: {
-          accessKeyId: config.accessKeyId,
-          secretAccessKey: config.secretAccessKey,
-        },
-      })) as S3Like;
+    if (client) {
+      this.client = client;
+      this.signingClient = client instanceof S3Client ? client : undefined;
+      return;
+    }
+    const configuredClient = new S3Client({
+      region: "auto",
+      endpoint: config.endpoint,
+      credentials: {
+        accessKeyId: config.accessKeyId,
+        secretAccessKey: config.secretAccessKey,
+      },
+    });
+    this.client = configuredClient;
+    this.signingClient = configuredClient;
+  }
+
+  async createTemporaryReadUrl(params: { bucketName: string; objectKey: string }): Promise<string> {
+    if (!this.signingClient || !params.bucketName.trim() || !params.objectKey.trim()) {
+      throw new Error("R2 signed read URL is unavailable");
+    }
+    const signed = await this.presign(
+      this.signingClient,
+      new GetObjectCommand({ Bucket: params.bucketName, Key: params.objectKey }),
+      { expiresIn: CHARACTER_VIEW_URL_EXPIRY_SECONDS },
+    );
+    const url = new URL(signed);
+    if (url.protocol !== "https:" || url.username || url.password || !url.search) {
+      throw new Error("R2 signed read URL is invalid");
+    }
+    return url.toString();
   }
 
   private retryOptions(operation: string): RetryOptions {

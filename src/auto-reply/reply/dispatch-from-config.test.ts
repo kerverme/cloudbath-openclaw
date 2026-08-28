@@ -10444,12 +10444,15 @@ describe("before_dispatch hook", () => {
   it("skips model dispatch when hook returns handled", async () => {
     hookMocks.runner.runBeforeDispatch.mockResolvedValue({ handled: true, text: "Blocked" });
     const dispatcher = createDispatcher();
+    const replyResolver = vi.fn(async () => ({ text: "model reply" }) satisfies ReplyPayload);
     const result = await dispatchReplyFromConfig({
       ctx: createHookCtx(),
       cfg: emptyConfig,
       dispatcher,
+      replyResolver,
     });
     expect(dispatcher.sendFinalReply).toHaveBeenCalledWith({ text: "Blocked" });
+    expect(replyResolver).not.toHaveBeenCalled();
     expect(result.queuedFinal).toBe(true);
   });
 
@@ -10483,6 +10486,7 @@ describe("before_dispatch hook", () => {
       GroupChannel: "ops-room",
       ChatType: "direct",
       Timestamp: 123,
+      MessageSidFull: "line-message-123",
     });
 
     const result = await dispatchReplyFromConfig({ ctx, cfg: emptyConfig, dispatcher });
@@ -10500,7 +10504,7 @@ describe("before_dispatch hook", () => {
             senderId?: unknown;
             timestamp?: unknown;
           },
-          { channelId?: unknown; senderId?: unknown },
+          { channelId?: unknown; messageId?: unknown; senderId?: unknown },
         ]
       | undefined;
     expect(beforeDispatchCall?.[0]?.content).toBe("command body");
@@ -10510,6 +10514,7 @@ describe("before_dispatch hook", () => {
     expect(beforeDispatchCall?.[0]?.isGroup).toBe(true);
     expect(beforeDispatchCall?.[0]?.timestamp).toBe(123);
     expect(beforeDispatchCall?.[1]?.channelId).toBe("telegram");
+    expect(beforeDispatchCall?.[1]?.messageId).toBe("line-message-123");
     expect(beforeDispatchCall?.[1]?.senderId).toBe("signal:user:alice");
     expect(dispatcher.sendFinalReply).not.toHaveBeenCalled();
     const routeCall = firstRouteReplyCall() as

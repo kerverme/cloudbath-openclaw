@@ -489,6 +489,8 @@ export type PluginHookBeforeDispatchEvent = {
 };
 
 export type PluginHookBeforeDispatchContext = {
+  /** Canonical inbound message identifier shared with message_received. */
+  messageId?: string;
   channelId?: string;
   accountId?: string;
   conversationId?: string;

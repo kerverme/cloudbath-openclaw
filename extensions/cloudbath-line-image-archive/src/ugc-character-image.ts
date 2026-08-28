@@ -10,6 +10,7 @@ import {
 } from "./ugc-character-pending-media.js";
 
 const LATEST_IMAGE_TTL_MS = 24 * 60 * 60 * 1_000;
+const LINE_IMAGE_ACKNOWLEDGEMENT = "เห็นรูปแล้ว ต้องการให้ช่วยอะไร?";
 const CHARACTER_COMMAND =
   /^(?:(?:เก็บ|บันทึก)\s*(?:รูปนี้|รูปล่าสุด)\s*เป็น\s*ตัวละคร\s*ชื่อ|ใช้\s*รูปล่าสุด\s*สร้าง\s*ตัวละคร\s*ชื่อ)\s+(.+?)\s*(?:ครับ|ค่ะ|คะ|หน่อย)?[.!。]?$/iu;
 const CHARACTER_UPDATE_COMMAND =
@@ -43,9 +44,12 @@ type BeforeDispatchEvent = {
 };
 
 type BeforeDispatchContext = {
+  messageId?: string;
+  runId?: string;
   channelId?: string;
   accountId?: string;
   conversationId?: string;
+  sessionKey?: string;
 };
 
 type R2CharacterClient = {
@@ -57,6 +61,7 @@ type R2CharacterClient = {
     contentLength: number;
     sha256: string;
   }): Promise<{ kind: "uploaded" | "existing"; etag?: string }>;
+  createTemporaryReadUrl(params: { bucketName: string; objectKey: string }): Promise<string>;
 };
 
 export type SavedCharacterAsset = Readonly<{
@@ -148,30 +153,9 @@ function characterObjectKey(name: string, sha256: string, extension: string): st
   return `ugc/characters/${slugName(name)}/sha256/${sha256.slice(0, 2)}/${sha256}${extension}`;
 }
 
-export function buildCanonicalR2AssetUrl(params: {
-  endpoint: string;
-  bucketName: string;
-  objectKey: string;
-}): string {
-  const url = new URL(params.endpoint);
-  if (url.protocol !== "https:" || !params.bucketName.trim()) {
-    throw new Error("UGC character R2 configuration is unavailable");
-  }
-  const encodedPath = [
-    ...url.pathname.split("/").filter(Boolean),
-    params.bucketName,
-    ...params.objectKey.split("/"),
-  ]
-    .map((segment) => encodeURIComponent(segment))
-    .join("/");
-  url.pathname = `/${encodedPath}`;
-  url.search = "";
-  url.hash = "";
-  return url.toString();
-}
-
 export class UgcCharacterImageWorkflow {
   private readonly pendingMedia: UgcCharacterPendingMediaStore;
+  private readonly pendingInboundImageTurns = new Map<string, Promise<boolean>>();
 
   constructor(
     private readonly registry: LineGroupWorkspacePolicyRegistry,
@@ -204,6 +188,45 @@ export class UgcCharacterImageWorkflow {
     return error instanceof UgcCharacterMediaError ? error.reason : "STATE_REGISTER_FAILED";
   }
 
+  private inboundImageTurnKey(context: BeforeDispatchContext): string | undefined {
+    const scope = [context.channelId, context.accountId, context.conversationId]
+      .map((value) => value?.trim() ?? "")
+      .join("\u0000");
+    const messageId = context.messageId?.trim();
+    if (messageId) {
+      return `message:${scope}:${messageId}`;
+    }
+    const runId = context.runId?.trim();
+    if (runId) {
+      return `run:${scope}:${runId}`;
+    }
+    const sessionKey = context.sessionKey?.trim();
+    return sessionKey ? `session:${sessionKey}` : undefined;
+  }
+
+  beginInboundImageTurn(job: InboundImageJob, context: BeforeDispatchContext): Promise<boolean> {
+    const task = this.rememberImage(job);
+    const turnKey = this.inboundImageTurnKey(context);
+    if (turnKey) {
+      // Register before the first await so before_dispatch can join the exact
+      // media capture even though message_received itself is fire-and-forget.
+      this.pendingInboundImageTurns.set(turnKey, task);
+    }
+    return task;
+  }
+
+  private async consumeInboundImageTurn(
+    context: BeforeDispatchContext,
+  ): Promise<boolean | undefined> {
+    const turnKey = this.inboundImageTurnKey(context);
+    const pending = turnKey ? this.pendingInboundImageTurns.get(turnKey) : undefined;
+    if (!turnKey || !pending) {
+      return undefined;
+    }
+    this.pendingInboundImageTurns.delete(turnKey);
+    return await pending;
+  }
+
   async cleanupExpiredPendingImages(): Promise<void> {
     try {
       const activeKeys = await this.activeDurableMediaKeys();
@@ -215,14 +238,13 @@ export class UgcCharacterImageWorkflow {
     }
   }
 
-  async rememberImage(job: InboundImageJob): Promise<void> {
+  async rememberImage(job: InboundImageJob): Promise<boolean> {
     const binding = await this.registry.lookup(job.accountId, job.groupId);
-    if (
-      binding?.policyId !== "UGC" ||
-      !job.userId?.trim() ||
-      binding.boundByOwnerId !== job.userId.trim()
-    ) {
-      return;
+    if (binding?.policyId !== "UGC") {
+      return false;
+    }
+    if (!job.userId?.trim() || binding.boundByOwnerId !== job.userId.trim()) {
+      return true;
     }
     const scopeKey = latestImageKey(binding.accountId, binding.groupId, binding.boundByOwnerId);
     let captured: CapturedCharacterMedia;
@@ -230,7 +252,7 @@ export class UgcCharacterImageWorkflow {
       captured = await this.pendingMedia.capture(job.mediaPath, scopeKey);
     } catch (error) {
       this.logger.warn("ugc_character_image_rejected", { reason: this.reasonFor(error) });
-      return;
+      return true;
     }
     let previous: LatestCharacterImage | undefined;
     let accepted = false;
@@ -267,14 +289,14 @@ export class UgcCharacterImageWorkflow {
         await this.pendingMedia.delete(captured.durableMediaKey).catch(() => undefined);
       }
       this.logger.warn("ugc_character_image_rejected", { reason: this.reasonFor(error) });
-      return;
+      return true;
     }
     if (!accepted) {
       const activeKeys = await this.activeDurableMediaKeys().catch(() => new Set<string>());
       if (!activeKeys.has(captured.durableMediaKey)) {
         await this.pendingMedia.delete(captured.durableMediaKey).catch(() => undefined);
       }
-      return;
+      return true;
     }
     this.logger.info("ugc_character_image_remembered");
     try {
@@ -289,6 +311,7 @@ export class UgcCharacterImageWorkflow {
         reason: "STATE_REGISTER_FAILED",
       });
     }
+    return true;
   }
 
   async handleBeforeDispatch(
@@ -297,6 +320,9 @@ export class UgcCharacterImageWorkflow {
   ): Promise<{ handled: true; text?: string } | undefined> {
     if (context.channelId?.trim().toLowerCase() !== "line") {
       return undefined;
+    }
+    if ((await this.consumeInboundImageTurn(context)) === true) {
+      return { handled: true, text: LINE_IMAGE_ACKNOWLEDGEMENT };
     }
     const command = parseUgcCharacterImageCommand(event.content);
     if (!command) {
@@ -350,8 +376,7 @@ export class UgcCharacterImageWorkflow {
         contentLength: media.contentLength,
         sha256: media.sha256,
       });
-      const canonicalUrl = buildCanonicalR2AssetUrl({
-        endpoint: this.r2Config.endpoint,
+      const viewUrl = await this.r2.createTemporaryReadUrl({
         bucketName: this.r2Config.bucketName,
         objectKey,
       });
@@ -369,7 +394,7 @@ export class UgcCharacterImageWorkflow {
           "บันทึกตัวละครเรียบร้อย:",
           `Name: ${saved.name}`,
           `Character ID: ${saved.characterId}`,
-          `Canonical URL: ${canonicalUrl}`,
+          `View URL: ${viewUrl}`,
           `Status: ${saved.status}`,
         ].join("\n"),
       };

@@ -7,7 +7,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { EnsureR2ObjectParams } from "./r2.js";
 import type { InboundImageJob, LineGroupPolicyBinding, SafeLogger } from "./types.js";
 import {
-  buildCanonicalR2AssetUrl,
   parseUgcCharacterImageCommand,
   type LatestCharacterImage,
   UgcCharacterImageWorkflow,
@@ -96,6 +95,12 @@ describe("UGC latest-image character workflow", () => {
         ensureObjectInputs.push(input);
         return { kind: "uploaded" as const };
       }),
+      createTemporaryReadUrl: vi.fn(
+        async (input: { bucketName: string; objectKey: string }) =>
+          ["https://account.r2.cloudflarestorage.com", input.bucketName, input.objectKey].join(
+            "/",
+          ) + "?X-Amz-Expires=900&X-Amz-Signature=test-signature",
+      ),
     };
     const notion = {
       saveCharacterAsset: vi.fn(async (input: { nameOrCode: string }) => ({
@@ -155,7 +160,7 @@ describe("UGC latest-image character workflow", () => {
     expect(parseUgcCharacterImageCommand(content)).toEqual({ mode, name: "Kerver" });
   });
 
-  it("safely uploads the owner's latest same-group image and returns one canonical URL", async () => {
+  it("safely uploads the owner's latest same-group image and returns one temporary view URL", async () => {
     const { workflow, r2, notion, ensureObjectInputs } = harness();
     await workflow.rememberImage(job());
 
@@ -179,9 +184,99 @@ describe("UGC latest-image character workflow", () => {
       /^ugc\/characters\/kerver\/sha256\/[a-f0-9]{2}\/[a-f0-9]{64}\.png$/u,
     );
     expect(notion.saveCharacterAsset).toHaveBeenCalledOnce();
+    expect(notion.saveCharacterAsset).toHaveBeenCalledWith(
+      expect.objectContaining({ objectKey: ensureObjectInputs[0]?.objectKey }),
+    );
+    expect(r2.ensureObject.mock.invocationCallOrder[0]).toBeLessThan(
+      r2.createTemporaryReadUrl.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
+    );
     expect(result?.text).toContain("Name: Kerver");
     expect(result?.text).toContain("Character ID: CHAR-KERVER");
-    expect(result?.text?.match(/Canonical URL:/gu)).toHaveLength(1);
+    expect(result?.text?.match(/View URL:/gu)).toHaveLength(1);
+    expect(result?.text).toContain("X-Amz-Expires=900&X-Amz-Signature=test-signature");
+    expect(result?.text).not.toContain("Canonical URL:");
+    expect(result?.text).not.toContain("unit-test-access");
+    expect(result?.text).not.toContain("unit-test-secret");
+  });
+
+  it("commits the owner's durable latest image before acknowledging the image turn", async () => {
+    const { workflow, latestImages, r2 } = harness();
+    const imageTurn = workflow.beginInboundImageTurn(job(), {
+      messageId: "message-owner-image",
+      runId: "image-run",
+      channelId: "line",
+      accountId: "primary",
+      conversationId: "line:group:C-ugc",
+      sessionKey: "agent:main:line:group:C-ugc",
+    });
+    const acknowledgement = await workflow.handleBeforeDispatch(
+      { content: "", senderId: "U-owner", senderIsOwner: true, isGroup: true },
+      {
+        messageId: "message-owner-image",
+        runId: "image-run",
+        channelId: "line",
+        accountId: "primary",
+        conversationId: "line:group:C-ugc",
+        sessionKey: "agent:main:line:group:C-ugc",
+      },
+    );
+
+    await expect(imageTurn).resolves.toBe(true);
+    expect(acknowledgement).toEqual({
+      handled: true,
+      text: "เห็นรูปแล้ว ต้องการให้ช่วยอะไร?",
+    });
+    expect(latestImages.values.size).toBe(1);
+
+    const save = await workflow.handleBeforeDispatch(
+      {
+        content: "เก็บรูปนี้เป็นตัวละครชื่อ Kerver",
+        senderId: "U-owner",
+        senderIsOwner: true,
+        isGroup: true,
+      },
+      {
+        runId: "save-run",
+        channelId: "line",
+        accountId: "primary",
+        conversationId: "line:group:C-ugc",
+        sessionKey: "agent:main:line:group:C-ugc",
+      },
+    );
+    expect(save?.text).toContain("บันทึกตัวละครเรียบร้อย");
+    expect(r2.ensureObject).toHaveBeenCalledOnce();
+  });
+
+  it("acknowledges another participant's image without replacing the owner's latest image", async () => {
+    const { workflow, latestImages } = harness();
+    await workflow.rememberImage(job());
+    const ownerLatest = Array.from(latestImages.values.values())[0];
+    const imageTurn = workflow.beginInboundImageTurn(job("C-ugc", "U-other"), {
+      messageId: "message-other-image",
+      runId: "other-image-run",
+      channelId: "line",
+      accountId: "primary",
+      conversationId: "line:group:C-ugc",
+      sessionKey: "agent:main:line:group:C-ugc",
+    });
+    const acknowledgement = await workflow.handleBeforeDispatch(
+      { content: "", senderId: "U-other", senderIsOwner: false, isGroup: true },
+      {
+        messageId: "message-other-image",
+        runId: "other-image-run",
+        channelId: "line",
+        accountId: "primary",
+        conversationId: "line:group:C-ugc",
+        sessionKey: "agent:main:line:group:C-ugc",
+      },
+    );
+
+    await expect(imageTurn).resolves.toBe(true);
+    expect(acknowledgement).toEqual({
+      handled: true,
+      text: "เห็นรูปแล้ว ต้องการให้ช่วยอะไร?",
+    });
+    expect(Array.from(latestImages.values.values())).toEqual([ownerLatest]);
   });
 
   it("fails closed for non-owner commands without touching R2 or Notion", async () => {
@@ -475,19 +570,5 @@ describe("UGC latest-image character workflow", () => {
 
     expect(await fsp.stat(expiredPath).catch(() => undefined)).toBeUndefined();
     expect((await fsp.stat(activePath)).isFile()).toBe(true);
-  });
-});
-
-describe("canonical private R2 asset URL", () => {
-  it("is stable, HTTPS, queryless, and encodes key segments once", () => {
-    expect(
-      buildCanonicalR2AssetUrl({
-        endpoint: "https://account.r2.cloudflarestorage.com",
-        bucketName: "cloudbath",
-        objectKey: "ugc/characters/แม่ กำปอง/main.png",
-      }),
-    ).toBe(
-      "https://account.r2.cloudflarestorage.com/cloudbath/ugc/characters/%E0%B9%81%E0%B8%A1%E0%B9%88%20%E0%B8%81%E0%B8%B3%E0%B8%9B%E0%B8%AD%E0%B8%87/main.png",
-    );
   });
 });

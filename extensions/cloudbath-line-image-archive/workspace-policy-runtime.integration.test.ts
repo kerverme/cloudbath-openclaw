@@ -109,7 +109,9 @@ describe("Cloudbath workspace policy runtime across plugin registries", () => {
       boundByOwnerId: "owner-user",
       boundAt: "2026-08-26T00:00:00.000Z",
     });
-    const rememberImage = vi.spyOn(workflow, "rememberImage").mockResolvedValue();
+    const beginInboundImageTurn = vi
+      .spyOn(workflow, "beginInboundImageTurn")
+      .mockResolvedValue(true);
     const handleCommand = vi
       .spyOn(workflow, "handleBeforeDispatch")
       .mockResolvedValue({ handled: true, text: "character-saved" });
@@ -149,11 +151,16 @@ describe("Cloudbath workspace policy runtime across plugin registries", () => {
       },
     );
 
-    expect(rememberImage).toHaveBeenCalledWith(
+    expect(beginInboundImageTurn).toHaveBeenCalledWith(
       expect.objectContaining({
         accountId: "line-account",
         groupId: "Cpilotgroup",
         userId: "owner-user",
+      }),
+      expect.objectContaining({
+        channelId: "line",
+        accountId: "line-account",
+        conversationId: "line:group:Cpilotgroup",
       }),
     );
     expect(handleCommand).toHaveBeenCalledOnce();
@@ -212,12 +219,13 @@ describe("Cloudbath workspace policy runtime across plugin registries", () => {
       });
     const prewarm = registerWorkspacePolicyPlugin(state);
 
-    await prewarm.messageReceived(
+    const messageReceived = prewarm.messageReceived(
       {
         from: "line:group:Cpilotgroup",
         senderId: "owner-user",
         content: "",
         messageId: "message-1",
+        runId: "image-run",
         timestamp: Date.parse("2026-08-26T00:00:00.000Z"),
         metadata: {
           originatingTo: "line:group:Cpilotgroup",
@@ -229,8 +237,30 @@ describe("Cloudbath workspace policy runtime across plugin registries", () => {
         channelId: "line",
         accountId: "line-account",
         conversationId: "line:group:Cpilotgroup",
+        messageId: "message-1",
+        runId: "image-run",
       },
     );
+    const acknowledgement = await prewarm.beforeDispatch(
+      {
+        content: "",
+        senderId: "owner-user",
+        senderIsOwner: true,
+        isGroup: true,
+      },
+      {
+        messageId: "message-1",
+        channelId: "line",
+        accountId: "line-account",
+        conversationId: "line:group:Cpilotgroup",
+        sessionKey: "agent:main:line:group:Cpilotgroup",
+      },
+    );
+    await messageReceived;
+    expect(acknowledgement).toEqual({
+      handled: true,
+      text: "เห็นรูปแล้ว ต้องการให้ช่วยอะไร?",
+    });
     await fsp.unlink(saved.path);
     const result = await prewarm.beforeDispatch(
       {

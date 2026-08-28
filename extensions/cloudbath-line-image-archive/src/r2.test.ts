@@ -1,7 +1,12 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { HeadObjectCommand, PutObjectCommand } from "@aws-sdk/client-s3";
+import {
+  GetObjectCommand,
+  HeadObjectCommand,
+  PutObjectCommand,
+  S3Client,
+} from "@aws-sdk/client-s3";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   buildContentAddressedObjectKey,
@@ -22,6 +27,7 @@ describe("content-addressed R2 archive", () => {
   let filePath: string;
 
   beforeEach(async () => {
+    vi.clearAllMocks();
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "cloudbath-r2-"));
     filePath = path.join(tempDir, "untrusted-name.bin");
     await fs.writeFile(
@@ -121,5 +127,46 @@ describe("content-addressed R2 archive", () => {
       }),
     ).resolves.toEqual({ kind: "existing", etag: "existing" });
     expect(client.send).toHaveBeenCalledTimes(1);
+  });
+
+  it("creates a private 15-minute HTTPS GET URL without logging credentials", async () => {
+    const client = new S3Client({
+      region: "auto",
+      endpoint: "https://account.r2.cloudflarestorage.com",
+      credentials: { accessKeyId: "access", secretAccessKey: "secret" },
+    });
+    const presign = vi.fn(
+      async (_client: S3Client, _command: GetObjectCommand, _options: { expiresIn: number }) =>
+        "https://account.r2.cloudflarestorage.com/bucket/ugc/characters/kerver/main.png?X-Amz-Expires=900&X-Amz-Signature=temporary",
+    );
+    const archive = new R2ArchiveClient(
+      {
+        accountId: "account",
+        accessKeyId: "access",
+        secretAccessKey: "secret",
+        bucketName: "bucket",
+        endpoint: "https://account.r2.cloudflarestorage.com",
+        keyPrefix: "",
+      },
+      { maxAttempts: 2, baseDelayMs: 1, maxDelayMs: 2 },
+      logger,
+      client,
+      presign,
+    );
+
+    const url = await archive.createTemporaryReadUrl({
+      bucketName: "bucket",
+      objectKey: "ugc/characters/kerver/main.png",
+    });
+
+    expect(url).toContain("X-Amz-Expires=900&X-Amz-Signature=temporary");
+    const command = presign.mock.calls[0]?.[1];
+    expect(command).toBeInstanceOf(GetObjectCommand);
+    expect(command?.input).toEqual({ Bucket: "bucket", Key: "ugc/characters/kerver/main.png" });
+    expect(presign.mock.calls[0]?.[2]).toEqual({ expiresIn: 900 });
+    expect(logger.debug).not.toHaveBeenCalled();
+    expect(logger.info).not.toHaveBeenCalled();
+    expect(logger.warn).not.toHaveBeenCalled();
+    expect(logger.error).not.toHaveBeenCalled();
   });
 });

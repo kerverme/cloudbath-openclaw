@@ -412,11 +412,18 @@ export default definePluginEntry({
         if (!job) {
           return;
         }
-        const binding = await runtime?.workspaceRegistry.lookup(job.accountId, job.groupId);
-        if (binding?.policyId === "UGC") {
-          await runtime?.ugcCharacterWorkflow?.rememberImage(job);
+        const characterImageTurn = runtime?.ugcCharacterWorkflow?.beginInboundImageTurn(job, {
+          messageId: event.messageId ?? ctx.messageId,
+          runId: event.runId ?? ctx.runId,
+          channelId: ctx.channelId,
+          accountId: ctx.accountId,
+          conversationId: ctx.conversationId,
+          sessionKey: event.sessionKey ?? ctx.sessionKey,
+        });
+        if (characterImageTurn && (await characterImageTurn)) {
           return;
         }
+        const binding = await runtime?.workspaceRegistry.lookup(job.accountId, job.groupId);
         if (binding?.policyId === "KEEP_WATCHING") {
           if (!runtime?.keepWatchingPipeline) {
             logger.error("keep_watching_runtime_unavailable", {
