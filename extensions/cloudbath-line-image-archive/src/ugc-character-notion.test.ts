@@ -438,6 +438,79 @@ describe("UGC Character Library live-schema writer", () => {
     expect(patches[0]).not.toHaveProperty("Identity Reference R2 Keys");
   });
 
+  it("preserves Twong's existing stable view URL on repeated explicit migration", async () => {
+    const twong = characterPage({
+      name: "Twong",
+      number: 6,
+      primaryObjectKey: OBJECT_KEY.replace("kerver", "twong"),
+      previewUrl: `${PUBLIC_BASE_URL}/c/CHAR-6/ponmlkjihgfedcba`,
+    });
+    const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const pathname = requestPathname(input);
+      if (pathname.startsWith("/v1/data_sources/") && !pathname.endsWith("/query")) {
+        return Response.json(liveCharacterSource());
+      }
+      if (pathname.endsWith("/query")) {
+        const body = JSON.parse(requestBody(init)) as { filter?: { property?: string } };
+        return Response.json({
+          results: body.filter?.property === "Character ID" ? [twong] : [],
+          has_more: false,
+        });
+      }
+      throw new Error(`Unexpected Notion request: ${pathname}`);
+    }) as unknown as typeof fetch;
+
+    const result = await client(fetchImpl).ensureCharacterViewUrl({
+      target: TARGETS.CHARACTER_LIBRARY,
+      capabilities: TARGETS,
+      characterId: "CHAR-6",
+      publicAssetBaseUrl: PUBLIC_BASE_URL,
+    });
+
+    expect(result.objectKey).toBe(OBJECT_KEY.replace("kerver", "twong"));
+    expect(result.viewUrl).toBe(`${PUBLIC_BASE_URL}/c/CHAR-6/ponmlkjihgfedcba`);
+    expect(fetchImpl).not.toHaveBeenCalledWith(
+      expect.stringContaining("/v1/pages/"),
+      expect.objectContaining({ method: "PATCH" }),
+    );
+  });
+
+  it("refuses to migrate an Archived Character", async () => {
+    const twong = characterPage({
+      name: "Twong",
+      number: 6,
+      status: "Archived",
+      primaryObjectKey: OBJECT_KEY.replace("kerver", "twong"),
+    });
+    const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const pathname = requestPathname(input);
+      if (pathname.startsWith("/v1/data_sources/") && !pathname.endsWith("/query")) {
+        return Response.json(liveCharacterSource());
+      }
+      if (pathname.endsWith("/query")) {
+        const body = JSON.parse(requestBody(init)) as { filter?: { property?: string } };
+        return Response.json({
+          results: body.filter?.property === "Character ID" ? [twong] : [],
+          has_more: false,
+        });
+      }
+      throw new Error(`Unexpected Notion request: ${pathname}`);
+    }) as unknown as typeof fetch;
+
+    await expect(
+      client(fetchImpl).ensureCharacterViewUrl({
+        target: TARGETS.CHARACTER_LIBRARY,
+        capabilities: TARGETS,
+        characterId: "CHAR-6",
+        publicAssetBaseUrl: PUBLIC_BASE_URL,
+      }),
+    ).rejects.toThrow("Character private asset is unavailable");
+    expect(fetchImpl).not.toHaveBeenCalledWith(
+      expect.stringContaining("/v1/pages/"),
+      expect.objectContaining({ method: "PATCH" }),
+    );
+  });
+
   it("fails closed for archived characters", async () => {
     const archived = characterPage({
       name: "Twong",

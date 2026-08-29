@@ -828,6 +828,9 @@ export class UgcNotionWorkflowClient {
     if (generatedIdText(page.properties?.["Character ID"]) !== params.characterId) {
       throw new Error("Character private asset is unavailable");
     }
+    if (page.properties?.Status?.select?.name !== "Active") {
+      throw new Error("Character private asset is unavailable");
+    }
     const objectKey = characterObjectKey(page);
     const existing = existingCharacterViewUrl(page, params.publicAssetBaseUrl, params.characterId);
     const viewUrl =

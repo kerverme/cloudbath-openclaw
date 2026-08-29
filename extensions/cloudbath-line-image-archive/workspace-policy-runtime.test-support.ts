@@ -14,6 +14,7 @@ import plugin from "./index.js";
 import { tryGetCloudbathWorkspacePolicyRuntime } from "./src/workspace-policy-runtime.js";
 
 type StoredValue = { value: unknown; createdAt: number; expiresAt?: number };
+type OpenClawPluginHttpRouteParams = Parameters<OpenClawPluginApi["registerHttpRoute"]>[0];
 export type BeforeDispatchHook = PluginHookHandlerMap["before_dispatch"];
 export type BeforeToolCallHook = PluginHookHandlerMap["before_tool_call"];
 export type AfterToolCallHook = PluginHookHandlerMap["after_tool_call"];
@@ -142,12 +143,14 @@ export function registerWorkspacePolicyPlugin(
   beforeToolCall: BeforeToolCallHook;
   afterToolCall: AfterToolCallHook;
   messageReceived: MessageReceivedHook;
+  httpRoute: OpenClawPluginHttpRouteParams;
 } {
   let service: OpenClawPluginService | undefined;
   let beforeDispatch: BeforeDispatchHook | undefined;
   let beforeToolCall: BeforeToolCallHook | undefined;
   let afterToolCall: AfterToolCallHook | undefined;
   let messageReceived: MessageReceivedHook | undefined;
+  let httpRoute: OpenClawPluginHttpRouteParams | undefined;
   const on: OpenClawPluginApi["on"] = (hookName, handler) => {
     if (hookName === "before_dispatch") {
       beforeDispatch = handler as BeforeDispatchHook;
@@ -170,13 +173,23 @@ export function registerWorkspacePolicyPlugin(
     registerService(next) {
       service = next;
     },
+    registerHttpRoute(next) {
+      httpRoute = next;
+    },
     on,
   });
   plugin.register?.(api);
-  if (!service || !beforeDispatch || !beforeToolCall || !afterToolCall || !messageReceived) {
+  if (
+    !service ||
+    !beforeDispatch ||
+    !beforeToolCall ||
+    !afterToolCall ||
+    !messageReceived ||
+    !httpRoute
+  ) {
     throw new Error("Cloudbath plugin did not register its service and workspace hooks");
   }
-  return { service, beforeDispatch, beforeToolCall, afterToolCall, messageReceived };
+  return { service, beforeDispatch, beforeToolCall, afterToolCall, messageReceived, httpRoute };
 }
 
 export function getWorkspacePolicyRuntimeForTest() {
