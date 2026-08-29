@@ -381,6 +381,9 @@ export class UgcCharacterImageWorkflow {
         return { handled: true, text: "สร้างลิงก์ตัวละครไม่สำเร็จ กรุณาตรวจสอบ Character ID" };
       }
     }
+    if (!command) {
+      return undefined;
+    }
     if (
       !this.r2Config.endpoint ||
       !this.r2Config.bucketName ||
