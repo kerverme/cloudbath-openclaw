@@ -1,5 +1,58 @@
 // Focused public test helpers for plugin runtime, registry, and setup fixtures.
 
+import { AUTH_TOKEN, sendRequest, withGatewayServer } from "../gateway/server-http.test-harness.js";
+import {
+  createGatewayPluginRequestHandler,
+  shouldEnforceGatewayAuthForPluginPath,
+} from "../gateway/server/plugins-http.js";
+import { createSubsystemLogger } from "../logging/subsystem.js";
+import { createEmptyPluginRegistry as createEmptyPluginRegistryForTest } from "../plugins/registry-empty.js";
+import type { OpenClawPluginHttpRouteParams } from "../plugins/types.js";
+
+/** Exercise a plugin-authenticated HTTP route through a token-protected Gateway without credentials. */
+export async function requestPluginHttpRouteWithoutGatewayAuthForTest(params: {
+  pluginId: string;
+  route: OpenClawPluginHttpRouteParams;
+  path: string;
+}): Promise<Awaited<ReturnType<typeof sendRequest>>> {
+  const registry = createEmptyPluginRegistryForTest();
+  registry.httpRoutes.push({
+    pluginId: params.pluginId,
+    source: "test",
+    path: params.route.path,
+    auth: params.route.auth,
+    match: params.route.match ?? "exact",
+    handler: params.route.handler,
+    ...(params.route.handleUpgrade ? { handleUpgrade: params.route.handleUpgrade } : {}),
+    ...(params.route.gatewayRuntimeScopeSurface
+      ? { gatewayRuntimeScopeSurface: params.route.gatewayRuntimeScopeSurface }
+      : {}),
+    ...(params.route.nodeCapability ? { nodeCapability: params.route.nodeCapability } : {}),
+  });
+  const handlePluginRequest = createGatewayPluginRequestHandler({
+    registry,
+    log: createSubsystemLogger("plugin-http-test"),
+  });
+  let response: Awaited<ReturnType<typeof sendRequest>> | undefined;
+
+  await withGatewayServer({
+    prefix: "plugin-http-gateway-auth-",
+    resolvedAuth: AUTH_TOKEN,
+    overrides: {
+      handlePluginRequest,
+      shouldEnforcePluginGatewayAuth: (pathContext) =>
+        shouldEnforceGatewayAuthForPluginPath(registry, pathContext),
+    },
+    run: async (server) => {
+      response = await sendRequest(server, { path: params.path });
+    },
+  });
+  if (!response) {
+    throw new Error("Gateway plugin route test did not produce a response");
+  }
+  return response;
+}
+
 export { setDefaultChannelPluginRegistryForTests } from "../commands/channel-test-registry.js";
 export {
   createEmptyPluginRegistry,

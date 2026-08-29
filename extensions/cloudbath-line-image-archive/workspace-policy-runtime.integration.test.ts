@@ -4,20 +4,11 @@ import path from "node:path";
 import { saveMediaStream } from "openclaw/plugin-sdk/media-store";
 import type { OpenClawPluginService } from "openclaw/plugin-sdk/plugin-entry";
 import {
+  requestPluginHttpRouteWithoutGatewayAuthForTest,
   resetGlobalHookRunner,
   resetPluginRuntimeStateForTest,
 } from "openclaw/plugin-sdk/plugin-test-runtime";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  AUTH_TOKEN,
-  sendRequest,
-  withGatewayServer,
-} from "../../src/gateway/server-http.test-harness.js";
-import { createTestRegistry } from "../../src/gateway/server/__tests__/test-utils.js";
-import {
-  createGatewayPluginRequestHandler,
-  shouldEnforceGatewayAuthForPluginPath,
-} from "../../src/gateway/server/plugins-http.js";
 import { R2ArchiveClient } from "./src/r2.js";
 import { UgcNotionWorkflowClient } from "./src/ugc-workflow.js";
 import { tryGetCloudbathWorkspacePolicyRuntime } from "./src/workspace-policy-runtime.js";
@@ -72,42 +63,14 @@ describe("Cloudbath workspace policy runtime across plugin registries", () => {
         bytes: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
         contentType: "image/png",
       });
-    const routeRegistry = createTestRegistry({
-      httpRoutes: [
-        {
-          pluginId: "cloudbath-line-image-archive",
-          source: "test",
-          path: gateway.httpRoute.path,
-          auth: gateway.httpRoute.auth,
-          match: gateway.httpRoute.match ?? "exact",
-          handler: gateway.httpRoute.handler,
-        },
-      ],
-    });
-    const handlePluginRequest = createGatewayPluginRequestHandler({
-      registry: routeRegistry,
-      log: { warn: vi.fn() } as unknown as Parameters<
-        typeof createGatewayPluginRequestHandler
-      >[0]["log"],
+    const response = await requestPluginHttpRouteWithoutGatewayAuthForTest({
+      pluginId: "cloudbath-line-image-archive",
+      route: gateway.httpRoute,
+      path: "/c/CHAR-6/abcdefghijklmnop",
     });
 
-    await withGatewayServer({
-      prefix: "cloudbath-character-view-gateway-auth-",
-      resolvedAuth: AUTH_TOKEN,
-      overrides: {
-        handlePluginRequest,
-        shouldEnforcePluginGatewayAuth: (pathContext) =>
-          shouldEnforceGatewayAuthForPluginPath(routeRegistry, pathContext),
-      },
-      run: async (server) => {
-        const response = await sendRequest(server, {
-          path: "/c/CHAR-6/abcdefghijklmnop",
-        });
-
-        expect(response.res.statusCode).toBe(200);
-        expect(response.setHeader).toHaveBeenCalledWith("Content-Type", "image/png");
-      },
-    });
+    expect(response.res.statusCode).toBe(200);
+    expect(response.setHeader).toHaveBeenCalledWith("Content-Type", "image/png");
     expect(gateway.httpRoute.auth).toBe("plugin");
     expect(resolveCharacter).toHaveBeenCalledOnce();
     expect(fetchPrivateObject).toHaveBeenCalledOnce();
