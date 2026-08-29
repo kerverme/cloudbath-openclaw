@@ -1,5 +1,5 @@
 import type { IncomingMessage } from "node:http";
-import { createMockServerResponse } from "openclaw/plugin-sdk/testing";
+import { createMockServerResponse } from "openclaw/plugin-sdk/test-env";
 import { describe, expect, it, vi } from "vitest";
 import {
   createCharacterViewRouteHandler,
