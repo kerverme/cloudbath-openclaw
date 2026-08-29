@@ -3,6 +3,7 @@ import type { CharacterAssetViewRuntime } from "./character-view-route.js";
 import type { LineGroupWorkspacePolicyRegistry } from "./group-workspace-policy.js";
 import type { KeepWatchingPipeline } from "./keep-watching.js";
 import type { ArchivePipeline } from "./pipeline.js";
+import type { PrevisReviewRuntime } from "./previs-route.js";
 import type { ArchiveConfig } from "./types.js";
 import type { UgcCharacterImageWorkflow } from "./ugc-character-image.js";
 import type { CloudbathUgcVideoWorkflow } from "./ugc-workflow.js";
@@ -16,6 +17,7 @@ export type CloudbathWorkspacePolicyRuntime = {
   ugcWorkflow?: CloudbathUgcVideoWorkflow;
   ugcCharacterWorkflow?: UgcCharacterImageWorkflow;
   characterAssetView?: CharacterAssetViewRuntime;
+  previsReview?: PrevisReviewRuntime;
   keepWatchingPipeline?: KeepWatchingPipeline;
   pipeline?: ArchivePipeline;
   activeConfig?: ArchiveConfig;

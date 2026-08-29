@@ -65,15 +65,37 @@ describe("Cloudbath workspace policy runtime across plugin registries", () => {
       });
     const response = await requestPluginHttpRouteWithoutGatewayAuthForTest({
       pluginId: "cloudbath-line-image-archive",
-      route: gateway.httpRoute,
+      route: gateway.routeFor("/c/"),
       path: "/c/CHAR-6/abcdefghijklmnop",
     });
 
     expect(response.res.statusCode).toBe(200);
     expect(response.setHeader).toHaveBeenCalledWith("Content-Type", "image/png");
-    expect(gateway.httpRoute.auth).toBe("plugin");
+    expect(gateway.routeFor("/c/").auth).toBe("plugin");
     expect(resolveCharacter).toHaveBeenCalledOnce();
     expect(fetchPrivateObject).toHaveBeenCalledOnce();
+  });
+
+  it("registers the previs review route through the real Gateway and fails closed", async () => {
+    vi.stubEnv("R2_ACCOUNT_ID", "test-account");
+    vi.stubEnv("R2_ACCESS_KEY_ID", "test-access-key");
+    vi.stubEnv("R2_SECRET_ACCESS_KEY", "test-secret-key");
+    vi.stubEnv("R2_BUCKET_NAME", "test-bucket");
+    vi.stubEnv("R2_ENDPOINT", "https://test-account.r2.cloudflarestorage.com");
+    const state = createWorkspacePolicyStateRuntime();
+    const gateway = registerWorkspacePolicyPlugin(state);
+    await gateway.service.start(createWorkspacePolicyServiceContext());
+    startedServices.push(gateway.service);
+
+    const route = gateway.routeFor("/previs/");
+    expect(route.auth).toBe("plugin");
+    // An unknown project with a well-formed token must not confirm existence.
+    const response = await requestPluginHttpRouteWithoutGatewayAuthForTest({
+      pluginId: "cloudbath-line-image-archive",
+      route,
+      path: `/previs/PREVIS-ABCDEFGHJK/${"a".repeat(22)}/timeline`,
+    });
+    expect(response.res.statusCode).toBe(404);
   });
 
   it("does not let an unstarted duplicate registry clear the active runtime", async () => {

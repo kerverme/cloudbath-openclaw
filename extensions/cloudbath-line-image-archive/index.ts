@@ -22,6 +22,15 @@ import {
 import { CLOUDBATH_NOTION_TOOL_NAMES, createCloudbathNotionTools } from "./src/notion-tools.js";
 import { NotionArchiveClient } from "./src/notion.js";
 import { ArchivePipeline } from "./src/pipeline.js";
+import { createPrevisReviewRouteHandler, type PrevisReviewRuntime } from "./src/previs-route.js";
+import {
+  CLOUDBATH_PREVIS_HEAD_NAMESPACE,
+  CLOUDBATH_PREVIS_MAX_ENTRIES,
+  CLOUDBATH_PREVIS_VERSION_NAMESPACE,
+  PrevisStore,
+} from "./src/previs-store.js";
+import type { PrevisProjectHead, PrevisVersion } from "./src/previs-types.js";
+import { CLOUDBATH_PREVIS_VIEW_ROUTE } from "./src/previs-url.js";
 import { resolveSchemaForAgent } from "./src/profiles.js";
 import { R2ArchiveClient } from "./src/r2.js";
 import type {
@@ -120,6 +129,7 @@ export default definePluginEntry({
     let ugcWorkflow: CloudbathUgcVideoWorkflow | undefined;
     let ugcCharacterWorkflow: UgcCharacterImageWorkflow | undefined;
     let characterAssetView: CharacterAssetViewRuntime | undefined;
+    let previsReview: PrevisReviewRuntime | undefined;
     let activeConfig: ArchiveConfig | undefined;
 
     api.registerHttpRoute({
@@ -128,6 +138,15 @@ export default definePluginEntry({
       match: "prefix",
       handler: createCharacterViewRouteHandler(
         () => tryGetCloudbathWorkspacePolicyRuntime()?.characterAssetView,
+      ),
+    });
+
+    api.registerHttpRoute({
+      path: `${CLOUDBATH_PREVIS_VIEW_ROUTE}/`,
+      auth: "plugin",
+      match: "prefix",
+      handler: createPrevisReviewRouteHandler(
+        () => tryGetCloudbathWorkspacePolicyRuntime()?.previsReview,
       ),
     });
 
@@ -274,6 +293,24 @@ export default definePluginEntry({
               bucketName: config.r2.bucketName,
               maxBytes: config.imageMaxBytes,
             };
+            // Previs history outlives any scope window: an owner comparing v1
+            // against v3 must still find v1, so neither store carries a TTL.
+            previsReview = {
+              store: new PrevisStore({
+                heads: api.runtime.state.openKeyedStore<PrevisProjectHead>({
+                  namespace: CLOUDBATH_PREVIS_HEAD_NAMESPACE,
+                  maxEntries: CLOUDBATH_PREVIS_MAX_ENTRIES,
+                  overflowPolicy: "evict-oldest",
+                }),
+                versions: api.runtime.state.openKeyedStore<PrevisVersion>({
+                  namespace: CLOUDBATH_PREVIS_VERSION_NAMESPACE,
+                  maxEntries: CLOUDBATH_PREVIS_MAX_ENTRIES,
+                  overflowPolicy: "evict-oldest",
+                }),
+                now: Date.now,
+                artifactKeyPrefix: "previs/cozyclay",
+              }),
+            };
           }
           await ugcCharacterWorkflow.cleanupExpiredPendingImages();
         }
@@ -322,6 +359,7 @@ export default definePluginEntry({
             ...(ugcWorkflow ? { ugcWorkflow } : {}),
             ...(ugcCharacterWorkflow ? { ugcCharacterWorkflow } : {}),
             ...(characterAssetView ? { characterAssetView } : {}),
+            ...(previsReview ? { previsReview } : {}),
             ...(keepWatchingPipeline ? { keepWatchingPipeline } : {}),
             ...(pipeline ? { pipeline } : {}),
             ...(activeConfig ? { activeConfig } : {}),

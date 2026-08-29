@@ -144,13 +144,16 @@ export function registerWorkspacePolicyPlugin(
   afterToolCall: AfterToolCallHook;
   messageReceived: MessageReceivedHook;
   httpRoute: OpenClawPluginHttpRouteParams;
+  /** Every route the plugin registered, so a test can address one by path. */
+  httpRoutes: readonly OpenClawPluginHttpRouteParams[];
+  routeFor: (pathPrefix: string) => OpenClawPluginHttpRouteParams;
 } {
   let service: OpenClawPluginService | undefined;
   let beforeDispatch: BeforeDispatchHook | undefined;
   let beforeToolCall: BeforeToolCallHook | undefined;
   let afterToolCall: AfterToolCallHook | undefined;
   let messageReceived: MessageReceivedHook | undefined;
-  let httpRoute: OpenClawPluginHttpRouteParams | undefined;
+  const httpRoutes: OpenClawPluginHttpRouteParams[] = [];
   const on: OpenClawPluginApi["on"] = (hookName, handler) => {
     if (hookName === "before_dispatch") {
       beforeDispatch = handler as BeforeDispatchHook;
@@ -174,11 +177,12 @@ export function registerWorkspacePolicyPlugin(
       service = next;
     },
     registerHttpRoute(next) {
-      httpRoute = next;
+      httpRoutes.push(next);
     },
     on,
   });
   plugin.register?.(api);
+  const httpRoute = httpRoutes[0];
   if (
     !service ||
     !beforeDispatch ||
@@ -189,7 +193,25 @@ export function registerWorkspacePolicyPlugin(
   ) {
     throw new Error("Cloudbath plugin did not register its service and workspace hooks");
   }
-  return { service, beforeDispatch, beforeToolCall, afterToolCall, messageReceived, httpRoute };
+  // The plugin registers several prefix routes. Addressing one by its path keeps
+  // a test from silently retargeting when another route is added.
+  const routeFor = (pathPrefix: string): OpenClawPluginHttpRouteParams => {
+    const found = httpRoutes.find((route) => route.path === pathPrefix);
+    if (!found) {
+      throw new Error(`Cloudbath plugin registered no HTTP route at ${pathPrefix}`);
+    }
+    return found;
+  };
+  return {
+    service,
+    beforeDispatch,
+    beforeToolCall,
+    afterToolCall,
+    messageReceived,
+    httpRoute,
+    httpRoutes,
+    routeFor,
+  };
 }
 
 export function getWorkspacePolicyRuntimeForTest() {
