@@ -924,6 +924,16 @@ function parseInput(value: unknown): UgcPrepareInput {
       ? [input.characterName]
       : [];
   const characterNames = rawNames.length > 0 ? normalizeCharacterCodes(rawNames) : [];
+  if (
+    productName &&
+    characterNames.some(
+      (characterName) => characterName.toLowerCase() === productName.toLowerCase(),
+    )
+  ) {
+    throw new Error(
+      "productName must identify a Product Library record and must not duplicate a characterNames entry; omit productName for character-only requests",
+    );
+  }
   const sceneNumber =
     typeof input.sceneNumber === "number" && Number.isInteger(input.sceneNumber)
       ? input.sceneNumber
@@ -1027,12 +1037,21 @@ export class CloudbathUgcVideoWorkflow {
       name: CLOUDBATH_UGC_VIDEO_PREPARE_TOOL_NAME,
       label: "Cloudbath UGC Video Preparation",
       description:
-        "OWNER-ONLY. In a LINE group paired to UGC, resolves configured Product/Character records by name, freezes one project-level character identity lock, creates or reuses the requested scene, and freezes scope before line_video_draft. Later scenes in the same project reuse the frozen cast. This never performs paid generation.",
+        "OWNER-ONLY. In a LINE group paired to UGC, resolves configured Product/Character records by name, freezes one project-level character identity lock, creates or reuses the requested scene, and freezes scope before line_video_draft. productName is optional and must be omitted for character-only requests; never copy a character name into productName. characterNames contains Character Library names only. Later scenes in the same project reuse the frozen cast. This never performs paid generation.",
       parameters: Type.Object({
-        productName: Type.Optional(Type.String()),
-        characterNames: Type.Optional(Type.Array(Type.String())),
+        productName: Type.Optional(
+          Type.String({
+            description:
+              "Optional Product Library name. Omit for character-only requests; never copy a character name here.",
+          }),
+        ),
+        characterNames: Type.Optional(
+          Type.Array(Type.String(), {
+            description:
+              "Character Library names only. This is the sole model-advertised character field.",
+          }),
+        ),
         startNewProject: Type.Optional(Type.Boolean()),
-        characterName: Type.Optional(Type.String()),
         sceneNumber: Type.Optional(Type.Integer({ minimum: 1 })),
         prompt: Type.String(),
         durationSeconds: Type.Optional(Type.Integer({ minimum: 1 })),
