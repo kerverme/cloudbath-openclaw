@@ -3,6 +3,11 @@ import type { OpenClawPluginApi, PluginLogger } from "openclaw/plugin-sdk/plugin
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import type { PluginStateKeyedStore } from "openclaw/plugin-sdk/plugin-state-runtime";
 import { extractSchemaFieldsWithCurrentModel } from "./src/analysis.js";
+import {
+  createCharacterViewRouteHandler,
+  type CharacterAssetViewRuntime,
+} from "./src/character-view-route.js";
+import { CLOUDBATH_CHARACTER_VIEW_ROUTE } from "./src/character-view-url.js";
 import { resolveArchiveConfig, resolveWorkspacePolicyConfig } from "./src/config.js";
 import {
   isWorkspacePolicyCommand,
@@ -114,7 +119,17 @@ export default definePluginEntry({
     let workspaceRegistry: LineGroupWorkspacePolicyRegistry | undefined;
     let ugcWorkflow: CloudbathUgcVideoWorkflow | undefined;
     let ugcCharacterWorkflow: UgcCharacterImageWorkflow | undefined;
+    let characterAssetView: CharacterAssetViewRuntime | undefined;
     let activeConfig: ArchiveConfig | undefined;
+
+    api.registerHttpRoute({
+      path: `${CLOUDBATH_CHARACTER_VIEW_ROUTE}/`,
+      auth: "plugin",
+      match: "prefix",
+      handler: createCharacterViewRouteHandler(
+        () => tryGetCloudbathWorkspacePolicyRuntime()?.characterAssetView,
+      ),
+    });
 
     api.registerTool(() => createCloudbathNotionTools(), {
       names: [...CLOUDBATH_NOTION_TOOL_NAMES],
@@ -213,6 +228,7 @@ export default definePluginEntry({
             overflowPolicy: "evict-oldest",
           });
           const ugcNotion = new UgcNotionWorkflowClient(config.notion.apiKey, config.retry, logger);
+          const r2 = new R2ArchiveClient(config.r2, config.retry, logger);
           ugcWorkflow = new CloudbathUgcVideoWorkflow(
             workspaceConfig.ugc,
             workspaceRegistry,
@@ -229,7 +245,7 @@ export default definePluginEntry({
           ugcCharacterWorkflow = new UgcCharacterImageWorkflow(
             workspaceRegistry,
             latestCharacterImages,
-            new R2ArchiveClient(config.r2, config.retry, logger),
+            r2,
             ugcNotion,
             workspaceConfig.ugc.capabilities,
             ctx.stateDir,
@@ -241,7 +257,24 @@ export default definePluginEntry({
               secretAccessKey: config.r2.secretAccessKey,
             },
             logger,
+            config.publicAssetBaseUrl,
           );
+          if (
+            config.publicAssetBaseUrl &&
+            config.r2.bucketName &&
+            config.r2.accessKeyId &&
+            config.r2.secretAccessKey &&
+            config.r2.endpoint
+          ) {
+            characterAssetView = {
+              notion: ugcNotion,
+              r2,
+              capabilities: workspaceConfig.ugc.capabilities,
+              publicAssetBaseUrl: config.publicAssetBaseUrl,
+              bucketName: config.r2.bucketName,
+              maxBytes: config.imageMaxBytes,
+            };
+          }
           await ugcCharacterWorkflow.cleanupExpiredPendingImages();
         }
 
@@ -288,6 +321,7 @@ export default definePluginEntry({
             workspaceRegistry: registry,
             ...(ugcWorkflow ? { ugcWorkflow } : {}),
             ...(ugcCharacterWorkflow ? { ugcCharacterWorkflow } : {}),
+            ...(characterAssetView ? { characterAssetView } : {}),
             ...(keepWatchingPipeline ? { keepWatchingPipeline } : {}),
             ...(pipeline ? { pipeline } : {}),
             ...(activeConfig ? { activeConfig } : {}),
@@ -360,6 +394,7 @@ export default definePluginEntry({
         workspaceRegistry = undefined;
         ugcWorkflow = undefined;
         ugcCharacterWorkflow = undefined;
+        characterAssetView = undefined;
         activeConfig = undefined;
         logger.info("archive_stopped");
       },

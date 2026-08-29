@@ -24,6 +24,7 @@ beforeEach(() => {
   vi.stubEnv("CLOUDBATH_IMAGE_ARCHIVE_ENABLED", "false");
   vi.stubEnv("CLOUDBATH_IMAGE_ANALYSIS_ENABLED", "false");
   vi.stubEnv("OPEN_CLAW_NOTION_WRITE_TOKEN", "test-value");
+  vi.stubEnv("RAILWAY_PUBLIC_DOMAIN", "cloudbath.example");
   resetGlobalHookRunner();
   resetPluginRuntimeStateForTest();
 });
@@ -216,6 +217,7 @@ describe("Cloudbath workspace policy runtime across plugin registries", () => {
         characterId: "CHAR-5",
         status: "Active",
         pageId: "character-page",
+        viewUrl: "https://cloudbath.example/c/CHAR-5/abcdefghijklmnop",
       });
     const prewarm = registerWorkspacePolicyPlugin(state);
 

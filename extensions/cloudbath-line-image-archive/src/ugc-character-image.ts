@@ -61,7 +61,6 @@ type R2CharacterClient = {
     contentLength: number;
     sha256: string;
   }): Promise<{ kind: "uploaded" | "existing"; etag?: string }>;
-  createTemporaryReadUrl(params: { bucketName: string; objectKey: string }): Promise<string>;
 };
 
 export type SavedCharacterAsset = Readonly<{
@@ -69,6 +68,7 @@ export type SavedCharacterAsset = Readonly<{
   characterId: string;
   status: "Active" | "Archived";
   pageId: string;
+  viewUrl: string;
 }>;
 
 type CharacterNotionClient = {
@@ -78,6 +78,7 @@ type CharacterNotionClient = {
     nameOrCode: string;
     objectKey: string;
     mode: "upsert" | "update";
+    publicAssetBaseUrl: string;
   }): Promise<SavedCharacterAsset>;
 };
 
@@ -172,6 +173,7 @@ export class UgcCharacterImageWorkflow {
       secretAccessKey: string;
     }>,
     private readonly logger: SafeLogger,
+    private readonly publicAssetBaseUrl?: string,
     private readonly now: () => number = Date.now,
     pendingMedia?: UgcCharacterPendingMediaStore,
   ) {
@@ -344,7 +346,8 @@ export class UgcCharacterImageWorkflow {
       !this.r2Config.endpoint ||
       !this.r2Config.bucketName ||
       !this.r2Config.accessKeyId ||
-      !this.r2Config.secretAccessKey
+      !this.r2Config.secretAccessKey ||
+      !this.publicAssetBaseUrl
     ) {
       return { handled: true, text: "ยังไม่สามารถบันทึกตัวละครได้: ระบบจัดเก็บรูปยังไม่พร้อม" };
     }
@@ -376,16 +379,13 @@ export class UgcCharacterImageWorkflow {
         contentLength: media.contentLength,
         sha256: media.sha256,
       });
-      const viewUrl = await this.r2.createTemporaryReadUrl({
-        bucketName: this.r2Config.bucketName,
-        objectKey,
-      });
       const saved = await this.notion.saveCharacterAsset({
         target: this.capabilities.CHARACTER_LIBRARY,
         capabilities: this.capabilities,
         nameOrCode: command.name,
         objectKey,
         mode: command.mode,
+        publicAssetBaseUrl: this.publicAssetBaseUrl,
       });
       this.logger.info("ugc_character_saved", { mode: command.mode });
       return {
@@ -394,7 +394,7 @@ export class UgcCharacterImageWorkflow {
           "บันทึกตัวละครเรียบร้อย:",
           `Name: ${saved.name}`,
           `Character ID: ${saved.characterId}`,
-          `View URL: ${viewUrl}`,
+          `View URL: ${saved.viewUrl}`,
           `Status: ${saved.status}`,
         ].join("\n"),
       };

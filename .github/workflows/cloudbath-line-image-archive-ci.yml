@@ -61,6 +61,7 @@ jobs:
         run: |
           node scripts/run-vitest.mjs run \
             extensions/cloudbath-line-image-archive/src/analysis.test.ts \
+            extensions/cloudbath-line-image-archive/src/character-view-route.test.ts \
             extensions/cloudbath-line-image-archive/src/config.test.ts \
             extensions/cloudbath-line-image-archive/src/group-workspace-policy.test.ts \
             extensions/cloudbath-line-image-archive/src/inbound.test.ts \
@@ -73,6 +74,8 @@ jobs:
             extensions/cloudbath-line-image-archive/src/r2.test.ts \
             extensions/cloudbath-line-image-archive/src/retry.test.ts \
             extensions/cloudbath-line-image-archive/src/ugc-character-image.test.ts \
+            extensions/cloudbath-line-image-archive/src/ugc-character-lock.test.ts \
+            extensions/cloudbath-line-image-archive/src/ugc-character-notion.test.ts \
             extensions/cloudbath-line-image-archive/src/ugc-multi-character.test.ts \
             extensions/cloudbath-line-image-archive/src/ugc-workflow.test.ts \
             extensions/cloudbath-line-image-archive/workspace-policy-runtime.integration.test.ts \
@@ -263,7 +266,10 @@ jobs:
               test -f /app/extensions/cloudbath-line-image-archive/src/keep-watching.ts
               test -f /app/extensions/cloudbath-line-image-archive/src/ugc-workflow.ts
               test -f /app/extensions/cloudbath-line-image-archive/src/ugc-character-pending-media.ts
+              test -f /app/extensions/cloudbath-line-image-archive/src/character-view-route.ts
+              test -f /app/extensions/cloudbath-line-image-archive/src/character-view-url.ts
               test -f /app/extensions/cloudbath-line-image-archive/src/workspace-policy-runtime.ts
+              grep -q createCharacterViewRouteHandler /app/extensions/cloudbath-line-image-archive/index.ts
               grep -q readMediaBuffer /app/extensions/cloudbath-line-image-archive/src/ugc-character-pending-media.ts
               test -f /app/extensions/cloudbath-line-image-archive/profiles/construction-site-progress.v1.json
               test -f /app/extensions/line/index.ts

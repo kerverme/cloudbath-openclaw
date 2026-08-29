@@ -59,6 +59,11 @@
           "type": "object"
         }
       },
+      "publicAssetBaseUrl": {
+        "type": "string",
+        "format": "uri",
+        "pattern": "^https://"
+      },
       "groupWorkspacePolicies": {
         "type": "object",
         "additionalProperties": false,

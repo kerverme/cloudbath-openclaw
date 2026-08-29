@@ -169,4 +169,62 @@ describe("content-addressed R2 archive", () => {
     expect(logger.warn).not.toHaveBeenCalled();
     expect(logger.error).not.toHaveBeenCalled();
   });
+
+  it("creates a fresh internal signed URL on every proxy read without returning it", async () => {
+    const client = new S3Client({
+      region: "auto",
+      endpoint: "https://account.r2.cloudflarestorage.com",
+      credentials: { accessKeyId: "access", secretAccessKey: "secret" },
+    });
+    let signature = 0;
+    const presign = vi.fn(async () => {
+      signature += 1;
+      return `https://account.r2.cloudflarestorage.com/bucket/private.png?X-Amz-Expires=900&X-Amz-Signature=${signature}`;
+    });
+    const fetchImpl = vi.fn(
+      async (_input: string | URL | Request, _init?: RequestInit) =>
+        new Response(Buffer.from([0x89, 0x50, 0x4e, 0x47]), {
+          status: 200,
+          headers: { "content-type": "image/png", "content-length": "4" },
+        }),
+    );
+    const archive = new R2ArchiveClient(
+      {
+        accountId: "account",
+        accessKeyId: "access",
+        secretAccessKey: "secret",
+        bucketName: "bucket",
+        endpoint: "https://account.r2.cloudflarestorage.com",
+        keyPrefix: "",
+      },
+      { maxAttempts: 1, baseDelayMs: 1, maxDelayMs: 1 },
+      logger,
+      client,
+      presign,
+      fetchImpl as unknown as typeof fetch,
+    );
+
+    const first = await archive.fetchPrivateObject({
+      bucketName: "bucket",
+      objectKey: "ugc/characters/kerver/private.png",
+      maxBytes: 1024,
+      contentTypePrefix: "image/",
+    });
+    const second = await archive.fetchPrivateObject({
+      bucketName: "bucket",
+      objectKey: "ugc/characters/kerver/private.png",
+      maxBytes: 1024,
+      contentTypePrefix: "image/",
+    });
+
+    expect(first).toEqual(second);
+    expect(presign).toHaveBeenCalledTimes(2);
+    expect(fetchImpl.mock.calls[0]?.[0]).not.toBe(fetchImpl.mock.calls[1]?.[0]);
+    expect(first).toEqual({
+      bytes: new Uint8Array([0x89, 0x50, 0x4e, 0x47]),
+      contentType: "image/png",
+    });
+    expect(logger.info).not.toHaveBeenCalled();
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
 });

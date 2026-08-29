@@ -81,6 +81,35 @@ function normalizeKeyPrefix(value: string | undefined): string {
     .join("/");
 }
 
+function normalizePublicAssetBaseUrl(
+  value: unknown,
+  railwayDomain: string | undefined,
+): string | undefined {
+  const configured = typeof value === "string" ? value.trim() : "";
+  const domain = railwayDomain?.trim();
+  const raw = configured || (domain ? `https://${domain}` : "");
+  if (!raw) {
+    return undefined;
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    throw new Error("publicAssetBaseUrl must be a valid HTTPS origin");
+  }
+  if (
+    parsed.protocol !== "https:" ||
+    parsed.username ||
+    parsed.password ||
+    parsed.search ||
+    parsed.hash ||
+    (parsed.pathname !== "/" && parsed.pathname !== "")
+  ) {
+    throw new Error("publicAssetBaseUrl must be an HTTPS origin without credentials or a path");
+  }
+  return parsed.origin;
+}
+
 function objectValue(value: unknown, label: string): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error(`${label} must be an object`);
@@ -204,6 +233,10 @@ export function resolveArchiveConfig(
         ? readRequired(env, "OPEN_CLAW_NOTION_WRITE_TOKEN")
         : env.OPEN_CLAW_NOTION_WRITE_TOKEN?.trim() || "",
     },
+    publicAssetBaseUrl: normalizePublicAssetBaseUrl(
+      pluginConfig.publicAssetBaseUrl,
+      env.RAILWAY_PUBLIC_DOMAIN,
+    ),
     retry: {
       maxAttempts: DEFAULT_RETRY_ATTEMPTS,
       baseDelayMs: DEFAULT_RETRY_BASE_DELAY_MS,

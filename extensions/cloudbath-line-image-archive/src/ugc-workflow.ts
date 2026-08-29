@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import type { PluginStateKeyedStore } from "openclaw/plugin-sdk/plugin-state-runtime";
 import { jsonResult } from "openclaw/plugin-sdk/tool-results";
 import { Type } from "typebox";
+import { buildCharacterViewUrl, isMatchingCharacterViewUrl } from "./character-view-url.js";
 import type { LineGroupWorkspacePolicyRegistry } from "./group-workspace-policy.js";
 import { NOTION_API_VERSION } from "./notion-schema.js";
 import { isRetryableStatus, withBoundedRetry } from "./retry.js";
@@ -237,6 +238,40 @@ function richText(value: string): Record<string, unknown> {
 
 function title(value: string): Record<string, unknown> {
   return { title: [{ type: "text", text: { content: value.slice(0, 1_900) } }] };
+}
+
+function externalFile(url: string, name: string): Record<string, unknown> {
+  return {
+    files: [{ type: "external", name: name.slice(0, 100), external: { url } }],
+  };
+}
+
+function existingCharacterViewUrl(
+  page: NotionPage,
+  publicAssetBaseUrl: string,
+  characterId: string,
+): string | undefined {
+  const matching = (page.properties?.Preview?.files ?? [])
+    .map((file) => file.external?.url?.trim())
+    .filter((url): url is string => Boolean(url))
+    .filter((url) => isMatchingCharacterViewUrl({ url, publicAssetBaseUrl, characterId }));
+  return matching.length === 1 ? matching[0] : undefined;
+}
+
+function characterObjectKey(page: NotionPage): string {
+  const primary = plainText(page.properties?.["Identity Reference R2 Keys"]);
+  const legacy = plainText(page.properties?.["Canonical Reference Set"]);
+  const objectKey = primary || legacy;
+  if (
+    !objectKey ||
+    objectKey.length > 1_024 ||
+    objectKey.includes("\\") ||
+    objectKey.split("/").some((segment) => segment === "" || segment === "." || segment === "..") ||
+    !objectKey.startsWith("ugc/characters/")
+  ) {
+    throw new Error("Character private asset is unavailable");
+  }
+  return objectKey;
 }
 
 function relation(pageId: string | undefined): Record<string, unknown> {
@@ -634,15 +669,20 @@ export class UgcNotionWorkflowClient {
     nameOrCode: string;
     objectKey: string;
     mode: "upsert" | "update";
+    publicAssetBaseUrl: string;
   }): Promise<{
     name: string;
     characterId: string;
     status: "Active" | "Archived";
     pageId: string;
+    viewUrl: string;
   }> {
     const source = await this.schema("CHARACTER_LIBRARY", params.target, params.capabilities);
     if (source.properties?.["Identity Reference R2 Keys"]?.type !== "rich_text") {
       throw new Error("Character Library requires Identity Reference R2 Keys as rich text");
+    }
+    if (source.properties?.Preview?.type !== "files") {
+      throw new Error("Character Library requires Preview as files");
     }
     const statusSchema = source.properties?.Status;
     if (statusSchema && statusSchema.type !== "select") {
@@ -677,20 +717,14 @@ export class UgcNotionWorkflowClient {
     if (!existing && params.mode === "update") {
       throw new Error("CHARACTER_LIBRARY record was not found");
     }
-    const page = existing?.id
-      ? await this.request<NotionPage>(`/v1/pages/${encodeURIComponent(existing.id)}`, {
-          method: "PATCH",
-          body: JSON.stringify({
-            properties: { "Identity Reference R2 Keys": richText(params.objectKey) },
-          }),
-        })
+    let safePage = existing
+      ? this.assertPage(existing, params.target)
       : await this.createPage(params.target, {
           Name: title(params.nameOrCode.trim()),
           Status: { select: { name: "Active" } },
           "Identity Reference R2 Keys": richText(params.objectKey),
         });
-    let safePage = this.assertPage(page, params.target);
-    let resolvedCharacterId = generatedIdText((existing ?? safePage).properties?.["Character ID"]);
+    let resolvedCharacterId = generatedIdText(safePage.properties?.["Character ID"]);
     if (!resolvedCharacterId && !existing && safePage.id) {
       safePage = this.assertPage(
         await this.request<NotionPage>(`/v1/pages/${encodeURIComponent(safePage.id)}`),
@@ -701,6 +735,24 @@ export class UgcNotionWorkflowClient {
     if (!resolvedCharacterId) {
       throw new Error("Character Library generated Character ID is unavailable");
     }
+    const viewUrl =
+      existingCharacterViewUrl(safePage, params.publicAssetBaseUrl, resolvedCharacterId) ??
+      buildCharacterViewUrl({
+        publicAssetBaseUrl: params.publicAssetBaseUrl,
+        characterId: resolvedCharacterId,
+      });
+    safePage = this.assertPage(
+      await this.request<NotionPage>(`/v1/pages/${encodeURIComponent(safePage.id!)}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          properties: {
+            ...(existing ? { "Identity Reference R2 Keys": richText(params.objectKey) } : {}),
+            Preview: externalFile(viewUrl, `${resolvedCharacterId} private view`),
+          },
+        }),
+      }),
+      params.target,
+    );
     const name = existing
       ? plainText(existing.properties?.Name)
       : plainText(safePage.properties?.Name) || params.nameOrCode.trim();
@@ -711,7 +763,90 @@ export class UgcNotionWorkflowClient {
       characterId: resolvedCharacterId,
       status,
       pageId: safePage.id!,
+      viewUrl,
     };
+  }
+
+  async resolveCharacterViewAsset(params: {
+    target: NotionTarget;
+    capabilities: Readonly<Record<UgcCapabilityId, NotionTarget>>;
+    characterId: string;
+    token: string;
+    publicAssetBaseUrl: string;
+  }): Promise<{ objectKey: string }> {
+    const page = await this.resolveNamedRecord({
+      capabilityId: "CHARACTER_LIBRARY",
+      target: params.target,
+      capabilities: params.capabilities,
+      name: params.characterId,
+    });
+    if (generatedIdText(page.properties?.["Character ID"]) !== params.characterId) {
+      throw new Error("Character private asset is unavailable");
+    }
+    if (page.properties?.Status?.select?.name !== "Active") {
+      throw new Error("Character private asset is unavailable");
+    }
+    const authorized = (page.properties?.Preview?.files ?? []).some((file) => {
+      const url = file.external?.url?.trim();
+      return Boolean(
+        url &&
+        isMatchingCharacterViewUrl({
+          url,
+          publicAssetBaseUrl: params.publicAssetBaseUrl,
+          characterId: params.characterId,
+          token: params.token,
+        }),
+      );
+    });
+    if (!authorized) {
+      throw new Error("Character private asset is unavailable");
+    }
+    return { objectKey: characterObjectKey(page) };
+  }
+
+  /**
+   * Database-only migration seam for existing Character rows. It deliberately
+   * does not touch R2: a row that already has a durable object key can acquire
+   * its stable view URL without uploading the asset again.
+   */
+  async ensureCharacterViewUrl(params: {
+    target: NotionTarget;
+    capabilities: Readonly<Record<UgcCapabilityId, NotionTarget>>;
+    characterId: string;
+    publicAssetBaseUrl: string;
+  }): Promise<{ objectKey: string; viewUrl: string; pageId: string }> {
+    const source = await this.schema("CHARACTER_LIBRARY", params.target, params.capabilities);
+    if (source.properties?.Preview?.type !== "files") {
+      throw new Error("Character Library requires Preview as files");
+    }
+    const page = await this.resolveNamedRecord({
+      capabilityId: "CHARACTER_LIBRARY",
+      target: params.target,
+      capabilities: params.capabilities,
+      name: params.characterId,
+    });
+    if (generatedIdText(page.properties?.["Character ID"]) !== params.characterId) {
+      throw new Error("Character private asset is unavailable");
+    }
+    const objectKey = characterObjectKey(page);
+    const existing = existingCharacterViewUrl(page, params.publicAssetBaseUrl, params.characterId);
+    const viewUrl =
+      existing ??
+      buildCharacterViewUrl({
+        publicAssetBaseUrl: params.publicAssetBaseUrl,
+        characterId: params.characterId,
+      });
+    if (!existing) {
+      await this.request<NotionPage>(`/v1/pages/${encodeURIComponent(page.id!)}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          properties: {
+            Preview: externalFile(viewUrl, `${params.characterId} private view`),
+          },
+        }),
+      });
+    }
+    return { objectKey, viewUrl, pageId: page.id! };
   }
 
   private async createPage(
