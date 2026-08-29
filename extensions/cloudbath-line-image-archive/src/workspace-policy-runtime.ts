@@ -1,4 +1,5 @@
 import { createPluginRuntimeStore } from "openclaw/plugin-sdk/runtime-store";
+import type { CharacterAssetViewRuntime } from "./character-view-route.js";
 import type { LineGroupWorkspacePolicyRegistry } from "./group-workspace-policy.js";
 import type { KeepWatchingPipeline } from "./keep-watching.js";
 import type { ArchivePipeline } from "./pipeline.js";
@@ -14,6 +15,7 @@ export type CloudbathWorkspacePolicyRuntime = {
   workspaceRegistry: LineGroupWorkspacePolicyRegistry;
   ugcWorkflow?: CloudbathUgcVideoWorkflow;
   ugcCharacterWorkflow?: UgcCharacterImageWorkflow;
+  characterAssetView?: CharacterAssetViewRuntime;
   keepWatchingPipeline?: KeepWatchingPipeline;
   pipeline?: ArchivePipeline;
   activeConfig?: ArchiveConfig;

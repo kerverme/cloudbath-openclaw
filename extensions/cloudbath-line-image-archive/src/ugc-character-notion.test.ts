@@ -13,6 +13,8 @@ const TARGETS = {
 
 const OBJECT_KEY =
   "ugc/characters/kerver/sha256/ab/abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd.png";
+const PUBLIC_BASE_URL = "https://cloudbath.example";
+const STABLE_VIEW_URL = `${PUBLIC_BASE_URL}/c/CHAR-5/abcdefghijklmnop`;
 
 function logger(): SafeLogger {
   return { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
@@ -69,6 +71,9 @@ function characterPage(params: {
   objectKey?: string;
   id?: string;
   idType?: "unique_id" | "auto_increment_id";
+  previewUrl?: string;
+  primaryObjectKey?: string;
+  legacyObjectKey?: string;
 }) {
   const idType = params.idType ?? "unique_id";
   return {
@@ -88,9 +93,16 @@ function characterPage(params: {
               auto_increment_id: { prefix: "CHAR", number: params.number },
             },
       Status: { type: "select", select: { name: params.status ?? "Active" } },
-      "Identity Reference R2 Keys": richText(params.objectKey ?? OBJECT_KEY),
-      "Canonical Reference Set": richText("legacy/character.png"),
-      Preview: { type: "files", files: [] },
+      "Identity Reference R2 Keys": richText(
+        params.primaryObjectKey ?? params.objectKey ?? OBJECT_KEY,
+      ),
+      "Canonical Reference Set": richText(params.legacyObjectKey ?? "legacy/character.png"),
+      Preview: {
+        type: "files",
+        files: params.previewUrl
+          ? [{ type: "external", external: { url: params.previewUrl } }]
+          : [],
+      },
     },
   };
 }
@@ -110,6 +122,7 @@ function requestPathname(input: string | URL | Request): string {
 describe("UGC Character Library live-schema writer", () => {
   it("creates Kerver without writing the generated Character ID or duplicate identity fields", async () => {
     const writes: Array<Record<string, unknown>> = [];
+    const patches: Array<Record<string, unknown>> = [];
     const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const pathname = requestPathname(input);
       if (pathname.startsWith("/v1/data_sources/") && !pathname.endsWith("/query")) {
@@ -123,6 +136,16 @@ describe("UGC Character Library live-schema writer", () => {
         writes.push(body.properties);
         return Response.json(characterPage({ name: "Kerver", number: 5 }));
       }
+      if (pathname === "/v1/pages/character-page" && init?.method === "PATCH") {
+        const body = JSON.parse(requestBody(init)) as { properties: Record<string, unknown> };
+        patches.push(body.properties);
+        const preview = body.properties.Preview as {
+          files: Array<{ external: { url: string } }>;
+        };
+        return Response.json(
+          characterPage({ name: "Kerver", number: 5, previewUrl: preview.files[0]!.external.url }),
+        );
+      }
       throw new Error(`Unexpected Notion request: ${pathname}`);
     }) as unknown as typeof fetch;
 
@@ -132,6 +155,7 @@ describe("UGC Character Library live-schema writer", () => {
       nameOrCode: "Kerver",
       objectKey: OBJECT_KEY,
       mode: "upsert",
+      publicAssetBaseUrl: PUBLIC_BASE_URL,
     });
 
     expect(result).toEqual({
@@ -139,6 +163,9 @@ describe("UGC Character Library live-schema writer", () => {
       characterId: "CHAR-5",
       status: "Active",
       pageId: "character-page",
+      viewUrl: expect.stringMatching(
+        /^https:\/\/cloudbath\.example\/c\/CHAR-5\/[A-Za-z0-9_-]{16}$/u,
+      ),
     });
     expect(writes).toEqual([
       {
@@ -153,6 +180,20 @@ describe("UGC Character Library live-schema writer", () => {
     expect(writes[0]).not.toHaveProperty("Identity Asset URL");
     expect(writes[0]).not.toHaveProperty("Canonical Reference Set");
     expect(writes[0]).not.toHaveProperty("Preview");
+    expect(patches).toHaveLength(1);
+    expect(patches[0]).toEqual({
+      Preview: {
+        files: [
+          {
+            type: "external",
+            name: "CHAR-5 private view",
+            external: { url: result.viewUrl },
+          },
+        ],
+      },
+    });
+    expect(result.viewUrl).not.toContain("X-Amz-");
+    expect(result.viewUrl).not.toContain("cloudflarestorage.com");
   });
 
   it("accepts the live auto_increment_id shape and reads its generated value", async () => {
@@ -169,6 +210,11 @@ describe("UGC Character Library live-schema writer", () => {
           characterPage({ name: "Kerver", number: 5, idType: "auto_increment_id" }),
         );
       }
+      if (pathname === "/v1/pages/character-page" && init?.method === "PATCH") {
+        return Response.json(
+          characterPage({ name: "Kerver", number: 5, idType: "auto_increment_id" }),
+        );
+      }
       throw new Error(`Unexpected Notion request: ${pathname}`);
     }) as unknown as typeof fetch;
 
@@ -178,6 +224,7 @@ describe("UGC Character Library live-schema writer", () => {
       nameOrCode: "Kerver",
       objectKey: OBJECT_KEY,
       mode: "upsert",
+      publicAssetBaseUrl: PUBLIC_BASE_URL,
     });
 
     expect(result.characterId).toBe("CHAR-5");
@@ -186,7 +233,12 @@ describe("UGC Character Library live-schema writer", () => {
   it("updates Kerver by exact Name and replaces only the primary canonical identity field", async () => {
     const patches: Array<Record<string, unknown>> = [];
     let createCount = 0;
-    const existing = characterPage({ name: "Kerver", number: 5, objectKey: "old/key.png" });
+    const existing = characterPage({
+      name: "Kerver",
+      number: 5,
+      objectKey: "old/key.png",
+      previewUrl: STABLE_VIEW_URL,
+    });
     const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const pathname = requestPathname(input);
       if (pathname.startsWith("/v1/data_sources/") && !pathname.endsWith("/query")) {
@@ -212,6 +264,7 @@ describe("UGC Character Library live-schema writer", () => {
       nameOrCode: "Kerver",
       objectKey: OBJECT_KEY,
       mode: "update",
+      publicAssetBaseUrl: PUBLIC_BASE_URL,
     });
 
     expect(result.characterId).toBe("CHAR-5");
@@ -221,13 +274,23 @@ describe("UGC Character Library live-schema writer", () => {
         "Identity Reference R2 Keys": {
           rich_text: [{ type: "text", text: { content: OBJECT_KEY } }],
         },
+        Preview: {
+          files: [
+            {
+              type: "external",
+              name: "CHAR-5 private view",
+              external: { url: STABLE_VIEW_URL },
+            },
+          ],
+        },
       },
     ]);
+    expect(result.viewUrl).toBe(STABLE_VIEW_URL);
   });
 
   it("can resolve the existing Notion-generated Character ID without writing it", async () => {
     const filters: Array<Record<string, unknown> | undefined> = [];
-    const existing = characterPage({ name: "Kerver", number: 5 });
+    const existing = characterPage({ name: "Kerver", number: 5, previewUrl: STABLE_VIEW_URL });
     const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const pathname = requestPathname(input);
       if (pathname.startsWith("/v1/data_sources/") && !pathname.endsWith("/query")) {
@@ -253,6 +316,7 @@ describe("UGC Character Library live-schema writer", () => {
       nameOrCode: "CHAR-5",
       objectKey: OBJECT_KEY,
       mode: "update",
+      publicAssetBaseUrl: PUBLIC_BASE_URL,
     });
 
     expect(result).toMatchObject({ name: "Kerver", characterId: "CHAR-5" });
@@ -260,5 +324,225 @@ describe("UGC Character Library live-schema writer", () => {
       property: "Character ID",
       unique_id: { equals: 5 },
     });
+  });
+
+  it("resolves only an active character with the stored stable capability URL", async () => {
+    const existing = characterPage({ name: "Kerver", number: 5, previewUrl: STABLE_VIEW_URL });
+    const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const pathname = requestPathname(input);
+      if (pathname.startsWith("/v1/data_sources/") && !pathname.endsWith("/query")) {
+        return Response.json(liveCharacterSource());
+      }
+      if (pathname.endsWith("/query")) {
+        const body = JSON.parse(requestBody(init)) as { filter?: { property?: string } };
+        return Response.json({
+          results: body.filter?.property === "Character ID" ? [existing] : [],
+          has_more: false,
+        });
+      }
+      throw new Error(`Unexpected Notion request: ${pathname}`);
+    }) as unknown as typeof fetch;
+
+    await expect(
+      client(fetchImpl).resolveCharacterViewAsset({
+        target: TARGETS.CHARACTER_LIBRARY,
+        capabilities: TARGETS,
+        characterId: "CHAR-5",
+        token: "abcdefghijklmnop",
+        publicAssetBaseUrl: PUBLIC_BASE_URL,
+      }),
+    ).resolves.toEqual({ objectKey: OBJECT_KEY });
+    await expect(
+      client(fetchImpl).resolveCharacterViewAsset({
+        target: TARGETS.CHARACTER_LIBRARY,
+        capabilities: TARGETS,
+        characterId: "CHAR-5",
+        token: "ponmlkjihgfedcba",
+        publicAssetBaseUrl: PUBLIC_BASE_URL,
+      }),
+    ).rejects.toThrow("unavailable");
+  });
+
+  it("resolves an active legacy object key without treating Preview as identity", async () => {
+    const legacy = characterPage({
+      name: "Twong",
+      number: 6,
+      primaryObjectKey: "",
+      legacyObjectKey: "ugc/characters/twong/v1/main.webp",
+      previewUrl: `${PUBLIC_BASE_URL}/c/CHAR-6/abcdefghijklmnop`,
+    });
+    const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const pathname = requestPathname(input);
+      if (pathname.startsWith("/v1/data_sources/") && !pathname.endsWith("/query")) {
+        return Response.json(liveCharacterSource());
+      }
+      if (pathname.endsWith("/query")) {
+        const body = JSON.parse(requestBody(init)) as { filter?: { property?: string } };
+        return Response.json({
+          results: body.filter?.property === "Character ID" ? [legacy] : [],
+          has_more: false,
+        });
+      }
+      throw new Error(`Unexpected Notion request: ${pathname}`);
+    }) as unknown as typeof fetch;
+
+    await expect(
+      client(fetchImpl).resolveCharacterViewAsset({
+        target: TARGETS.CHARACTER_LIBRARY,
+        capabilities: TARGETS,
+        characterId: "CHAR-6",
+        token: "abcdefghijklmnop",
+        publicAssetBaseUrl: PUBLIC_BASE_URL,
+      }),
+    ).resolves.toEqual({ objectKey: "ugc/characters/twong/v1/main.webp" });
+  });
+
+  it("migrates Twong to a stable view URL without an R2 upload or identity rewrite", async () => {
+    const patches: Array<Record<string, unknown>> = [];
+    const twong = characterPage({
+      name: "Twong",
+      number: 6,
+      primaryObjectKey: OBJECT_KEY.replace("kerver", "twong"),
+    });
+    const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const pathname = requestPathname(input);
+      if (pathname.startsWith("/v1/data_sources/") && !pathname.endsWith("/query")) {
+        return Response.json(liveCharacterSource());
+      }
+      if (pathname.endsWith("/query")) {
+        const body = JSON.parse(requestBody(init)) as { filter?: { property?: string } };
+        return Response.json({
+          results: body.filter?.property === "Character ID" ? [twong] : [],
+          has_more: false,
+        });
+      }
+      if (pathname === "/v1/pages/character-page" && init?.method === "PATCH") {
+        const body = JSON.parse(requestBody(init)) as { properties: Record<string, unknown> };
+        patches.push(body.properties);
+        return Response.json(twong);
+      }
+      throw new Error(`Unexpected Notion request: ${pathname}`);
+    }) as unknown as typeof fetch;
+
+    const result = await client(fetchImpl).ensureCharacterViewUrl({
+      target: TARGETS.CHARACTER_LIBRARY,
+      capabilities: TARGETS,
+      characterId: "CHAR-6",
+      publicAssetBaseUrl: PUBLIC_BASE_URL,
+    });
+
+    expect(result.objectKey).toBe(OBJECT_KEY.replace("kerver", "twong"));
+    expect(result.viewUrl).toMatch(/^https:\/\/cloudbath\.example\/c\/CHAR-6\/[A-Za-z0-9_-]{16}$/u);
+    expect(patches).toHaveLength(1);
+    expect(patches[0]).toHaveProperty("Preview");
+    expect(patches[0]).not.toHaveProperty("Identity Reference R2 Keys");
+  });
+
+  it("preserves Twong's existing stable view URL on repeated explicit migration", async () => {
+    const twong = characterPage({
+      name: "Twong",
+      number: 6,
+      primaryObjectKey: OBJECT_KEY.replace("kerver", "twong"),
+      previewUrl: `${PUBLIC_BASE_URL}/c/CHAR-6/ponmlkjihgfedcba`,
+    });
+    const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const pathname = requestPathname(input);
+      if (pathname.startsWith("/v1/data_sources/") && !pathname.endsWith("/query")) {
+        return Response.json(liveCharacterSource());
+      }
+      if (pathname.endsWith("/query")) {
+        const body = JSON.parse(requestBody(init)) as { filter?: { property?: string } };
+        return Response.json({
+          results: body.filter?.property === "Character ID" ? [twong] : [],
+          has_more: false,
+        });
+      }
+      throw new Error(`Unexpected Notion request: ${pathname}`);
+    }) as unknown as typeof fetch;
+
+    const result = await client(fetchImpl).ensureCharacterViewUrl({
+      target: TARGETS.CHARACTER_LIBRARY,
+      capabilities: TARGETS,
+      characterId: "CHAR-6",
+      publicAssetBaseUrl: PUBLIC_BASE_URL,
+    });
+
+    expect(result.objectKey).toBe(OBJECT_KEY.replace("kerver", "twong"));
+    expect(result.viewUrl).toBe(`${PUBLIC_BASE_URL}/c/CHAR-6/ponmlkjihgfedcba`);
+    expect(fetchImpl).not.toHaveBeenCalledWith(
+      expect.stringContaining("/v1/pages/"),
+      expect.objectContaining({ method: "PATCH" }),
+    );
+  });
+
+  it("refuses to migrate an Archived Character", async () => {
+    const twong = characterPage({
+      name: "Twong",
+      number: 6,
+      status: "Archived",
+      primaryObjectKey: OBJECT_KEY.replace("kerver", "twong"),
+    });
+    const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const pathname = requestPathname(input);
+      if (pathname.startsWith("/v1/data_sources/") && !pathname.endsWith("/query")) {
+        return Response.json(liveCharacterSource());
+      }
+      if (pathname.endsWith("/query")) {
+        const body = JSON.parse(requestBody(init)) as { filter?: { property?: string } };
+        return Response.json({
+          results: body.filter?.property === "Character ID" ? [twong] : [],
+          has_more: false,
+        });
+      }
+      throw new Error(`Unexpected Notion request: ${pathname}`);
+    }) as unknown as typeof fetch;
+
+    await expect(
+      client(fetchImpl).ensureCharacterViewUrl({
+        target: TARGETS.CHARACTER_LIBRARY,
+        capabilities: TARGETS,
+        characterId: "CHAR-6",
+        publicAssetBaseUrl: PUBLIC_BASE_URL,
+      }),
+    ).rejects.toThrow("Character private asset is unavailable");
+    expect(fetchImpl).not.toHaveBeenCalledWith(
+      expect.stringContaining("/v1/pages/"),
+      expect.objectContaining({ method: "PATCH" }),
+    );
+  });
+
+  it("fails closed for archived characters", async () => {
+    const archived = characterPage({
+      name: "Twong",
+      number: 6,
+      status: "Archived",
+      primaryObjectKey: "",
+      legacyObjectKey: "ugc/characters/twong/v1/main.webp",
+      previewUrl: `${PUBLIC_BASE_URL}/c/CHAR-6/abcdefghijklmnop`,
+    });
+    const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const pathname = requestPathname(input);
+      if (pathname.startsWith("/v1/data_sources/") && !pathname.endsWith("/query")) {
+        return Response.json(liveCharacterSource());
+      }
+      if (pathname.endsWith("/query")) {
+        const body = JSON.parse(requestBody(init)) as { filter?: { property?: string } };
+        return Response.json({
+          results: body.filter?.property === "Character ID" ? [archived] : [],
+          has_more: false,
+        });
+      }
+      throw new Error(`Unexpected Notion request: ${pathname}`);
+    }) as unknown as typeof fetch;
+
+    await expect(
+      client(fetchImpl).resolveCharacterViewAsset({
+        target: TARGETS.CHARACTER_LIBRARY,
+        capabilities: TARGETS,
+        characterId: "CHAR-6",
+        token: "abcdefghijklmnop",
+        publicAssetBaseUrl: PUBLIC_BASE_URL,
+      }),
+    ).rejects.toThrow("unavailable");
   });
 });

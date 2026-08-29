@@ -90,11 +90,30 @@ describe("resolveArchiveConfig", () => {
   });
 
   it("loads Agent Profiles without a global Notion database", () => {
-    const config = resolveArchiveConfig(enabledEnv(), pluginConfig());
+    const config = resolveArchiveConfig(
+      enabledEnv({ RAILWAY_PUBLIC_DOMAIN: "cloudbath.example" }),
+      pluginConfig(),
+    );
     expect(config.profiles.activeProfilesByGroupId.get("C123")?.id).toBe("agent-a");
     expect(config.profiles.agentProfiles[0]?.notionDatabaseId).toBe("database-a");
     expect(config.notion).toEqual({ apiKey: "notion-placeholder" });
     expect(config.r2.keyPrefix).toBe("cloudbath/images");
+    expect(config.publicAssetBaseUrl).toBe("https://cloudbath.example");
+  });
+
+  it("accepts an explicit portable public asset origin and rejects unsafe URL shapes", () => {
+    expect(
+      resolveArchiveConfig(enabledEnv(), {
+        ...pluginConfig(),
+        publicAssetBaseUrl: "https://assets.cloudbath.example",
+      }).publicAssetBaseUrl,
+    ).toBe("https://assets.cloudbath.example");
+    expect(() =>
+      resolveArchiveConfig(enabledEnv(), {
+        ...pluginConfig(),
+        publicAssetBaseUrl: "https://user:secret@assets.cloudbath.example/path?token=value",
+      }),
+    ).toThrow("HTTPS origin");
   });
 
   it("fails closed without the canonical Notion write credential when enabled", () => {

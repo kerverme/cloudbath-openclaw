@@ -15,6 +15,8 @@ const CHARACTER_COMMAND =
   /^(?:(?:เก็บ|บันทึก)\s*(?:รูปนี้|รูปล่าสุด)\s*เป็น\s*ตัวละคร\s*ชื่อ|ใช้\s*รูปล่าสุด\s*สร้าง\s*ตัวละคร\s*ชื่อ)\s+(.+?)\s*(?:ครับ|ค่ะ|คะ|หน่อย)?[.!。]?$/iu;
 const CHARACTER_UPDATE_COMMAND =
   /^(?:อัปเดต\s*ตัวละคร\s+(.+?)\s+ด้วย\s*รูปล่าสุด|เปลี่ยน\s*รูป\s*ตัวละคร\s+(.+?)\s+เป็น\s*รูปล่าสุด)\s*(?:ครับ|ค่ะ|คะ|หน่อย)?[.!。]?$/iu;
+const CHARACTER_VIEW_MIGRATION_COMMAND =
+  /^(?:สร้าง\s*ลิงก์\s*ถาวร\s*ให้\s*ตัวละคร|create\s+(?:a\s+)?permanent\s+link\s+for\s+character)\s+(CHAR-[1-9]\d*)\s*(?:ครับ|ค่ะ|คะ|หน่อย|please)?[.!。]?$/iu;
 
 export const CLOUDBATH_UGC_LATEST_CHARACTER_IMAGE_NAMESPACE = "ugc-latest-character-image-v2";
 export const CLOUDBATH_UGC_CHARACTER_IMAGE_MAX_ENTRIES = 10_000;
@@ -61,7 +63,6 @@ type R2CharacterClient = {
     contentLength: number;
     sha256: string;
   }): Promise<{ kind: "uploaded" | "existing"; etag?: string }>;
-  createTemporaryReadUrl(params: { bucketName: string; objectKey: string }): Promise<string>;
 };
 
 export type SavedCharacterAsset = Readonly<{
@@ -69,6 +70,7 @@ export type SavedCharacterAsset = Readonly<{
   characterId: string;
   status: "Active" | "Archived";
   pageId: string;
+  viewUrl: string;
 }>;
 
 type CharacterNotionClient = {
@@ -78,7 +80,14 @@ type CharacterNotionClient = {
     nameOrCode: string;
     objectKey: string;
     mode: "upsert" | "update";
+    publicAssetBaseUrl: string;
   }): Promise<SavedCharacterAsset>;
+  ensureCharacterViewUrl(params: {
+    target: NotionTarget;
+    capabilities: Readonly<Record<UgcCapabilityId, NotionTarget>>;
+    characterId: string;
+    publicAssetBaseUrl: string;
+  }): Promise<{ objectKey: string; viewUrl: string; pageId: string }>;
 };
 
 function nativeGroupId(value: string | undefined): string | undefined {
@@ -116,6 +125,11 @@ export function parseUgcCharacterImageCommand(content: string): CharacterCommand
     return null;
   }
   return { mode: create ? "upsert" : "update", name };
+}
+
+export function parseUgcCharacterViewMigrationCommand(content: string): string | null {
+  const normalized = content.normalize("NFKC").trim().replace(/\s+/gu, " ");
+  return normalized.match(CHARACTER_VIEW_MIGRATION_COMMAND)?.[1]?.toUpperCase() ?? null;
 }
 
 function slugName(value: string): string {
@@ -172,6 +186,7 @@ export class UgcCharacterImageWorkflow {
       secretAccessKey: string;
     }>,
     private readonly logger: SafeLogger,
+    private readonly publicAssetBaseUrl?: string,
     private readonly now: () => number = Date.now,
     pendingMedia?: UgcCharacterPendingMediaStore,
   ) {
@@ -325,7 +340,8 @@ export class UgcCharacterImageWorkflow {
       return { handled: true, text: LINE_IMAGE_ACKNOWLEDGEMENT };
     }
     const command = parseUgcCharacterImageCommand(event.content);
-    if (!command) {
+    const migrationCharacterId = parseUgcCharacterViewMigrationCommand(event.content);
+    if (!command && !migrationCharacterId) {
       return undefined;
     }
     const groupId = event.isGroup ? nativeGroupId(context.conversationId) : undefined;
@@ -340,11 +356,40 @@ export class UgcCharacterImageWorkflow {
     ) {
       return { handled: true };
     }
+    if (migrationCharacterId) {
+      if (!this.publicAssetBaseUrl) {
+        return { handled: true, text: "ยังไม่สามารถสร้างลิงก์ตัวละครได้: ระบบลิงก์ยังไม่พร้อม" };
+      }
+      try {
+        const migrated = await this.notion.ensureCharacterViewUrl({
+          target: this.capabilities.CHARACTER_LIBRARY,
+          capabilities: this.capabilities,
+          characterId: migrationCharacterId,
+          publicAssetBaseUrl: this.publicAssetBaseUrl,
+        });
+        this.logger.info("ugc_character_view_url_ensured");
+        return {
+          handled: true,
+          text: [
+            "สร้างลิงก์ถาวรให้ตัวละครเรียบร้อย:",
+            `Character ID: ${migrationCharacterId}`,
+            `View URL: ${migrated.viewUrl}`,
+          ].join("\n"),
+        };
+      } catch {
+        this.logger.warn("ugc_character_view_url_failed", { reason: "MIGRATION_FAILED" });
+        return { handled: true, text: "สร้างลิงก์ตัวละครไม่สำเร็จ กรุณาตรวจสอบ Character ID" };
+      }
+    }
+    if (!command) {
+      return undefined;
+    }
     if (
       !this.r2Config.endpoint ||
       !this.r2Config.bucketName ||
       !this.r2Config.accessKeyId ||
-      !this.r2Config.secretAccessKey
+      !this.r2Config.secretAccessKey ||
+      !this.publicAssetBaseUrl
     ) {
       return { handled: true, text: "ยังไม่สามารถบันทึกตัวละครได้: ระบบจัดเก็บรูปยังไม่พร้อม" };
     }
@@ -376,16 +421,13 @@ export class UgcCharacterImageWorkflow {
         contentLength: media.contentLength,
         sha256: media.sha256,
       });
-      const viewUrl = await this.r2.createTemporaryReadUrl({
-        bucketName: this.r2Config.bucketName,
-        objectKey,
-      });
       const saved = await this.notion.saveCharacterAsset({
         target: this.capabilities.CHARACTER_LIBRARY,
         capabilities: this.capabilities,
         nameOrCode: command.name,
         objectKey,
         mode: command.mode,
+        publicAssetBaseUrl: this.publicAssetBaseUrl,
       });
       this.logger.info("ugc_character_saved", { mode: command.mode });
       return {
@@ -394,7 +436,7 @@ export class UgcCharacterImageWorkflow {
           "บันทึกตัวละครเรียบร้อย:",
           `Name: ${saved.name}`,
           `Character ID: ${saved.characterId}`,
-          `View URL: ${viewUrl}`,
+          `View URL: ${saved.viewUrl}`,
           `Status: ${saved.status}`,
         ].join("\n"),
       };

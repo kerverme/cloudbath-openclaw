@@ -8,6 +8,7 @@ import type { EnsureR2ObjectParams } from "./r2.js";
 import type { InboundImageJob, LineGroupPolicyBinding, SafeLogger } from "./types.js";
 import {
   parseUgcCharacterImageCommand,
+  parseUgcCharacterViewMigrationCommand,
   type LatestCharacterImage,
   UgcCharacterImageWorkflow,
 } from "./ugc-character-image.js";
@@ -95,19 +96,19 @@ describe("UGC latest-image character workflow", () => {
         ensureObjectInputs.push(input);
         return { kind: "uploaded" as const };
       }),
-      createTemporaryReadUrl: vi.fn(
-        async (input: { bucketName: string; objectKey: string }) =>
-          ["https://account.r2.cloudflarestorage.com", input.bucketName, input.objectKey].join(
-            "/",
-          ) + "?X-Amz-Expires=900&X-Amz-Signature=test-signature",
-      ),
     };
     const notion = {
       saveCharacterAsset: vi.fn(async (input: { nameOrCode: string }) => ({
         name: input.nameOrCode,
-        characterId: "CHAR-KERVER",
+        characterId: "CHAR-5",
         status: "Active" as const,
         pageId: "character-page",
+        viewUrl: "https://cloudbath.example/c/CHAR-5/abcdefghijklmnop",
+      })),
+      ensureCharacterViewUrl: vi.fn(async () => ({
+        objectKey: "ugc/characters/twong/v1/main.webp",
+        pageId: "twong-page",
+        viewUrl: "https://cloudbath.example/c/CHAR-6/ponmlkjihgfedcba",
       })),
     };
     const logger = {
@@ -131,6 +132,7 @@ describe("UGC latest-image character workflow", () => {
         secretAccessKey: "unit-test-secret",
       },
       logger,
+      "https://cloudbath.example",
       () => Date.UTC(2026, 7, 26),
     );
     return { workflow, r2, notion, ensureObjectInputs, latestImages, logger };
@@ -160,7 +162,65 @@ describe("UGC latest-image character workflow", () => {
     expect(parseUgcCharacterImageCommand(content)).toEqual({ mode, name: "Kerver" });
   });
 
-  it("safely uploads the owner's latest same-group image and returns one temporary view URL", async () => {
+  it.each(["สร้างลิงก์ถาวรให้ตัวละคร CHAR-6", "create permanent link for character CHAR-6"])(
+    "parses explicit existing-Character migration command %s",
+    (content) => {
+      expect(parseUgcCharacterViewMigrationCommand(content)).toBe("CHAR-6");
+    },
+  );
+
+  it("migrates an existing Character by exact generated ID without an image or R2 upload", async () => {
+    const { workflow, notion, r2 } = harness();
+
+    const result = await workflow.handleBeforeDispatch(
+      {
+        content: "สร้างลิงก์ถาวรให้ตัวละคร CHAR-6",
+        senderId: "U-owner",
+        senderIsOwner: true,
+        isGroup: true,
+      },
+      {
+        channelId: "line",
+        accountId: "primary",
+        conversationId: "line:group:C-ugc",
+      },
+    );
+
+    expect(result?.text).toContain("Character ID: CHAR-6");
+    expect(result?.text).toContain("View URL: https://cloudbath.example/c/CHAR-6/ponmlkjihgfedcba");
+    expect(notion.ensureCharacterViewUrl).toHaveBeenCalledWith({
+      target: CAPABILITIES.CHARACTER_LIBRARY,
+      capabilities: CAPABILITIES,
+      characterId: "CHAR-6",
+      publicAssetBaseUrl: "https://cloudbath.example",
+    });
+    expect(notion.saveCharacterAsset).not.toHaveBeenCalled();
+    expect(r2.ensureObject).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when a non-owner requests an existing Character migration", async () => {
+    const { workflow, notion, r2 } = harness();
+
+    const result = await workflow.handleBeforeDispatch(
+      {
+        content: "สร้างลิงก์ถาวรให้ตัวละคร CHAR-6",
+        senderId: "U-other",
+        senderIsOwner: false,
+        isGroup: true,
+      },
+      {
+        channelId: "line",
+        accountId: "primary",
+        conversationId: "line:group:C-ugc",
+      },
+    );
+
+    expect(result).toEqual({ handled: true });
+    expect(notion.ensureCharacterViewUrl).not.toHaveBeenCalled();
+    expect(r2.ensureObject).not.toHaveBeenCalled();
+  });
+
+  it("safely uploads the owner's latest same-group image and returns one stable Cloudbath URL", async () => {
     const { workflow, r2, notion, ensureObjectInputs } = harness();
     await workflow.rememberImage(job());
 
@@ -185,15 +245,17 @@ describe("UGC latest-image character workflow", () => {
     );
     expect(notion.saveCharacterAsset).toHaveBeenCalledOnce();
     expect(notion.saveCharacterAsset).toHaveBeenCalledWith(
-      expect.objectContaining({ objectKey: ensureObjectInputs[0]?.objectKey }),
-    );
-    expect(r2.ensureObject.mock.invocationCallOrder[0]).toBeLessThan(
-      r2.createTemporaryReadUrl.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
+      expect.objectContaining({
+        objectKey: ensureObjectInputs[0]?.objectKey,
+        publicAssetBaseUrl: "https://cloudbath.example",
+      }),
     );
     expect(result?.text).toContain("Name: Kerver");
-    expect(result?.text).toContain("Character ID: CHAR-KERVER");
+    expect(result?.text).toContain("Character ID: CHAR-5");
     expect(result?.text?.match(/View URL:/gu)).toHaveLength(1);
-    expect(result?.text).toContain("X-Amz-Expires=900&X-Amz-Signature=test-signature");
+    expect(result?.text).toContain("View URL: https://cloudbath.example/c/CHAR-5/abcdefghijklmnop");
+    expect(result?.text).not.toContain("X-Amz-");
+    expect(result?.text).not.toContain("cloudflarestorage.com");
     expect(result?.text).not.toContain("Canonical URL:");
     expect(result?.text).not.toContain("unit-test-access");
     expect(result?.text).not.toContain("unit-test-secret");

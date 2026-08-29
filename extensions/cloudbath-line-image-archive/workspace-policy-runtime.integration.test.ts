@@ -4,6 +4,7 @@ import path from "node:path";
 import { saveMediaStream } from "openclaw/plugin-sdk/media-store";
 import type { OpenClawPluginService } from "openclaw/plugin-sdk/plugin-entry";
 import {
+  requestPluginHttpRouteWithoutGatewayAuthForTest,
   resetGlobalHookRunner,
   resetPluginRuntimeStateForTest,
 } from "openclaw/plugin-sdk/plugin-test-runtime";
@@ -24,6 +25,7 @@ beforeEach(() => {
   vi.stubEnv("CLOUDBATH_IMAGE_ARCHIVE_ENABLED", "false");
   vi.stubEnv("CLOUDBATH_IMAGE_ANALYSIS_ENABLED", "false");
   vi.stubEnv("OPEN_CLAW_NOTION_WRITE_TOKEN", "test-value");
+  vi.stubEnv("RAILWAY_PUBLIC_DOMAIN", "cloudbath.example");
   resetGlobalHookRunner();
   resetPluginRuntimeStateForTest();
 });
@@ -42,6 +44,38 @@ afterEach(async () => {
 });
 
 describe("Cloudbath workspace policy runtime across plugin registries", () => {
+  it("serves a valid Character capability through the real Gateway without a login token", async () => {
+    vi.stubEnv("R2_ACCOUNT_ID", "test-account");
+    vi.stubEnv("R2_ACCESS_KEY_ID", "test-access-key");
+    vi.stubEnv("R2_SECRET_ACCESS_KEY", "test-secret-key");
+    vi.stubEnv("R2_BUCKET_NAME", "test-bucket");
+    vi.stubEnv("R2_ENDPOINT", "https://test-account.r2.cloudflarestorage.com");
+    const state = createWorkspacePolicyStateRuntime();
+    const gateway = registerWorkspacePolicyPlugin(state);
+    await gateway.service.start(createWorkspacePolicyServiceContext());
+    startedServices.push(gateway.service);
+    const resolveCharacter = vi
+      .spyOn(UgcNotionWorkflowClient.prototype, "resolveCharacterViewAsset")
+      .mockResolvedValue({ objectKey: "ugc/characters/twong/v1/main.webp" });
+    const fetchPrivateObject = vi
+      .spyOn(R2ArchiveClient.prototype, "fetchPrivateObject")
+      .mockResolvedValue({
+        bytes: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+        contentType: "image/png",
+      });
+    const response = await requestPluginHttpRouteWithoutGatewayAuthForTest({
+      pluginId: "cloudbath-line-image-archive",
+      route: gateway.httpRoute,
+      path: "/c/CHAR-6/abcdefghijklmnop",
+    });
+
+    expect(response.res.statusCode).toBe(200);
+    expect(response.setHeader).toHaveBeenCalledWith("Content-Type", "image/png");
+    expect(gateway.httpRoute.auth).toBe("plugin");
+    expect(resolveCharacter).toHaveBeenCalledOnce();
+    expect(fetchPrivateObject).toHaveBeenCalledOnce();
+  });
+
   it("does not let an unstarted duplicate registry clear the active runtime", async () => {
     const state = createWorkspacePolicyStateRuntime();
     const gateway = registerWorkspacePolicyPlugin(state);
@@ -216,6 +250,7 @@ describe("Cloudbath workspace policy runtime across plugin registries", () => {
         characterId: "CHAR-5",
         status: "Active",
         pageId: "character-page",
+        viewUrl: "https://cloudbath.example/c/CHAR-5/abcdefghijklmnop",
       });
     const prewarm = registerWorkspacePolicyPlugin(state);
 

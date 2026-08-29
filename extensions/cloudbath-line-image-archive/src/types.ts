@@ -155,6 +155,8 @@ export type ArchiveConfig = {
   notion: {
     apiKey: string;
   };
+  /** Public origin only. Private object identity and credentials never appear here. */
+  publicAssetBaseUrl: string | undefined;
   retry: {
     maxAttempts: number;
     baseDelayMs: number;

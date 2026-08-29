@@ -124,6 +124,7 @@ export class R2ArchiveClient {
     private readonly logger: SafeLogger,
     client?: S3Like,
     private readonly presign: PresignLike = getSignedUrl,
+    private readonly fetchImpl: typeof fetch = fetch,
   ) {
     if (client) {
       this.client = client;
@@ -156,6 +157,41 @@ export class R2ArchiveClient {
       throw new Error("R2 signed read URL is invalid");
     }
     return url.toString();
+  }
+
+  async fetchPrivateObject(params: {
+    bucketName: string;
+    objectKey: string;
+    maxBytes: number;
+    contentTypePrefix: string;
+  }): Promise<{ bytes: Uint8Array; contentType: string }> {
+    const signedUrl = await this.createTemporaryReadUrl(params);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15_000);
+    timeout.unref?.();
+    try {
+      const response = await this.fetchImpl(signedUrl, {
+        method: "GET",
+        redirect: "error",
+        signal: controller.signal,
+      });
+      const contentType = response.headers.get("content-type")?.split(";", 1)[0]?.trim() ?? "";
+      const declaredLength = Number(response.headers.get("content-length"));
+      if (
+        response.status !== 200 ||
+        !contentType.toLowerCase().startsWith(params.contentTypePrefix.toLowerCase()) ||
+        (Number.isFinite(declaredLength) && declaredLength > params.maxBytes)
+      ) {
+        throw new Error("R2 private asset response is invalid");
+      }
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      if (bytes.byteLength < 1 || bytes.byteLength > params.maxBytes) {
+        throw new Error("R2 private asset response is invalid");
+      }
+      return { bytes, contentType };
+    } finally {
+      clearTimeout(timeout);
+    }
   }
 
   private retryOptions(operation: string): RetryOptions {
