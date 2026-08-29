@@ -32,9 +32,13 @@ const NOTION_ID_DIGITS = ["1", "2", "3", "4", "5", "6", "a", "b", "c", "d", "e",
 
 export function createWorkspacePolicyStateRuntime() {
   const namespaces = new Map<string, Map<string, StoredValue>>();
+  // Recorded so a test can assert HOW a namespace was opened, not just what it
+  // holds: overflow policy decides whether durable history can be evicted.
+  const openedStores = new Map<string, OpenKeyedStoreOptions>();
   const openKeyedStore: OpenClawPluginApi["runtime"]["state"]["openKeyedStore"] = <T>(
     options: OpenKeyedStoreOptions,
   ): PluginStateKeyedStore<T> => {
+    openedStores.set(options.namespace, options);
     let values = namespaces.get(options.namespace);
     if (!values) {
       values = new Map();
@@ -104,7 +108,7 @@ export function createWorkspacePolicyStateRuntime() {
       },
     };
   };
-  return { openKeyedStore };
+  return { openKeyedStore, openedStores };
 }
 
 function pluginConfig(): Record<string, unknown> {

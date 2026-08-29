@@ -61,6 +61,34 @@ function memoryStore<T>(): AsyncKeyedStore<T> {
   };
 }
 
+/**
+ * Keyed store with a hard row cap that REJECTS new keys once full, mirroring the
+ * SQLite store's "reject-new" overflow policy. The production alternative,
+ * "evict-oldest", would delete the oldest row in the namespace instead --
+ * silently destroying v1 of a live project.
+ */
+function cappedStore<T>(capacity: number): AsyncKeyedStore<T> {
+  const inner = memoryStore<T>();
+  const keys = new Set<string>();
+  const guard = async (key: string) => {
+    if (!keys.has(key) && keys.size >= capacity) {
+      throw new Error(`Plugin state namespace reached its ${capacity}-row limit.`);
+    }
+    keys.add(key);
+  };
+  return {
+    ...inner,
+    register: async (key, value) => {
+      await guard(key);
+      return inner.register(key, value);
+    },
+    registerIfAbsent: async (key, value) => {
+      await guard(key);
+      return inner.registerIfAbsent(key, value);
+    },
+  };
+}
+
 function newStore() {
   return new PrevisStore({
     heads: memoryStore<PrevisProjectHead>(),
@@ -369,6 +397,53 @@ describe("previs time-range edits and versioning", () => {
     expect(historical?.version.document.movements).toEqual([
       { standIn: "A", startSecond: 0, endSecond: 15, beat: "walks past B, then slows" },
     ]);
+  });
+});
+
+describe("previs immutable history under store pressure", () => {
+  it("refuses a new version instead of silently dropping an older one", async () => {
+    const versions = cappedStore<PrevisVersion>(2);
+    const store = new PrevisStore({
+      heads: memoryStore<PrevisProjectHead>(),
+      versions,
+      now: () => Date.parse("2026-08-29T12:00:00.000Z"),
+      artifactKeyPrefix: "previs/cozyclay",
+    });
+    const { result } = await prepare({ store });
+    const token = new URL(result.reviewUrl).pathname.split("/")[3]!;
+    const edit = { standIn: "A", fromSecond: 10, toSecond: 14, beat: "turns around" } as const;
+
+    const v2 = await store.appendEdit({
+      previsProjectId: result.previsProjectId,
+      claim: CLAIM,
+      edit,
+    });
+    expect(v2.versionNumber).toBe(2);
+
+    // The store is now full. A third version must fail closed, not evict v1.
+    await expect(
+      store.appendEdit({
+        previsProjectId: result.previsProjectId,
+        claim: CLAIM,
+        edit: { standIn: "B", fromSecond: 6, toSecond: 9, beat: "jumps backwards" },
+      }),
+    ).rejects.toThrow(/row limit/u);
+
+    // v1 and v2 both survive the refusal and stay retrievable for compare/undo.
+    for (const versionNumber of [1, 2]) {
+      const historical = await store.resolveForReview({
+        previsProjectId: result.previsProjectId,
+        token,
+        versionNumber,
+      });
+      expect(historical?.version.versionNumber).toBe(versionNumber);
+    }
+    const latest = await store.resolveForReview({
+      previsProjectId: result.previsProjectId,
+      token,
+    });
+    // The head never advanced past the version that was actually written.
+    expect(latest?.head.latestVersionNumber).toBe(2);
   });
 });
 

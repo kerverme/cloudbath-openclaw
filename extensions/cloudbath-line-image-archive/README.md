@@ -757,6 +757,28 @@ Aspect ratio is the one field written directly into the artifact:
 `stage.shotAspect` accepts `9:16` in CozyClay's scene normaliser, but no MCP
 tool sets it headlessly. CozyClay honours the written value on `open_project`.
 
+### Phase 1 is foundation only — what is NOT wired yet
+
+Being explicit so nobody deploys this expecting a working previs engine:
+
+- `CozyClayMcpEngine` is **not instantiated in the production runtime**. It is
+  constructed only by its e2e test. `PrevisStore` and the review route _are_
+  wired in `index.ts`, so the URL and version chain are live, but
+  `preparePrevis()` is not called from any production path and therefore
+  receives neither an engine nor an artifact sink. Every previs created today
+  would carry `artifactObjectKey: null`.
+- **There is no provisioning path for CozyClay.** `cozyclay` is not a declared
+  dependency, nothing installs it in the Dockerfile or Railway config, and no
+  env var or plugin-config key feeds `CozyClayEngineConfig`. A deployment that
+  wants a real engine must first pin CozyClay 1.6.0 into the image and add
+  config plumbing for its `mcp/server.mjs` path.
+- The review surface is **JSON only** — no 3D viewport, no video, no preview
+  frame, no interactive timeline. Frame capture is editor-gated upstream and is
+  recorded as a deferral on every version.
+
+None of this blocks the layer's contracts: identity mapping, the version chain,
+the stable URL and the approval boundary are all live and tested.
+
 ### Versions, review URL and approval
 
 Versions are **immutable and append-only**. A natural-language time-range edit

@@ -295,17 +295,25 @@ export default definePluginEntry({
             };
             // Previs history outlives any scope window: an owner comparing v1
             // against v3 must still find v1, so neither store carries a TTL.
+            //
+            // Both namespaces reject new rows at the limit instead of evicting.
+            // "evict-oldest" deletes the oldest row in the NAMESPACE, protecting
+            // only the key just written -- it would silently delete v1 of a live
+            // project whose head still references it, or drop a head and orphan
+            // a project behind its stable URL. Immutable history has to fail
+            // closed: refusing a new previs is recoverable, losing an approved
+            // version an owner is comparing against is not.
             previsReview = {
               store: new PrevisStore({
                 heads: api.runtime.state.openKeyedStore<PrevisProjectHead>({
                   namespace: CLOUDBATH_PREVIS_HEAD_NAMESPACE,
                   maxEntries: CLOUDBATH_PREVIS_MAX_ENTRIES,
-                  overflowPolicy: "evict-oldest",
+                  overflowPolicy: "reject-new",
                 }),
                 versions: api.runtime.state.openKeyedStore<PrevisVersion>({
                   namespace: CLOUDBATH_PREVIS_VERSION_NAMESPACE,
                   maxEntries: CLOUDBATH_PREVIS_MAX_ENTRIES,
-                  overflowPolicy: "evict-oldest",
+                  overflowPolicy: "reject-new",
                 }),
                 now: Date.now,
                 artifactKeyPrefix: "previs/cozyclay",
