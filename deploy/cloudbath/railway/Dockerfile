@@ -187,6 +187,43 @@ RUN node scripts/list-prod-store-packages.mjs | xargs -r pnpm store add && \
     node scripts/check-package-dist-imports.mjs /app
 
 # ── Runtime base image ──────────────────────────────────────────
+# ── CozyClay previs engine (pinned) ─────────────────────────────
+# CozyClay is AGPL-3.0-or-later and is NOT vendored into this repository. It is
+# installed here as an unmodified published package and runs as a separate
+# process reached over MCP stdio; none of its code is linked into OpenClaw or
+# served to a browser.
+#
+# The version is pinned and verified at build time, so no request can ever
+# trigger an `npx`/"latest" download: an image either ships the exact validated
+# CozyClay or fails to build.
+#
+# `three` is an OPTIONAL PEER of cozyclay, so `--omit=dev` silently drops it and
+# the MCP server then dies at import with ERR_MODULE_NOT_FOUND. The pinned deps
+# are installed without that flag and the server is booted once here, so a
+# missing runtime dependency fails the build instead of the first render.
+#
+# Kept identical to the root Dockerfile's `cozyclay` stage on purpose: this is
+# a provisioning invariant, not a build-cache detail, so it is not subject to
+# this file's cache-mount-id stripping. `docker-cozyclay-parity.test.ts`
+# regression-checks the two files stay identical.
+FROM ${OPENCLAW_NODE_BOOKWORM_IMAGE} AS cozyclay
+ARG COZYCLAY_VERSION=1.6.0
+WORKDIR /opt
+RUN set -eux; \
+    npm install --global --no-audit --no-fund "cozyclay@${COZYCLAY_VERSION}"; \
+    root="$(npm root -g)/cozyclay"; \
+    test -f "$root/mcp/server.mjs"; \
+    installed="$(node -p "require('$root/package.json').version")"; \
+    test "$installed" = "${COZYCLAY_VERSION}"; \
+    cp -R "$root" /opt/cozyclay; \
+    npm install --prefix /opt/cozyclay --no-audit --no-fund --save=false \
+      @modelcontextprotocol/sdk@1.30.0 ws@8.21.3 zod@3.25.76 three@0.185.1; \
+    test -d /opt/cozyclay/node_modules/three; \
+    printf '' | timeout 60 node /opt/cozyclay/mcp/server.mjs 2>/tmp/cozyclay-boot.log || true; \
+    if grep -q ERR_MODULE_NOT_FOUND /tmp/cozyclay-boot.log; then \
+      cat /tmp/cozyclay-boot.log; exit 1; \
+    fi
+
 FROM ${OPENCLAW_NODE_BOOKWORM_SLIM_IMAGE} AS base-runtime
 ARG OPENCLAW_NODE_BOOKWORM_SLIM_DIGEST
 LABEL org.opencontainers.image.base.name="docker.io/library/node:24-bookworm-slim" \
@@ -232,6 +269,12 @@ COPY --from=runtime-assets --chown=node:node /app/${OPENCLAW_BUNDLED_PLUGIN_DIR}
 COPY --from=runtime-assets --chown=node:node /app/skills ./skills
 COPY --from=runtime-assets --chown=node:node /app/docs ./docs
 COPY --from=runtime-assets --chown=node:node /app/qa ./qa
+
+# Pinned previs engine. CLOUDBATH_COZYCLAY_ROOT lets a deployment point at a
+# different verified install; the plugin re-checks the version on startup.
+COPY --from=cozyclay --chown=node:node /opt/cozyclay /opt/cozyclay
+ENV CLOUDBATH_COZYCLAY_ROOT=/opt/cozyclay \
+    CLOUDBATH_COZYCLAY_VERSION=1.6.0
 
 # Keep pnpm available in the runtime image for container-local workflows.
 # Use a shared Corepack home so the non-root `node` user does not need a
