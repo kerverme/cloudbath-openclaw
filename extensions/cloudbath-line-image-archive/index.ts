@@ -556,27 +556,16 @@ export default definePluginEntry({
           ? { handled: true, text: "Workspace policy service is unavailable." }
           : undefined;
       }
-      // The owner taking a turn refreshes the UGC session TTL whatever answers
-      // it. Running this only on the fall-through path let a claimed turn --
-      // now the common case, since storyboard is the default flow -- expire a
-      // legacy prepare session out from under the video draft tool.
-      await runtime.ugcWorkflow?.observeTurn({
-        channelId: ctx.channelId,
-        accountId: ctx.accountId,
-        conversationId: ctx.conversationId,
-        sessionKey: ctx.sessionKey,
-        senderId: event.senderId,
-        senderIsOwner: event.senderIsOwner,
-      });
       const characterResult = await runtime.ugcCharacterWorkflow?.handleBeforeDispatch(event, ctx);
       if (characterResult) {
         return characterResult;
       }
-      // Storyboard is the default video flow and runs FIRST, so a natural
-      // video request becomes a storyboard rather than a previs. It declines
-      // explicit previs requests, and declines edits and draft requests when
-      // this owner has no active storyboard, which leaves the previs routing
-      // below reachable exactly as before.
+      // Storyboard is the default video flow and runs FIRST, so a natural video
+      // request becomes a storyboard rather than a previs. It declines anything
+      // prefixed `PREVIS`, and declines edits and draft requests when this owner
+      // has no active storyboard. Once a storyboard IS active it also answers
+      // bare time-range edits; an explicit `PREVIS <range> ...` still reaches
+      // the previs router below.
       const storyboardResult = await runtime.storyboardLineRouter?.handleBeforeDispatch(event, ctx);
       if (storyboardResult) {
         return storyboardResult;
@@ -587,6 +576,14 @@ export default definePluginEntry({
       if (previsResult) {
         return previsResult;
       }
+      await runtime.ugcWorkflow?.observeTurn({
+        channelId: ctx.channelId,
+        accountId: ctx.accountId,
+        conversationId: ctx.conversationId,
+        sessionKey: ctx.sessionKey,
+        senderId: event.senderId,
+        senderIsOwner: event.senderIsOwner,
+      });
       return await registry.handleBeforeDispatch(event, ctx);
     });
 

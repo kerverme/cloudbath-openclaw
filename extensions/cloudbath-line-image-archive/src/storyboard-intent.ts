@@ -42,22 +42,31 @@ const CREATE_VIDEO_PATTERN =
   /^(?:สร้าง|ทำ)\s*(?:วิดีโอ|วีดีโอ|วิดิโอ|คลิป)(?:\s*(?:เลย|ครับ|ค่ะ|คะ|นะ|หน่อย|ให้หน่อย|ได้เลย))*$|^(?:create|make|generate)\s+(?:the\s+)?video$/iu;
 
 /**
- * Scene words that make a named-cast message read as a video request.
+ * Nouns that name a video artefact outright.
  *
- * No `\b` after the Thai alternatives: JavaScript word boundaries are
- * ASCII-based, so `วิ\b` never matched Thai text and silently disabled most of
- * this branch.
+ * Deliberately narrow. An earlier version matched a bare "วิ" and any "\d:\d",
+ * which made "Twong คิดว่าวิธีนี้ดีไหม" and "Twong มาถึงตอน 10:30 นะ" read as
+ * scene requests — and a claimed create writes a real Notion project and scene.
+ * Duration and aspect are detected by their own parsers instead, so a match
+ * means the message really did name one.
  */
-const SCENE_WORDS =
-  /วินาที|วิ|ฉาก|แนวตั้ง|แนวนอน|คลิป|วิดีโอ|วีดีโอ|seconds?\b|sec\b|scene|shot|\d\s*:\s*\d/iu;
+const SCENE_NOUNS = /ฉาก|คลิป|วิดีโอ|วีดีโอ|scene\b|shot\b|storyboard/iu;
+
+const CASTING_MARKER = /(?:^|\s)(?:ใช้|ให้)\s*\S/u;
 
 /**
- * An explicit casting instruction, e.g. "ใช้ Twong ..." / "ให้ Twong เดิน".
+ * The range expression itself, so it does not survive into the beat.
  *
- * A recognised verb alone is far too weak to claim the turn: a create writes a
- * real Notion project and scene, so "Twong ยืนอยู่ไหน" must stay conversation.
+ * The stored `action` becomes the beat's instruction and is copied into the
+ * provider-neutral plan, so leaving "วิ 10-14" in it would hand a video model
+ * a timestamp as part of the thing to depict.
  */
-const CASTING_MARKER = /(?:^|\s)(?:ใช้|ให้)\s*\S/u;
+const RANGE_SPAN =
+  /(?:วินาที|วิ|ช่วง|seconds?|sec)?\s*\d{1,3}\s*(?:-|–|—|ถึง|to)\s*\d{1,3}\s*(?:วินาที|วิ|seconds?|sec|s)?/iu;
+
+export function stripTimeRangeSpan(text: string): string {
+  return text.replace(RANGE_SPAN, " ").replace(/\s+/gu, " ").trim();
+}
 
 export type StoryboardIntent =
   | Readonly<{
@@ -109,7 +118,7 @@ export function parseStoryboardIntent(params: {
       toSeconds: range.toSecond,
       characterNames: matched,
       unknownNames,
-      action: text,
+      action: stripTimeRangeSpan(text),
     };
   }
 
@@ -118,13 +127,20 @@ export function parseStoryboardIntent(params: {
   // character name is conversation, and claiming it would mint a real Notion
   // project and scene for a question.
   const hasAction = parseStoryboardActions(text, params.knownCharacterNames).length > 0;
-  const looksLikeScene = SCENE_WORDS.test(text) || (hasAction && CASTING_MARKER.test(text));
-  if (matched.length === 0 || !looksLikeScene) {
-    return undefined;
-  }
   const durationSeconds = readStoryboardDuration(text);
   const aspectRatio = readStoryboardAspectRatio(text);
   const resolution = readStoryboardResolution(text);
+  // A named dimension the parsers actually resolved, an explicit video noun, or
+  // a casting instruction carrying a recognised action. A loose keyword match is
+  // not enough: a claimed create writes a real Notion project and scene.
+  const looksLikeScene =
+    durationSeconds !== undefined ||
+    aspectRatio !== undefined ||
+    SCENE_NOUNS.test(text) ||
+    (hasAction && CASTING_MARKER.test(text));
+  if (matched.length === 0 || !looksLikeScene) {
+    return undefined;
+  }
   return {
     kind: "create",
     characterNames: matched,

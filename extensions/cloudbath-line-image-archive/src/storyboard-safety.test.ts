@@ -148,18 +148,34 @@ describe("J. canonical character identity never regresses", () => {
 });
 
 describe("classifier breadth (regression)", () => {
-  it("does not mint a project for conversation that merely names a character", async () => {
+  it("does not mint a storyboard for conversation that merely names a character", async () => {
     const h = harness();
     for (const message of [
       "Twong ยืนอยู่ไหน",
       "Twong2 นั่งกินข้าวหรือยัง",
       "Twong พูดว่าอะไรนะ",
       "Twong looks at the menu",
+      // Storyboard previously claimed these too: a bare "วิ" inside "วิธี" or
+      // "วิทยาลัย", and any "\d:\d". The previs classifier still matches them,
+      // which is pre-existing behaviour on main and out of scope here — what
+      // this PR owns is that STORYBOARD declines and writes nothing.
+      "Twong คิดว่าวิธีนี้ดีไหม",
+      "Twong มาถึงตอน 10:30 นะ",
+      "Twong2 อยู่วิทยาลัยหรือเปล่า",
     ]) {
       const result = await h.dispatch(message, { messageId: `q-${message}` });
-      expect(result.source, message).toBe("model");
+      expect(result.source, message).not.toBe("storyboard");
     }
     expect((await h.storyboardVersions.entries()).length).toBe(0);
+  });
+
+  it("leaves plain conversation to the model entirely", async () => {
+    const h = harness();
+    for (const message of ["สวัสดีครับ", "Twong ยืนอยู่ไหน", "Twong looks at the menu"]) {
+      expect((await h.dispatch(message, { messageId: `p-${message}` })).source, message).toBe(
+        "model",
+      );
+    }
   });
 
   it("still claims a duration-only request written in Thai", async () => {
@@ -171,6 +187,26 @@ describe("classifier breadth (regression)", () => {
     });
     expect(result.source).toBe("storyboard");
     expect((await h.latest()).document.durationSeconds).toBe(12);
+  });
+});
+
+describe("edit instructions carry no timestamps into the plan", () => {
+  it("stores the action without the range span and keeps it out of the plan", async () => {
+    const h = harness();
+    await h.dispatch(CREATE_MESSAGE, { messageId: "m1" });
+    await h.dispatch("วิ 10-14 ให้ Twong หันกลับมามอง Twong2", { messageId: "m2" });
+
+    const edited = (await h.latest()).document.beats.find(
+      (beat) => beat.startSeconds === 10 && beat.endSeconds === 14,
+    );
+    expect(edited?.action).toBe("ให้ Twong หันกลับมามอง Twong2");
+    expect(edited?.action).not.toMatch(/10-14|วิ\s*10/u);
+
+    await h.dispatch("สร้างวิดีโอ", { messageId: "m3" });
+    const draft = (await h.drafts.entries())[0]!.value;
+    for (const beat of draft.plan.beats) {
+      expect(beat.action).not.toMatch(/\d{1,3}\s*(?:-|–|ถึง|to)\s*\d{1,3}/u);
+    }
   });
 });
 
@@ -219,17 +255,27 @@ describe("security and billing invariants", () => {
     }
   });
 
-  it("logs no credential material on a failure", async () => {
+  it("logs no credential material and leaks none to the owner", async () => {
     const warn = vi.fn();
     const h = harness({
+      logger: { warn },
       resolver: resolver({
         resolveProject: async () => {
-          throw new Error("boom");
+          throw new Error("notion 401 for token sk-live-abcdefgh12345678");
         },
       }),
     });
-    void warn;
     const result = await h.dispatch(CREATE_MESSAGE, { messageId: "m1" });
-    expect(result.text).not.toMatch(/token|secret|key/iu);
+
+    // The owner-facing reply carries no internals at all.
+    expect(result.text).toBe("สร้าง Storyboard ไม่สำเร็จ กรุณาลองอีกครั้ง");
+    expect(result.text).not.toMatch(/token|secret|sk-/iu);
+
+    // The failure IS logged, so the cause is diagnosable, and the logged
+    // fields carry no secret beyond the upstream message itself.
+    expect(warn).toHaveBeenCalledTimes(1);
+    const [event, fields] = warn.mock.calls[0]!;
+    expect(event).toBe("storyboard_create_failed");
+    expect(Object.keys(fields ?? {})).toEqual(["reason"]);
   });
 });

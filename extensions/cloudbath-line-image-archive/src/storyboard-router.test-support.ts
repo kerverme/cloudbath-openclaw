@@ -50,6 +50,8 @@ const lock = (code: string, pageId: string): UgcCharacterLock =>
     frozenAt: "2026-08-30T00:00:00.000Z",
   });
 
+export type LoggerWarn = (event: string, fields?: Record<string, unknown>) => void;
+
 function mem<T>(): AsyncKeyedStore<T> {
   const m = new Map<string, T>();
   return {
@@ -97,7 +99,9 @@ type DispatchOutcome = {
   text?: string;
 };
 
-export function harness(options: { resolver?: StoryboardProjectResolver } = {}) {
+export function harness(
+  options: { resolver?: StoryboardProjectResolver; logger?: { warn: LoggerWarn } } = {},
+) {
   const shared = options.resolver ?? resolver();
   const storyboardVersions = mem<StoryboardVersion>();
   const storyboardHeads = mem<StoryboardHead>();
@@ -153,6 +157,7 @@ export function harness(options: { resolver?: StoryboardProjectResolver } = {}) 
     registry: { lookup: async () => ({ policyId: "UGC", boundByOwnerId: OWNER }) },
     now: () => Date.parse("2026-08-30T10:00:00.000Z"),
     randomId: () => `draft-${(nextDraft += 1)}`,
+    ...(options.logger ? { logger: options.logger } : {}),
   });
 
   /** The plugin's real before_dispatch order. */

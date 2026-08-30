@@ -89,9 +89,18 @@ export function normalizeStoryboardText(text: string): string {
   return text.normalize("NFKC").replaceAll("\u0E4D\u0E32", "\u0E33").trim();
 }
 
-/** Requested scene length in whole seconds, when the message names one. */
+/**
+ * Requested scene length in whole seconds, when the message names one.
+ *
+ * Both sides are anchored deliberately. Without the leading guard, the "2" in
+ * a cast name like "Twong2" reads as a number; without the trailing guard,
+ * "วิ" matches the start of an unrelated word such as "วิ่ง". Together those
+ * two turned "Twong2 วิ่งเล่น … 30 วินาที" into a 2-second scene.
+ */
 export function readStoryboardDuration(text: string): number | undefined {
-  const match = text.match(/(\d{1,3})\s*(?:วินาที|วิ|s\b|sec\b|seconds?\b)/iu);
+  const match = text.match(
+    /(?:^|[^\p{L}\p{N}])(\d{1,3})\s*(?:วินาที|วิ|seconds?|sec|s)(?![\p{L}\p{N}\p{M}])/iu,
+  );
   const seconds = Number(match?.[1]);
   return Number.isSafeInteger(seconds) && seconds >= 1 && seconds <= STORYBOARD_MAX_DURATION_SECONDS
     ? seconds

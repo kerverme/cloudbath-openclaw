@@ -5,7 +5,7 @@ import {
   compileStoryboardDocument,
 } from "./storyboard-compiler.js";
 import { formatStoryboardForLine } from "./storyboard-format.js";
-import { parseStoryboardIntent } from "./storyboard-intent.js";
+import { parseStoryboardIntent, stripTimeRangeSpan } from "./storyboard-intent.js";
 import {
   parseStoryboardActions,
   readStoryboardAspectRatio,
@@ -115,6 +115,34 @@ describe("request parsing", () => {
   it("does not mistake the shorter cast name for the longer one", () => {
     const actions = parseStoryboardActions("ให้ Twong เดินผ่าน Twong2", NAMES);
     expect(actions[0]!.object).toBe("Twong2");
+  });
+});
+
+describe("request parsing regressions", () => {
+  it("does not read a cast-name digit or a same-prefix word as a duration", () => {
+    // "Twong2 วิ่ง…" previously parsed as 2 seconds: the "2" came from the cast
+    // name and the unit from the first syllable of "วิ่ง".
+    const text = "ใช้ Twong กับ Twong2 วิ่งเล่นในสวน 30 วินาที";
+    expect(readStoryboardDuration(text)).toBe(30);
+    expect(readStoryboardDuration("Twong2 วิ่งเล่น")).toBeUndefined();
+    expect(readStoryboardDuration("Twong มาถึงตอน 10:30 นะ")).toBeUndefined();
+  });
+
+  it("still reads every supported duration form", () => {
+    expect(readStoryboardDuration("ใช้ Twong เดิน 15 วิ แนวตั้ง")).toBe(15);
+    expect(readStoryboardDuration("ใช้ Twong เดิน 10 sec")).toBe(10);
+    expect(readStoryboardDuration("ใช้ Twong เดิน 10 seconds")).toBe(10);
+    expect(readStoryboardDuration("ใช้ Twong เดิน 12s")).toBe(12);
+  });
+
+  it("strips the time-range span out of an edit instruction", () => {
+    expect(stripTimeRangeSpan("วิ 10-14 ให้ Twong หันกลับมามอง Twong2")).toBe(
+      "ให้ Twong หันกลับมามอง Twong2",
+    );
+    expect(stripTimeRangeSpan("ช่วง 3 ถึง 6 วิ เปลี่ยนเป็น close-up Twong2")).toBe(
+      "เปลี่ยนเป็น close-up Twong2",
+    );
+    expect(stripTimeRangeSpan("10-14 sec ให้ Twong หันกลับ")).toBe("ให้ Twong หันกลับ");
   });
 });
 
