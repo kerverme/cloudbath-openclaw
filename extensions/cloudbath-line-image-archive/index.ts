@@ -52,6 +52,8 @@ import type { PrevisProjectHead, PrevisVersion } from "./src/previs-types.js";
 import { CLOUDBATH_PREVIS_VIEW_ROUTE } from "./src/previs-url.js";
 import { resolveSchemaForAgent } from "./src/profiles.js";
 import { R2ArchiveClient } from "./src/r2.js";
+import type { CloudbathStoryboardLineRouter } from "./src/storyboard-line-router.js";
+import { createCloudbathStoryboardLineRouter } from "./src/storyboard-runtime.js";
 import type {
   AgentProfile,
   ActiveUgcLineSession,
@@ -151,6 +153,7 @@ export default definePluginEntry({
     let previsReview: PrevisReviewRuntime | undefined;
     let previsService: CloudbathPrevisService | undefined;
     let previsLineRouter: CloudbathPrevisLineRouter | undefined;
+    let storyboardLineRouter: CloudbathStoryboardLineRouter | undefined;
     let activeConfig: ArchiveConfig | undefined;
 
     api.registerHttpRoute({
@@ -269,6 +272,14 @@ export default definePluginEntry({
           });
           const ugcNotion = new UgcNotionWorkflowClient(config.notion.apiKey, config.retry, logger);
           const r2 = new R2ArchiveClient(config.r2, config.retry, logger);
+          // Display names are durable per project instance and shared by both
+          // flows, so the storyboard and previs resolvers must read the SAME
+          // record rather than each keeping its own idea of who "Twong" is.
+          const previsDisplayNames = api.runtime.state.openKeyedStore<PrevisDisplayNameRecord>({
+            namespace: CLOUDBATH_PREVIS_DISPLAY_NAMES_NAMESPACE,
+            maxEntries: CLOUDBATH_PREVIS_ACTIVE_MAX_ENTRIES,
+            overflowPolicy: "evict-oldest",
+          });
           ugcWorkflow = new CloudbathUgcVideoWorkflow(
             workspaceConfig.ugc,
             workspaceRegistry,
@@ -299,6 +310,21 @@ export default definePluginEntry({
             logger,
             config.publicAssetBaseUrl,
           );
+          // Storyboard is the DEFAULT natural-language video flow and needs no
+          // engine, bucket or public URL, so it is wired before the previs block
+          // rather than inside its infrastructure gate.
+          const storyboardResolver = createPrevisProjectResolver({
+            workflow: ugcWorkflow,
+            notion: ugcNotion,
+            capabilities: workspaceConfig.ugc.capabilities,
+            displayNames: previsDisplayNames,
+          });
+          storyboardLineRouter = createCloudbathStoryboardLineRouter({
+            state: api.runtime.state,
+            resolver: storyboardResolver,
+            workspaceRegistry,
+            logger,
+          });
           if (
             config.publicAssetBaseUrl &&
             config.r2.bucketName &&
@@ -360,18 +386,9 @@ export default definePluginEntry({
               // and can no longer answer with a generic confirmation.
               previsLineRouter = new CloudbathPrevisLineRouter({
                 service: previsService,
-                resolver: createPrevisProjectResolver({
-                  // The SAME workflow the video tool uses, so previs attaches to
-                  // a real UGC project and shot rather than a shadow identity.
-                  workflow: ugcWorkflow!,
-                  notion: ugcNotion,
-                  capabilities: workspaceConfig.ugc.capabilities,
-                  displayNames: api.runtime.state.openKeyedStore<PrevisDisplayNameRecord>({
-                    namespace: CLOUDBATH_PREVIS_DISPLAY_NAMES_NAMESPACE,
-                    maxEntries: CLOUDBATH_PREVIS_ACTIVE_MAX_ENTRIES,
-                    overflowPolicy: "evict-oldest",
-                  }),
-                }),
+                // The SAME resolver the storyboard flow uses, so previs attaches
+                // to a real UGC project and shot rather than a shadow identity.
+                resolver: storyboardResolver,
                 active: api.runtime.state.openKeyedStore<ActivePrevisContext>({
                   namespace: CLOUDBATH_PREVIS_ACTIVE_NAMESPACE,
                   maxEntries: CLOUDBATH_PREVIS_ACTIVE_MAX_ENTRIES,
@@ -451,6 +468,7 @@ export default definePluginEntry({
             ...(previsReview ? { previsReview } : {}),
             ...(previsService ? { previsService } : {}),
             ...(previsLineRouter ? { previsLineRouter } : {}),
+            ...(storyboardLineRouter ? { storyboardLineRouter } : {}),
             ...(keepWatchingPipeline ? { keepWatchingPipeline } : {}),
             ...(pipeline ? { pipeline } : {}),
             ...(activeConfig ? { activeConfig } : {}),
@@ -521,6 +539,7 @@ export default definePluginEntry({
         pipeline = undefined;
         keepWatchingPipeline = undefined;
         workspaceRegistry = undefined;
+        storyboardLineRouter = undefined;
         ugcWorkflow = undefined;
         ugcCharacterWorkflow = undefined;
         characterAssetView = undefined;
@@ -537,16 +556,10 @@ export default definePluginEntry({
           ? { handled: true, text: "Workspace policy service is unavailable." }
           : undefined;
       }
-      const characterResult = await runtime.ugcCharacterWorkflow?.handleBeforeDispatch(event, ctx);
-      if (characterResult) {
-        return characterResult;
-      }
-      // Previs claims the turn before the model runs, so a character-led scene
-      // request cannot terminate as a generic confirmation.
-      const previsResult = await runtime.previsLineRouter?.handleBeforeDispatch(event, ctx);
-      if (previsResult) {
-        return previsResult;
-      }
+      // The owner taking a turn refreshes the UGC session TTL whatever answers
+      // it. Running this only on the fall-through path let a claimed turn --
+      // now the common case, since storyboard is the default flow -- expire a
+      // legacy prepare session out from under the video draft tool.
       await runtime.ugcWorkflow?.observeTurn({
         channelId: ctx.channelId,
         accountId: ctx.accountId,
@@ -555,6 +568,25 @@ export default definePluginEntry({
         senderId: event.senderId,
         senderIsOwner: event.senderIsOwner,
       });
+      const characterResult = await runtime.ugcCharacterWorkflow?.handleBeforeDispatch(event, ctx);
+      if (characterResult) {
+        return characterResult;
+      }
+      // Storyboard is the default video flow and runs FIRST, so a natural
+      // video request becomes a storyboard rather than a previs. It declines
+      // explicit previs requests, and declines edits and draft requests when
+      // this owner has no active storyboard, which leaves the previs routing
+      // below reachable exactly as before.
+      const storyboardResult = await runtime.storyboardLineRouter?.handleBeforeDispatch(event, ctx);
+      if (storyboardResult) {
+        return storyboardResult;
+      }
+      // Previs claims the turn before the model runs, so a character-led scene
+      // request cannot terminate as a generic confirmation.
+      const previsResult = await runtime.previsLineRouter?.handleBeforeDispatch(event, ctx);
+      if (previsResult) {
+        return previsResult;
+      }
       return await registry.handleBeforeDispatch(event, ctx);
     });
 

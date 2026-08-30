@@ -1,0 +1,235 @@
+import { describe, expect, it, vi } from "vitest";
+import {
+  CREATE_MESSAGE,
+  expectNoPaidCalls,
+  harness,
+  NAMES,
+  paidSpies,
+  resolver,
+} from "./storyboard-router.test-support.js";
+
+describe("E. a generic confirmation can never pay", () => {
+  it("leaves bare agreements to the normal flow and drafts nothing", async () => {
+    const paid = paidSpies();
+    const h = harness();
+    await h.dispatch(CREATE_MESSAGE, { messageId: "m1" });
+
+    for (const message of ["ยืนยัน", "โอเค", "ทำเลย", "เอาเลย", "สร้างเลย", "yes", "confirm", "go"]) {
+      const result = await h.dispatch(message, { messageId: `m-${message}` });
+      expect(result.source, message).toBe("model");
+      expect(result.handled, message).toBe(false);
+    }
+    expect((await h.drafts.entries()).length).toBe(0);
+    expectNoPaidCalls(paid);
+  });
+});
+
+describe("F. the exact VIDEO confirmation gate is untouched", () => {
+  it("never claims a message shaped like the paid confirmation", async () => {
+    const h = harness();
+    await h.dispatch(CREATE_MESSAGE, { messageId: "m1" });
+    for (const code of ["1234", "4827", "0001"]) {
+      const result = await h.dispatch(`ยืนยัน VIDEO ${code}`, { messageId: `c-${code}` });
+      expect(result.source, code).toBe("model");
+    }
+  });
+
+  it("keeps the shipped gate pattern intact", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const source = await readFile("extensions/line/src/video-confirmation.ts", "utf8");
+    expect(source).toContain(String.raw`/^ยืนยัน\s+VIDEO\s+(\d{4})$/iu`);
+  });
+});
+
+describe("G. previs stays reachable for explicit legacy requests", () => {
+  it("routes a natural request to storyboard, not previs", async () => {
+    const h = harness();
+    expect((await h.dispatch(CREATE_MESSAGE, { messageId: "m1" })).source).toBe("storyboard");
+    expect((await h.previsVersions.entries()).length).toBe(0);
+  });
+
+  it("routes an explicit PREVIS request to the previs flow", async () => {
+    const h = harness();
+    const result = await h.dispatch(`PREVIS ${CREATE_MESSAGE}`, { messageId: "p1" });
+    expect(result.source).toBe("previs");
+    expect(result.text).toContain("Previs v1");
+    expect((await h.previsVersions.entries()).length).toBe(1);
+    expect(h.previsEngineCalls).toHaveBeenCalledTimes(1);
+  });
+
+  it("routes an explicit previs approval to the previs flow", async () => {
+    const h = harness();
+    await h.dispatch(`PREVIS ${CREATE_MESSAGE}`, { messageId: "p1" });
+    const result = await h.dispatch("APPROVE PREVIS", { messageId: "p2" });
+    expect(result.source).toBe("previs");
+    expect(result.text).toContain("อนุมัติ Previs");
+  });
+});
+
+describe("H. inbound retries are idempotent", () => {
+  it("replays the first reply instead of creating a second version or draft", async () => {
+    const h = harness();
+    const first = await h.dispatch(CREATE_MESSAGE, { messageId: "m1" });
+    const replay = await h.dispatch(CREATE_MESSAGE, { messageId: "m1" });
+    expect(replay.text).toBe(first.text);
+    expect((await h.storyboardVersions.entries()).length).toBe(1);
+
+    await h.dispatch("วิ 10-14 ให้ Twong หันกลับมามอง Twong2", { messageId: "m2" });
+    await h.dispatch("วิ 10-14 ให้ Twong หันกลับมามอง Twong2", { messageId: "m2" });
+    expect((await h.storyboardVersions.entries()).length).toBe(2);
+
+    const draft = await h.dispatch("สร้างวิดีโอ", { messageId: "m3" });
+    const draftReplay = await h.dispatch("สร้างวิดีโอ", { messageId: "m3" });
+    expect(draftReplay.text).toBe(draft.text);
+    expect((await h.drafts.entries()).length).toBe(1);
+  });
+});
+
+describe("I. concurrent edits never silently overwrite", () => {
+  it("lets exactly one edit win and tells the other to retry", async () => {
+    const h = harness();
+    await h.dispatch(CREATE_MESSAGE, { messageId: "m1" });
+
+    const [left, right] = await Promise.all([
+      h.dispatch("วิ 3-6 ให้ Twong หยุดมอง Twong2", { messageId: "edit-a" }),
+      h.dispatch("วิ 8-11 ให้ Twong2 เดินออกไป", { messageId: "edit-b" }),
+    ]);
+
+    const outcomes = [left.text, right.text];
+    const winners = outcomes.filter((text) => text?.includes("Storyboard v2"));
+    const rejected = outcomes.filter((text) => text?.includes("พร้อมกัน"));
+    expect(winners.length).toBe(1);
+    expect(rejected.length).toBe(1);
+    // Exactly two versions exist: v1 and the single winning v2.
+    expect((await h.storyboardVersions.entries()).length).toBe(2);
+    expect((await h.latest()).versionNumber).toBe(2);
+  });
+});
+
+describe("J. canonical character identity never regresses", () => {
+  it("stores canonical ids while display names stay presentation only", async () => {
+    const h = harness();
+    await h.dispatch(CREATE_MESSAGE, { messageId: "m1" });
+    const version = await h.latest();
+
+    expect(version.characterLocks.map((entry) => entry.code)).toEqual(["CHAR-6", "CHAR-7"]);
+    for (const member of version.document.cast) {
+      expect(member.characterId).toMatch(/^CHAR-\d+$/u);
+      expect(member.characterId).not.toBe(member.displayName);
+    }
+    for (const beat of version.document.beats) {
+      for (const id of beat.characterIds) {
+        expect(NAMES).not.toContain(id);
+        expect(id).toMatch(/^CHAR-\d+$/u);
+      }
+    }
+  });
+
+  it("fails closed when a named character is not in the library", async () => {
+    const h = harness();
+    const result = await h.dispatch("ใช้ Twong กับ Nobody ให้เดินคุยกัน 10 วิ แนวตั้ง", { messageId: "m1" });
+    expect(result.source).toBe("storyboard");
+    expect(result.text).toContain("Nobody");
+    expect((await h.storyboardVersions.entries()).length).toBe(0);
+  });
+
+  it("fails closed when the resolver cannot produce a canonical id", async () => {
+    const h = harness({
+      resolver: resolver({
+        resolveProject: async () => {
+          throw new Error('Character "Twong" has no generated Character ID');
+        },
+      }),
+    });
+    const result = await h.dispatch(CREATE_MESSAGE, { messageId: "m1" });
+    expect(result.text).toContain("ไม่สำเร็จ");
+    expect((await h.storyboardVersions.entries()).length).toBe(0);
+  });
+});
+
+describe("classifier breadth (regression)", () => {
+  it("does not mint a project for conversation that merely names a character", async () => {
+    const h = harness();
+    for (const message of [
+      "Twong ยืนอยู่ไหน",
+      "Twong2 นั่งกินข้าวหรือยัง",
+      "Twong พูดว่าอะไรนะ",
+      "Twong looks at the menu",
+    ]) {
+      const result = await h.dispatch(message, { messageId: `q-${message}` });
+      expect(result.source, message).toBe("model");
+    }
+    expect((await h.storyboardVersions.entries()).length).toBe(0);
+  });
+
+  it("still claims a duration-only request written in Thai", async () => {
+    // JS word boundaries are ASCII-only, so a "วิ\\b" pattern silently matched
+    // nothing; this request must reach the storyboard flow.
+    const h = harness();
+    const result = await h.dispatch("ใช้ Twong กับ Twong2 อยู่ในร้านกาแฟ 12 วิ", {
+      messageId: "d1",
+    });
+    expect(result.source).toBe("storyboard");
+    expect((await h.latest()).document.durationSeconds).toBe(12);
+  });
+});
+
+describe("Final Video Draft never collides with the paid gate", () => {
+  it("emits no ยืนยัน VIDEO phrase and no 4-digit code while binding is deferred", async () => {
+    const h = harness();
+    await h.dispatch(CREATE_MESSAGE, { messageId: "m1" });
+    const result = await h.dispatch("สร้างวิดีโอ", { messageId: "m2" });
+
+    expect(result.text).not.toMatch(/ยืนยัน\s+VIDEO/u);
+    const draft = (await h.drafts.entries())[0]!.value;
+    expect(draft.confirmation).toEqual({ kind: "deferred" });
+    // A 4-digit id would live in the LINE paid draft store's code space.
+    expect(draft.draftId).not.toMatch(/^\d{4}$/u);
+  });
+
+  it("keeps an edited beat cast even when the edit names nobody in the cast", async () => {
+    const h = harness();
+    await h.dispatch(CREATE_MESSAGE, { messageId: "m1" });
+    await h.dispatch("วิ 10-14 ให้กล้องซูมเข้า", { messageId: "m2" });
+    const edited = (await h.latest()).document.beats.find(
+      (beat) => beat.startSeconds === 10 && beat.endSeconds === 14,
+    );
+    // An empty id list must not survive as the beat's cast.
+    expect(edited?.characterIds.length).toBeGreaterThan(0);
+    for (const id of edited!.characterIds) {
+      expect(id).toMatch(/^CHAR-\d+$/u);
+    }
+  });
+});
+
+describe("security and billing invariants", () => {
+  it("keeps every storyboard runtime module free of provider calls", async () => {
+    const { readdir, readFile } = await import("node:fs/promises");
+    const dir = "extensions/cloudbath-line-image-archive/src";
+    const files = (await readdir(dir)).filter(
+      (name) => name.startsWith("storyboard") && name.endsWith(".ts") && !name.includes(".test"),
+    );
+    expect(files.length).toBeGreaterThan(4);
+    for (const name of files) {
+      const source = await readFile(`${dir}/${name}`, "utf8");
+      expect(source, name).not.toMatch(/generateVideo|video-generation|openrouter|runway/iu);
+      expect(source, name).not.toMatch(/https?:\/\//u);
+      // "Seedance" may appear only as a display name, never as an api model id.
+      expect(source, name).not.toMatch(/bytedance\/|seedance-\d|seedance_\d/iu);
+    }
+  });
+
+  it("logs no credential material on a failure", async () => {
+    const warn = vi.fn();
+    const h = harness({
+      resolver: resolver({
+        resolveProject: async () => {
+          throw new Error("boom");
+        },
+      }),
+    });
+    void warn;
+    const result = await h.dispatch(CREATE_MESSAGE, { messageId: "m1" });
+    expect(result.text).not.toMatch(/token|secret|key/iu);
+  });
+});
