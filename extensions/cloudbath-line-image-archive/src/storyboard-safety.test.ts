@@ -234,6 +234,58 @@ describe("a time range alone is not an edit", () => {
   });
 });
 
+describe("turn-claiming under duplicates and follow-ups", () => {
+  it("creates one storyboard for two simultaneous deliveries of one message", async () => {
+    const h = harness();
+    const [a, b] = await Promise.all([
+      h.dispatch(CREATE_MESSAGE, { messageId: "dup-1" }),
+      h.dispatch(CREATE_MESSAGE, { messageId: "dup-1" }),
+    ]);
+    expect(a.text).toBe(b.text);
+    // One version total: the duplicate delivery minted no second Notion scene.
+    expect((await h.storyboardVersions.entries()).length).toBe(1);
+  });
+
+  it("does not start a second storyboard for a follow-up tweak", async () => {
+    const h = harness();
+    await h.dispatch(CREATE_MESSAGE, { messageId: "m1" });
+    const before = (await h.latest()).storyboardId;
+    const follow = await h.dispatch("เอาแบบ 16:9 นะ Twong", { messageId: "m2" });
+    expect(follow.source).not.toBe("storyboard");
+    expect((await h.latest()).storyboardId).toBe(before);
+    expect((await h.storyboardVersions.entries()).length).toBe(1);
+  });
+
+  it("still starts a new storyboard for an explicit new casting instruction", async () => {
+    const h = harness();
+    await h.dispatch(CREATE_MESSAGE, { messageId: "m1" });
+    const second = await h.dispatch("ใช้ Twong กับ Twong2 ให้ Twong2 นั่งคุยกับ Twong 10 วิ แนวนอน", {
+      messageId: "m2",
+    });
+    expect(second.source).toBe("storyboard");
+    expect(second.text).toContain("Storyboard v1");
+  });
+
+  it("treats an explicit new-scene request as a create, not an edit", async () => {
+    const h = harness();
+    await h.dispatch(CREATE_MESSAGE, { messageId: "m1" });
+    const result = await h.dispatch("ทำฉากใหม่ 10-15 วิ ให้ Twong เดิน", { messageId: "m2" });
+    expect(result.source).toBe("storyboard");
+    // A new storyboard, not a rewrite of beat 10-15.
+    expect(result.text).toContain("Storyboard v1");
+  });
+
+  it("ignores chat containing a range plus a common word", async () => {
+    const h = harness();
+    await h.dispatch(CREATE_MESSAGE, { messageId: "m1" });
+    for (const message of ["วิธีนี้ 3-6 เอาไหม", "วิทยาลัย 3-6 ให้ไหม", "วิธีนี้ 3-6 ดีไหม"]) {
+      const result = await h.dispatch(message, { messageId: `c-${message}` });
+      expect(result.source, message).not.toBe("storyboard");
+    }
+    expect((await h.latest()).versionNumber).toBe(1);
+  });
+});
+
 describe("edit instructions carry no timestamps into the plan", () => {
   it("stores the action without the range span and keeps it out of the plan", async () => {
     const h = harness();

@@ -10,10 +10,11 @@
  * previs router), and anything shaped like the exact paid confirmation.
  */
 
-import { findUnknownCastNames, matchKnownNames, parseTimeRange } from "./previs-intent.js";
+import { findUnknownCastNames, matchKnownNames } from "./previs-intent.js";
 import {
   normalizeStoryboardText,
   parseStoryboardActions,
+  parseStoryboardTimeRange,
   readStoryboardAspectRatio,
   readStoryboardDuration,
   readStoryboardEnvironment,
@@ -59,6 +60,9 @@ const SCENE_NOUNS = /ฉาก|คลิป|วิดีโอ|วีดีโ�
  * both parse as ranges, and an unguarded edit permanently appends a version
  * whose beat action is that chat text.
  */
+/** Asks for a NEW scene rather than a change to the current one. */
+const NEW_SCENE_MARKER = /ใหม่|new\s+(?:scene|shot|storyboard)/iu;
+
 const EDIT_MARKER = /ให้|เปลี่ยน|แก้|ตัด|เอา|ใส่|ลบ|ทำให้|ย้าย|zoom|change|make|cut|replace|set\b|swap/iu;
 
 const CASTING_MARKER = /(?:^|\s)(?:ใช้|ให้)\s*\S/u;
@@ -82,6 +86,8 @@ export type StoryboardIntent =
       kind: "create";
       characterNames: readonly string[];
       unknownNames: readonly string[];
+      /** True when the request names its cast outright ("ใช้ X กับ Y"). */
+      explicitCasting: boolean;
       durationSeconds?: number;
       aspectRatio?: string;
       resolution?: string;
@@ -119,12 +125,14 @@ export function parseStoryboardIntent(params: {
 
   const matched = matchKnownNames(text, params.knownCharacterNames);
   const unknownNames = findUnknownCastNames(text, params.knownCharacterNames);
-  const range = parseTimeRange(text);
-  if (range && EDIT_MARKER.test(text)) {
+  const range = parseStoryboardTimeRange(text);
+  // An explicit new-scene request outranks an edit even when it names a range:
+  // "ทำฉากใหม่ 10-15 วิ ให้ Twong เดิน" asks for a scene, not a rewrite.
+  if (range && EDIT_MARKER.test(text) && !NEW_SCENE_MARKER.test(text)) {
     return {
       kind: "edit",
-      fromSeconds: range.fromSecond,
-      toSeconds: range.toSecond,
+      fromSeconds: range.fromSeconds,
+      toSeconds: range.toSeconds,
       characterNames: matched,
       unknownNames,
       action: stripTimeRangeSpan(text),
@@ -154,6 +162,7 @@ export function parseStoryboardIntent(params: {
     kind: "create",
     characterNames: matched,
     unknownNames,
+    explicitCasting: CASTING_MARKER.test(text),
     ...(durationSeconds === undefined ? {} : { durationSeconds }),
     ...(aspectRatio === undefined ? {} : { aspectRatio }),
     ...(resolution === undefined ? {} : { resolution }),

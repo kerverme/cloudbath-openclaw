@@ -150,6 +150,16 @@ function buildCast(
 }
 
 export class CloudbathStoryboardLineRouter {
+  /**
+   * Executions in flight, keyed by dedupe key.
+   *
+   * The durable dedupe record is only written AFTER execution, so two
+   * simultaneous deliveries of the same inbound message both missed it and each
+   * created a storyboard -- minting a second real Notion project and scene.
+   * Duplicates now await the first execution and receive its reply.
+   */
+  private readonly inFlight = new Map<string, Promise<string>>();
+
   constructor(private readonly deps: StoryboardLineRouterDeps) {}
 
   /**
@@ -187,19 +197,36 @@ export class CloudbathStoryboardLineRouter {
     if (intent.kind !== "create" && !active) {
       return undefined;
     }
+    // With a storyboard already active, only an EXPLICIT casting instruction
+    // starts a second one. Otherwise a follow-up tweak ("เอาแบบ 16:9 นะ Twong")
+    // would mint another Notion project and scene and move the active pointer
+    // off the storyboard the owner is iterating on.
+    if (intent.kind === "create" && active && !intent.explicitCasting) {
+      return undefined;
+    }
 
     const dedupeKey = this.dedupeKey(event, context, claim);
-    if (dedupeKey) {
-      const seen = await this.deps.dedupe.lookup(dedupeKey);
-      if (seen) {
-        return { handled: true, text: seen.reply };
-      }
+    if (!dedupeKey) {
+      return { handled: true, text: await this.execute(intent, claim, active) };
     }
-    const text = await this.execute(intent, claim, active);
-    if (dedupeKey) {
+    const seen = await this.deps.dedupe.lookup(dedupeKey);
+    if (seen) {
+      return { handled: true, text: seen.reply };
+    }
+    const running = this.inFlight.get(dedupeKey);
+    if (running) {
+      return { handled: true, text: await running };
+    }
+    const pending = this.execute(intent, claim, active).then(async (text) => {
       await this.deps.dedupe.register(dedupeKey, { reply: text }, { ttlMs: DEDUPE_TTL_MS });
+      return text;
+    });
+    this.inFlight.set(dedupeKey, pending);
+    try {
+      return { handled: true, text: await pending };
+    } finally {
+      this.inFlight.delete(dedupeKey);
     }
-    return { handled: true, text };
   }
 
   private async execute(
@@ -305,6 +332,9 @@ export class CloudbathStoryboardLineRouter {
           ...this.editCharacterIds(latest, intent.characterNames),
         },
       });
+      // Keep the pointer alive while the owner is actively iterating; only an
+      // ABANDONED storyboard should age out.
+      await this.touchActive(active);
       return formatStoryboardForLine({
         versionNumber: version.versionNumber,
         document: version.document,
@@ -353,6 +383,7 @@ export class CloudbathStoryboardLineRouter {
         now: this.deps.now,
         ...(this.deps.randomId ? { randomId: this.deps.randomId } : {}),
       });
+      await this.touchActive(active);
       return formatFinalVideoDraftForLine(draft);
     } catch (error) {
       return this.failure("storyboard_draft_failed", error);
@@ -382,6 +413,18 @@ export class CloudbathStoryboardLineRouter {
     return id
       ? `storyboard-dedupe:${claim.accountId}:${claim.lineGroupId}:${claim.ownerSenderId}:${id}`
       : undefined;
+  }
+
+  /** Re-registers the active pointer so its TTL tracks last use, not creation. */
+  private async touchActive(active: ActiveStoryboardContext): Promise<void> {
+    await this.deps.active.register(
+      activeStoryboardKey({
+        accountId: active.accountId,
+        lineGroupId: active.lineGroupId,
+        ownerSenderId: active.ownerSenderId,
+      }),
+      { ...active, updatedAt: new Date(this.deps.now()).toISOString() },
+    );
   }
 
   /** Owner-scoped read: another owner or group never resolves this context. */

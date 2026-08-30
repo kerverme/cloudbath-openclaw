@@ -234,3 +234,33 @@ function nearestNames(
     .toSorted((a, b) => a.at - b.at || b.name.length - a.name.length)[0]?.name;
   return { ...(before ? { subject: before } : {}), ...(after ? { object: after } : {}) };
 }
+
+/**
+ * A time range such as "วิ 10-14", "ช่วง 3 ถึง 6 วิ" or "10-14 sec".
+ *
+ * Storyboard-owned rather than reusing the previs parser, because that one
+ * accepts a bare "วิ" prefix and so matches the first syllable of unrelated
+ * Thai words -- "วิธีนี้ 3-6" and "วิทยาลัย 3-6" both parsed as ranges. The
+ * unit here must be a standalone word, so ordinary chat containing digits can
+ * never be read as an edit.
+ */
+const RANGE_LEADING_UNIT =
+  /(?:(?:วินาที|วิ|ช่วง)(?![\p{L}\p{M}])|seconds?|sec)\s*(\d{1,3})\s*(?:-|–|—|ถึง|to)\s*(\d{1,3})/iu;
+const RANGE_TRAILING_UNIT =
+  /(\d{1,3})\s*(?:-|–|—|ถึง|to)\s*(\d{1,3})\s*(?:(?:วินาที|วิ)(?![\p{L}\p{M}])|s\b|sec\b)/iu;
+
+export function parseStoryboardTimeRange(
+  text: string,
+): { fromSeconds: number; toSeconds: number } | undefined {
+  for (const pattern of [RANGE_LEADING_UNIT, RANGE_TRAILING_UNIT]) {
+    const match = pattern.exec(text);
+    if (match) {
+      const fromSeconds = Number(match[1]);
+      const toSeconds = Number(match[2]);
+      if (Number.isFinite(fromSeconds) && Number.isFinite(toSeconds)) {
+        return { fromSeconds, toSeconds };
+      }
+    }
+  }
+  return undefined;
+}

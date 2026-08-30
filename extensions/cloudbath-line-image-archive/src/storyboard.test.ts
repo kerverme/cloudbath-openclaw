@@ -8,6 +8,7 @@ import { formatStoryboardForLine } from "./storyboard-format.js";
 import { parseStoryboardIntent, stripTimeRangeSpan } from "./storyboard-intent.js";
 import {
   parseStoryboardActions,
+  parseStoryboardTimeRange,
   readStoryboardAspectRatio,
   readStoryboardDuration,
   readStoryboardEnvironment,
@@ -157,6 +158,35 @@ describe("request parsing regressions", () => {
     const actions = parseStoryboardActions("ให้ Twong คุยกันเบาๆแล้วเดินออกไป", ["Twong"]);
     const dialogue = actions.find((action) => action.kind === "dialogue");
     expect(dialogue?.phrase).toBe("คุยกันเบาๆ");
+  });
+
+  it("requires a standalone unit before reading a time range", () => {
+    // "วิ" as the first syllable of another word is not a seconds marker.
+    expect(parseStoryboardTimeRange("วิธีนี้ 3-6 เอาไหม")).toBeUndefined();
+    expect(parseStoryboardTimeRange("วิทยาลัย 3-6 ให้ไหม")).toBeUndefined();
+  });
+
+  it("reads every supported range grammar", () => {
+    expect(parseStoryboardTimeRange("วิ 10-14 ให้ Twong หัน")).toEqual({
+      fromSeconds: 10,
+      toSeconds: 14,
+    });
+    expect(parseStoryboardTimeRange("วินาที 3-6 เปลี่ยน")).toEqual({
+      fromSeconds: 3,
+      toSeconds: 6,
+    });
+    expect(parseStoryboardTimeRange("ช่วง 3 ถึง 6 วิ เปลี่ยน")).toEqual({
+      fromSeconds: 3,
+      toSeconds: 6,
+    });
+    expect(parseStoryboardTimeRange("10-14 sec ให้ Twong หัน")).toEqual({
+      fromSeconds: 10,
+      toSeconds: 14,
+    });
+    expect(parseStoryboardTimeRange("seconds 10-14 ให้ Twong หัน")).toEqual({
+      fromSeconds: 10,
+      toSeconds: 14,
+    });
   });
 
   it("strips the time-range span out of an edit instruction", () => {
