@@ -46,7 +46,10 @@ export type ActivePrevisContext = Readonly<{
   version: 1;
   previsProjectId: string;
   projectInstanceId: string;
+  /** Real UGC project/shot linkage, carried for the Final Video Draft phase. */
+  projectPageId: string;
   sceneId: string;
+  scenePageId: string;
   accountId: string;
   lineGroupId: string;
   ownerSenderId: string;
@@ -73,7 +76,11 @@ export type PrevisProjectResolver = Readonly<{
     scenePrompt: string;
   }): Promise<{
     projectInstanceId: string;
+    /** Real UGC_PROJECTS page, so the next phase can follow the linkage. */
+    projectPageId: string;
     sceneId: string;
+    /** Real UGC_SHOTS page for that scene. */
+    scenePageId: string;
     characterLocks: readonly UgcCharacterLock[];
     displayNames: Readonly<Record<string, string>>;
   }>;
@@ -292,7 +299,9 @@ export class CloudbathPrevisLineRouter {
         version: 1,
         previsProjectId: prepared.previsProjectId,
         projectInstanceId: resolved.projectInstanceId,
+        projectPageId: resolved.projectPageId,
         sceneId: resolved.sceneId,
+        scenePageId: resolved.scenePageId,
         accountId: claim.accountId,
         lineGroupId: claim.lineGroupId,
         ownerSenderId: claim.ownerSenderId,

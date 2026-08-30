@@ -78,7 +78,7 @@ type NotionDataSource = {
   properties?: Record<string, NotionPropertySchema>;
 };
 
-type NotionPage = {
+export type NotionPage = {
   object?: string;
   id?: string;
   last_edited_time?: string;
@@ -207,7 +207,13 @@ function plainText(property: NotionPropertyValue | undefined): string {
     .trim();
 }
 
-function generatedIdText(property: NotionPropertyValue | undefined): string {
+/**
+ * The Character Library's generated Character ID, e.g. "CHAR-6".
+ *
+ * Exported so previs freezes locks on the canonical id rather than the display
+ * name the owner happened to type. Returns "" when the row has no generated id.
+ */
+export function generatedIdText(property: NotionPropertyValue | undefined): string {
   if (property?.type !== "unique_id" && property?.type !== "auto_increment_id") {
     return "";
   }
@@ -1186,6 +1192,258 @@ export class CloudbathUgcVideoWorkflow {
     );
   }
 
+  /**
+   * Resolves the owner's UGC project and scene, creating or reusing each by the
+   * existing rules: active-project continuation, finalized-project refusal, one
+   * frozen cast per project instance, and scene-order create-or-reuse.
+   *
+   * Shared by `cloudbath_ugc_video_prepare` and LINE previs creation so there is
+   * ONE project lifecycle. A second implementation would let previs and video
+   * disagree about which project a scene belongs to.
+   */
+  async resolveProjectScene(params: {
+    accountId: string;
+    groupId: string;
+    ownerSenderId: string;
+    startNewProject?: boolean;
+    productName?: string;
+    characterNames: readonly string[];
+    /** Caller-owned: decides each frozen lock's canonical `code`. */
+    resolveCharacterPages: () => Promise<Array<{ code: string; page: NotionPage }>>;
+    sceneNumber?: number;
+    prompt: string;
+    durationSeconds?: number;
+  }): Promise<{
+    instance: UgcProjectInstance;
+    projectPage: NotionPage;
+    projectRecordId: string;
+    characterLocks: readonly UgcCharacterLock[];
+    sceneNumber: number;
+    scenePage: NotionPage;
+    previousScene: NotionPage | undefined;
+    nowIso: string;
+  }> {
+    const { accountId, groupId, ownerSenderId } = params;
+    const activeKey = ugcActiveProjectKey({
+      accountId,
+      lineGroupId: groupId,
+      ownerSenderId,
+    });
+    const active = params.startNewProject ? undefined : await this.activeProjects.lookup(activeKey);
+    const activeInstance = active
+      ? await this.projectInstances.lookup(ugcProjectInstanceKey(active.projectInstanceId))
+      : undefined;
+    // A finalized project is durably closed. Continuing it would reopen a
+    // film the owner declared finished, so it fails closed; the owner must
+    // start a new project explicitly.
+    if (activeInstance?.finalizedAt) {
+      throw new Error(
+        "This project was finalized and cannot take more scenes; start a new project to continue",
+      );
+    }
+    const existingInstance = activeInstance;
+    const nowIso = new Date(this.now()).toISOString();
+    let instance: UgcProjectInstance;
+    let projectPage: NotionPage;
+    const characterPages: Array<{ code: string; page: NotionPage }> = [];
+    if (existingInstance) {
+      // Continuation runs entirely on frozen identity: no Product or
+      // Character row is re-resolved, so the owner need not repeat
+      // productName and a library edit cannot retarget this project.
+      if (params.productName) {
+        const named = await this.notion.resolveNamedRecord({
+          capabilityId: "PRODUCT_LIBRARY",
+          target: this.config.capabilities.PRODUCT_LIBRARY,
+          capabilities: this.config.capabilities,
+          name: params.productName,
+        });
+        // Naming a different product mid-project would silently change what
+        // the remaining scenes advertise.
+        if (named.id !== existingInstance.productPageId) {
+          throw new Error(
+            "This project is locked to a different product; start a new project to change it",
+          );
+        }
+      }
+      instance = existingInstance;
+      projectPage = await this.notion.readProjectPage({
+        capabilities: this.config.capabilities,
+        projectPageId: instance.projectPageId,
+      });
+    } else {
+      // A new project must carry at least one identity source. Product and
+      // cast are each optional alone, but a prompt-only project would have
+      // nothing durable to freeze, so every later scene would drift. Checked
+      // before any resolve/create so an identity-less request writes nothing.
+      if (!params.productName && params.characterNames.length === 0) {
+        throw new Error(
+          "A new project needs a product or at least one character; a prompt alone has no identity to lock",
+        );
+      }
+      // Product is optional: a character-only project is a first-class
+      // shape, and no placeholder product row is invented for it.
+      const product = params.productName
+        ? await this.notion.resolveNamedRecord({
+            capabilityId: "PRODUCT_LIBRARY",
+            target: this.config.capabilities.PRODUCT_LIBRARY,
+            capabilities: this.config.capabilities,
+            name: params.productName,
+          })
+        : undefined;
+      // Resolution is the caller's: `cloudbath_ugc_video_prepare` keeps the
+      // code the owner typed, while previs canonicalises to the Character
+      // Library's generated Character ID. The lifecycle below is shared.
+      characterPages.push(...(await params.resolveCharacterPages()));
+      const characterPageIds = characterPages.map((entry) => entry.page.id!);
+      // Random, not derived: two projects for the same product and cast
+      // created in the same millisecond must still be distinct pieces of
+      // work, so nothing about their content may feed this id.
+      const projectInstanceId = crypto.randomUUID();
+      projectPage = await this.notion.createProject({
+        capabilities: this.config.capabilities,
+        ...(product ? { product } : {}),
+        characterPageIds,
+        ...(params.characterNames.length > 0
+          ? { characterLabel: params.characterNames.join(" × ") }
+          : {}),
+        projectInstanceId,
+      });
+      instance = {
+        version: 1,
+        projectInstanceId,
+        projectPageId: projectPage.id!,
+        accountId,
+        lineGroupId: groupId,
+        ownerSenderId,
+        ...(product?.id ? { productPageId: product.id } : {}),
+        // Product references freeze here, beside the cast: editing the
+        // Product Library afterwards cannot reach this project, while a new
+        // project is free to freeze the updated ones.
+        productReferences: Object.freeze(product ? readProductReferences(product) : []),
+        characterPageIds: Object.freeze([...characterPageIds]),
+        createdAt: nowIso,
+      };
+      await this.projectInstances.register(ugcProjectInstanceKey(projectInstanceId), instance);
+    }
+    await this.activeProjects.register(activeKey, {
+      version: 1,
+      projectInstanceId: instance.projectInstanceId,
+      accountId,
+      lineGroupId: groupId,
+      ownerSenderId,
+      updatedAt: nowIso,
+    });
+    const project = { page: projectPage, recordId: instance.projectInstanceId };
+
+    // The cast is frozen once per PROJECT INSTANCE. A later scene reuses the
+    // stored lock verbatim rather than re-reading the Character Library, so
+    // edits to a library row cannot reach an existing project -- while a
+    // deliberately new project freezes the then-current references.
+    const lockKey = ugcProjectLockKey(instance.projectInstanceId);
+    const existingLock = await this.projectLocks.lookup(lockKey);
+    const frozenAt = new Date(this.now()).toISOString();
+    let characterLocks: readonly UgcCharacterLock[];
+    if (existingLock) {
+      characterLocks = existingLock.characterLocks;
+      const requested = params.characterNames.map((code) => code.toLowerCase()).toSorted();
+      const locked = characterLocks.map((lock) => lock.code.toLowerCase()).toSorted();
+      if (requested.length > 0 && requested.join("|") !== locked.join("|")) {
+        throw new Error(
+          `This project is already locked to ${characterLocks
+            .map((lock) => lock.code)
+            .join(", ")}; start a new project to change its cast`,
+        );
+      }
+    } else {
+      characterLocks = Object.freeze(
+        characterPages.map((entry) =>
+          freezeCharacterLock({
+            code: entry.code,
+            page: entry.page,
+            readReferences: (page, names, kind) =>
+              propertyReferences(page, names, kind, this.r2Identity),
+            frozenAt,
+          }),
+        ),
+      );
+      await this.projectLocks.register(lockKey, {
+        version: 1,
+        projectInstanceId: instance.projectInstanceId,
+        projectPageId: project.page.id!,
+        projectRecordId: project.recordId,
+        accountId,
+        lineGroupId: groupId,
+        ownerSenderId,
+        characterLocks,
+        frozenAt,
+      });
+    }
+
+    const sceneNumber =
+      params.sceneNumber ??
+      (await this.notion.latestSceneNumber({
+        capabilities: this.config.capabilities,
+        projectPageId: project.page.id!,
+      })) + 1;
+    // Read-only. Creating the previous scene here would mint a phantom
+    // Scene 1 carrying Scene 2's prompt, so a missing predecessor fails
+    // closed instead.
+    const previousScene =
+      sceneNumber > 1
+        ? await this.notion.findSceneByOrder({
+            capabilities: this.config.capabilities,
+            projectPageId: project.page.id!,
+            sceneNumber: sceneNumber - 1,
+          })
+        : undefined;
+    if (sceneNumber > 1 && !previousScene) {
+      throw new Error(
+        `Scene ${sceneNumber} cannot be prepared because scene ${sceneNumber - 1} does not exist in this project`,
+      );
+    }
+    const scenePage = await this.notion.createOrReuseScene({
+      capabilities: this.config.capabilities,
+      projectPageId: project.page.id!,
+      sceneNumber,
+      prompt: params.prompt,
+      ...(params.durationSeconds !== undefined ? { durationSeconds: params.durationSeconds } : {}),
+    });
+    return {
+      instance,
+      projectPage: project.page,
+      projectRecordId: project.recordId,
+      characterLocks,
+      sceneNumber,
+      scenePage,
+      previousScene,
+      nowIso,
+    };
+  }
+
+  /**
+   * The frozen cast for a project instance, owner-scoped.
+   *
+   * Reads the same `projectLocks` store the shared lifecycle writes, so previs
+   * edits resolve stand-ins from exactly the cast the project froze.
+   */
+  async readProjectCastLocks(params: {
+    projectInstanceId: string;
+    accountId: string;
+    lineGroupId: string;
+    ownerSenderId: string;
+  }): Promise<readonly UgcCharacterLock[]> {
+    const stored = await this.projectLocks.lookup(ugcProjectLockKey(params.projectInstanceId));
+    if (
+      !stored ||
+      stored.accountId !== params.accountId ||
+      stored.lineGroupId !== params.lineGroupId ||
+      stored.ownerSenderId !== params.ownerSenderId
+    ) {
+      throw new Error("UGC project cast is not accessible to this owner");
+    }
+    return stored.characterLocks;
+  }
+
   createTool(context: UgcPrepareToolContext) {
     if (
       context.messageChannel !== "line" ||
@@ -1238,203 +1496,43 @@ export class CloudbathUgcVideoWorkflow {
         // a new one. Product + cast is NOT an identity: the same product and
         // characters can be several unrelated stories, so reuse is decided here
         // by the durable project instance, never by matching Notion relations.
-        const activeKey = ugcActiveProjectKey({
+        const resolved = await this.resolveProjectScene({
           accountId,
-          lineGroupId: groupId,
+          groupId,
           ownerSenderId,
-        });
-        const active = input.startNewProject
-          ? undefined
-          : await this.activeProjects.lookup(activeKey);
-        const activeInstance = active
-          ? await this.projectInstances.lookup(ugcProjectInstanceKey(active.projectInstanceId))
-          : undefined;
-        // A finalized project is durably closed. Continuing it would reopen a
-        // film the owner declared finished, so it fails closed; the owner must
-        // start a new project explicitly.
-        if (activeInstance?.finalizedAt) {
-          throw new Error(
-            "This project was finalized and cannot take more scenes; start a new project to continue",
-          );
-        }
-        const existingInstance = activeInstance;
-        const nowIso = new Date(this.now()).toISOString();
-        let instance: UgcProjectInstance;
-        let projectPage: NotionPage;
-        const characterPages: Array<{ code: string; page: NotionPage }> = [];
-        if (existingInstance) {
-          // Continuation runs entirely on frozen identity: no Product or
-          // Character row is re-resolved, so the owner need not repeat
-          // productName and a library edit cannot retarget this project.
-          if (input.productName) {
-            const named = await this.notion.resolveNamedRecord({
-              capabilityId: "PRODUCT_LIBRARY",
-              target: this.config.capabilities.PRODUCT_LIBRARY,
-              capabilities: this.config.capabilities,
-              name: input.productName,
-            });
-            // Naming a different product mid-project would silently change what
-            // the remaining scenes advertise.
-            if (named.id !== existingInstance.productPageId) {
-              throw new Error(
-                "This project is locked to a different product; start a new project to change it",
-              );
+          ...(input.startNewProject === undefined
+            ? {}
+            : { startNewProject: input.startNewProject }),
+          ...(input.productName ? { productName: input.productName } : {}),
+          characterNames: input.characterNames,
+          // Unchanged contract: the video tool freezes the code the owner typed.
+          resolveCharacterPages: async () => {
+            const pages: Array<{ code: string; page: NotionPage }> = [];
+            for (const code of input.characterNames) {
+              pages.push({
+                code,
+                page: await this.notion.resolveNamedRecord({
+                  capabilityId: "CHARACTER_LIBRARY",
+                  target: this.config.capabilities.CHARACTER_LIBRARY,
+                  capabilities: this.config.capabilities,
+                  name: code,
+                }),
+              });
             }
-          }
-          instance = existingInstance;
-          projectPage = await this.notion.readProjectPage({
-            capabilities: this.config.capabilities,
-            projectPageId: instance.projectPageId,
-          });
-        } else {
-          // A new project must carry at least one identity source. Product and
-          // cast are each optional alone, but a prompt-only project would have
-          // nothing durable to freeze, so every later scene would drift. Checked
-          // before any resolve/create so an identity-less request writes nothing.
-          if (!input.productName && input.characterNames.length === 0) {
-            throw new Error(
-              "A new project needs a product or at least one character; a prompt alone has no identity to lock",
-            );
-          }
-          // Product is optional: a character-only project is a first-class
-          // shape, and no placeholder product row is invented for it.
-          const product = input.productName
-            ? await this.notion.resolveNamedRecord({
-                capabilityId: "PRODUCT_LIBRARY",
-                target: this.config.capabilities.PRODUCT_LIBRARY,
-                capabilities: this.config.capabilities,
-                name: input.productName,
-              })
-            : undefined;
-          // Every requested code must resolve to exactly one library row before
-          // anything is created; a partial cast never reaches a scene.
-          for (const code of input.characterNames) {
-            characterPages.push({
-              code,
-              page: await this.notion.resolveNamedRecord({
-                capabilityId: "CHARACTER_LIBRARY",
-                target: this.config.capabilities.CHARACTER_LIBRARY,
-                capabilities: this.config.capabilities,
-                name: code,
-              }),
-            });
-          }
-          const characterPageIds = characterPages.map((entry) => entry.page.id!);
-          // Random, not derived: two projects for the same product and cast
-          // created in the same millisecond must still be distinct pieces of
-          // work, so nothing about their content may feed this id.
-          const projectInstanceId = crypto.randomUUID();
-          projectPage = await this.notion.createProject({
-            capabilities: this.config.capabilities,
-            ...(product ? { product } : {}),
-            characterPageIds,
-            ...(input.characterNames.length > 0
-              ? { characterLabel: input.characterNames.join(" × ") }
-              : {}),
-            projectInstanceId,
-          });
-          instance = {
-            version: 1,
-            projectInstanceId,
-            projectPageId: projectPage.id!,
-            accountId,
-            lineGroupId: groupId,
-            ownerSenderId,
-            ...(product?.id ? { productPageId: product.id } : {}),
-            // Product references freeze here, beside the cast: editing the
-            // Product Library afterwards cannot reach this project, while a new
-            // project is free to freeze the updated ones.
-            productReferences: Object.freeze(product ? readProductReferences(product) : []),
-            characterPageIds: Object.freeze([...characterPageIds]),
-            createdAt: nowIso,
-          };
-          await this.projectInstances.register(ugcProjectInstanceKey(projectInstanceId), instance);
-        }
-        await this.activeProjects.register(activeKey, {
-          version: 1,
-          projectInstanceId: instance.projectInstanceId,
-          accountId,
-          lineGroupId: groupId,
-          ownerSenderId,
-          updatedAt: nowIso,
-        });
-        const project = { page: projectPage, recordId: instance.projectInstanceId };
-
-        // The cast is frozen once per PROJECT INSTANCE. A later scene reuses the
-        // stored lock verbatim rather than re-reading the Character Library, so
-        // edits to a library row cannot reach an existing project -- while a
-        // deliberately new project freezes the then-current references.
-        const lockKey = ugcProjectLockKey(instance.projectInstanceId);
-        const existingLock = await this.projectLocks.lookup(lockKey);
-        const frozenAt = new Date(this.now()).toISOString();
-        let characterLocks: readonly UgcCharacterLock[];
-        if (existingLock) {
-          characterLocks = existingLock.characterLocks;
-          const requested = input.characterNames.map((code) => code.toLowerCase()).toSorted();
-          const locked = characterLocks.map((lock) => lock.code.toLowerCase()).toSorted();
-          if (requested.length > 0 && requested.join("|") !== locked.join("|")) {
-            throw new Error(
-              `This project is already locked to ${characterLocks
-                .map((lock) => lock.code)
-                .join(", ")}; start a new project to change its cast`,
-            );
-          }
-        } else {
-          characterLocks = Object.freeze(
-            characterPages.map((entry) =>
-              freezeCharacterLock({
-                code: entry.code,
-                page: entry.page,
-                readReferences: (page, names, kind) =>
-                  propertyReferences(page, names, kind, this.r2Identity),
-                frozenAt,
-              }),
-            ),
-          );
-          await this.projectLocks.register(lockKey, {
-            version: 1,
-            projectInstanceId: instance.projectInstanceId,
-            projectPageId: project.page.id!,
-            projectRecordId: project.recordId,
-            accountId,
-            lineGroupId: groupId,
-            ownerSenderId,
-            characterLocks,
-            frozenAt,
-          });
-        }
-
-        const sceneNumber =
-          input.sceneNumber ??
-          (await this.notion.latestSceneNumber({
-            capabilities: this.config.capabilities,
-            projectPageId: project.page.id!,
-          })) + 1;
-        // Read-only. Creating the previous scene here would mint a phantom
-        // Scene 1 carrying Scene 2's prompt, so a missing predecessor fails
-        // closed instead.
-        const previousScene =
-          sceneNumber > 1
-            ? await this.notion.findSceneByOrder({
-                capabilities: this.config.capabilities,
-                projectPageId: project.page.id!,
-                sceneNumber: sceneNumber - 1,
-              })
-            : undefined;
-        if (sceneNumber > 1 && !previousScene) {
-          throw new Error(
-            `Scene ${sceneNumber} cannot be prepared because scene ${sceneNumber - 1} does not exist in this project`,
-          );
-        }
-        const scenePage = await this.notion.createOrReuseScene({
-          capabilities: this.config.capabilities,
-          projectPageId: project.page.id!,
-          sceneNumber,
+            return pages;
+          },
+          ...(input.sceneNumber === undefined ? {} : { sceneNumber: input.sceneNumber }),
           prompt: input.prompt,
-          ...(input.durationSeconds !== undefined
-            ? { durationSeconds: input.durationSeconds }
-            : {}),
+          ...(input.durationSeconds === undefined
+            ? {}
+            : { durationSeconds: input.durationSeconds }),
         });
+        const instance = resolved.instance;
+        const project = { page: resolved.projectPage, recordId: resolved.projectRecordId };
+        const characterLocks = resolved.characterLocks;
+        const sceneNumber = resolved.sceneNumber;
+        const scenePage = resolved.scenePage;
+        const previousScene = resolved.previousScene;
         const scene: UgcSceneContinuity = Object.freeze({
           sceneNumber,
           ...(previousScene?.id ? { previousScenePageId: previousScene.id } : {}),

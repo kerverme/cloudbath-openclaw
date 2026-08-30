@@ -35,7 +35,11 @@ import {
   CloudbathPrevisLineRouter,
   type ActivePrevisContext,
 } from "./src/previs-line-router.js";
-import { createPrevisProjectResolver } from "./src/previs-project-resolver.js";
+import {
+  CLOUDBATH_PREVIS_DISPLAY_NAMES_NAMESPACE,
+  createPrevisProjectResolver,
+  type PrevisDisplayNameRecord,
+} from "./src/previs-project-resolver.js";
 import { createPrevisReviewRouteHandler, type PrevisReviewRuntime } from "./src/previs-route.js";
 import { CloudbathPrevisService } from "./src/previs-service.js";
 import {
@@ -82,7 +86,6 @@ import {
   CLOUDBATH_UGC_PROJECT_FINALIZE_TOOL_NAME,
   CLOUDBATH_UGC_VIDEO_PREPARE_TOOL_NAME,
   CloudbathUgcVideoWorkflow,
-  propertyReferences,
   UgcNotionWorkflowClient,
 } from "./src/ugc-workflow.js";
 import {
@@ -358,15 +361,16 @@ export default definePluginEntry({
               previsLineRouter = new CloudbathPrevisLineRouter({
                 service: previsService,
                 resolver: createPrevisProjectResolver({
+                  // The SAME workflow the video tool uses, so previs attaches to
+                  // a real UGC project and shot rather than a shadow identity.
+                  workflow: ugcWorkflow!,
                   notion: ugcNotion,
                   capabilities: workspaceConfig.ugc.capabilities,
-                  projectLocks,
-                  readReferences: (page, names, kind) =>
-                    propertyReferences(page as never, names, kind, {
-                      endpoint: config.r2.endpoint,
-                      bucketName: config.r2.bucketName,
-                    }),
-                  now: Date.now,
+                  displayNames: api.runtime.state.openKeyedStore<PrevisDisplayNameRecord>({
+                    namespace: CLOUDBATH_PREVIS_DISPLAY_NAMES_NAMESPACE,
+                    maxEntries: CLOUDBATH_PREVIS_ACTIVE_MAX_ENTRIES,
+                    overflowPolicy: "evict-oldest",
+                  }),
                 }),
                 active: api.runtime.state.openKeyedStore<ActivePrevisContext>({
                   namespace: CLOUDBATH_PREVIS_ACTIVE_NAMESPACE,
