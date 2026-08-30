@@ -694,3 +694,116 @@ This plugin never provisions or alters Notion schema. Every column above already
 exists in production; nothing further needs to be added for the current flow.
 `Characters` and `Previous Scene` relations on UGC_SHOTS are **not** written —
 cast and continuity live in the frozen scope, which is what execution reads.
+
+## CozyClay previs (Phase 1)
+
+Previs is a **staging** layer between a scene request and the existing paid
+video pipeline. It produces reviewable blocking, camera and timeline intent so
+an owner can iterate before any provider is billed. It is **not** a video
+generator, and approving a previs does not generate anything.
+
+### Boundary
+
+Cloudbath owns identity and durability; CozyClay is only the previs engine.
+
+| owner     | responsibility                                                                                                                                            |
+| --------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Cloudbath | Character identity, frozen locks, project/scene identity, timeline metadata, aspect ratio, version chain, approval, stable review URL, private R2 storage |
+| CozyClay  | stage geometry, cast placement, camera solve, film vocabulary, `.cclayproject` serialization                                                              |
+
+Canonical Characters map onto **generic** CozyClay stand-ins by frozen cast
+order — `CHAR-6 → A`, `CHAR-7 → B`. The stand-in letter is engine detail. The
+stand-in's description is generic geometry (`previs stand-in A`), so no identity
+reference reaches the engine, and the CozyClay actor never replaces the
+canonical Character. Photoreal identity references stay Cloudbath's job in the
+later video pipeline.
+
+### Integration and licensing
+
+CozyClay is **AGPL-3.0-or-later**. It is integrated as a **separate process**
+over the Model Context Protocol: no CozyClay source is vendored into this
+repository, and none of its code is linked into the Cloudbath process. The
+boundary is CozyClay's own documented MCP tool surface, reached over stdio from
+`previs-cozyclay-engine.ts`.
+
+The server command is **configured, not discovered**. Resolving CozyClay through
+`npx` at request time would let a fresh upstream release change previs output
+underneath an in-flight project, so a deployment pins an installed version and
+passes its `mcp/server.mjs` path explicitly.
+
+This is an engineering note about the technical boundary, not legal advice.
+
+### What works headlessly, and what does not
+
+Verified against CozyClay 1.6.0. Its MCP server runs the scene, camera, prompt
+and project-file tools with no browser, editor or GPU. Four tools refuse
+without a connected editor tab, and motion additionally needs an SSH-reachable
+NVIDIA host running Kimodo.
+
+| capability                                                                  | Phase 1  | requires                       |
+| --------------------------------------------------------------------------- | -------- | ------------------------------ |
+| cast placement, camera solve, framing, film vocabulary, `.cclayproject` I/O | yes      | nothing                        |
+| timeline Prompt Blocks (`set_prompt_blocks`)                                | deferred | live editor                    |
+| preview frames (`capture_frame`)                                            | deferred | live editor                    |
+| batched mutation (`apply_batch`)                                            | deferred | live editor                    |
+| character motion (`generate_motion`)                                        | deferred | live editor **and** Kimodo GPU |
+
+Deferrals are recorded on every previs version rather than silently omitted, so
+a reviewer is never shown an empty timeline and told the previs is complete.
+Because the timeline is editor-only upstream, Cloudbath holds timeline metadata
+itself — which it needs for the later video pipeline regardless.
+
+Aspect ratio is the one field written directly into the artifact:
+`stage.shotAspect` accepts `9:16` in CozyClay's scene normaliser, but no MCP
+tool sets it headlessly. CozyClay honours the written value on `open_project`.
+
+### Phase 1 is foundation only — what is NOT wired yet
+
+Being explicit so nobody deploys this expecting a working previs engine:
+
+- `CozyClayMcpEngine` is **not instantiated in the production runtime**. It is
+  constructed only by its e2e test. `PrevisStore` and the review route _are_
+  wired in `index.ts`, so the URL and version chain are live, but
+  `preparePrevis()` is not called from any production path and therefore
+  receives neither an engine nor an artifact sink. Every previs created today
+  would carry `artifactObjectKey: null`.
+- **There is no provisioning path for CozyClay.** `cozyclay` is not a declared
+  dependency, nothing installs it in the Dockerfile or Railway config, and no
+  env var or plugin-config key feeds `CozyClayEngineConfig`. A deployment that
+  wants a real engine must first pin CozyClay 1.6.0 into the image and add
+  config plumbing for its `mcp/server.mjs` path.
+- The review surface is **JSON only** — no 3D viewport, no video, no preview
+  frame, no interactive timeline. Frame capture is editor-gated upstream and is
+  recorded as a deferral on every version.
+
+None of this blocks the layer's contracts: identity mapping, the version chain,
+the stable URL and the approval boundary are all live and tested.
+
+### Versions, review URL and approval
+
+Versions are **immutable and append-only**. A natural-language time-range edit
+(`วิ 10-14 ให้ Twong หมุนตัวกลับ`) splits any movement straddling the window so
+the untouched portions survive with their original beat, then appends a new
+version. v1 stays retrievable; the head moves to v2.
+
+The stable review URL is Cloudbath-owned and permanent, in the same shape as the
+Character view URL:
+
+```
+https://<cloudbath-host>/previs/<PREVIS-ID>/<token>/<capability>[/v<n>]
+```
+
+Capabilities are `timeline`, `cast`, `camera` and `artifact`. Without a version
+suffix the URL resolves the **latest** version; `/v1` pins a historical one.
+Access fails closed on the token and, for mutations, on the full
+account/group/owner triple. Raw CozyClay editor URLs, localhost endpoints,
+public R2 and signed R2 URLs are never handed out — the `.cclayproject` lives in
+**private** R2 under a durable content-addressed object key, which is the
+canonical identity. A signed URL expires and can never address the artifact
+later, so it is never stored as one.
+
+`APPROVE PREVIS` marks one version approved and frozen, making it eligible for
+the existing video-draft pipeline. It calls no provider, generates nothing, and
+does **not** stand in for the exact `ยืนยัน VIDEO ####` confirmation the paid
+path still requires. An edit after approval starts unapproved: inheriting
+approval would let new blocking ride into the paid pipeline on older consent.
