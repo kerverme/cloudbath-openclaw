@@ -3,6 +3,7 @@ import type { CharacterAssetViewRuntime } from "./character-view-route.js";
 import type { LineGroupWorkspacePolicyRegistry } from "./group-workspace-policy.js";
 import type { KeepWatchingPipeline } from "./keep-watching.js";
 import type { ArchivePipeline } from "./pipeline.js";
+import type { CloudbathPrevisLineRouter } from "./previs-line-router.js";
 import type { PrevisReviewRuntime } from "./previs-route.js";
 import type { CloudbathPrevisService } from "./previs-service.js";
 import type { ArchiveConfig } from "./types.js";
@@ -21,6 +22,8 @@ export type CloudbathWorkspacePolicyRuntime = {
   previsReview?: PrevisReviewRuntime;
   /** Bound engine + private-R2 sink. Phase 2B LINE routing calls this. */
   previsService?: CloudbathPrevisService;
+  /** Deterministic LINE create/edit/approve routing for previs. */
+  previsLineRouter?: CloudbathPrevisLineRouter;
   keepWatchingPipeline?: KeepWatchingPipeline;
   pipeline?: ArchivePipeline;
   activeConfig?: ArchiveConfig;

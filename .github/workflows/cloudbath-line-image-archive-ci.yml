@@ -72,6 +72,7 @@ jobs:
             extensions/cloudbath-line-image-archive/src/pipeline.test.ts \
             extensions/cloudbath-line-image-archive/src/previs.test.ts \
             extensions/cloudbath-line-image-archive/src/previs-phase2a.test.ts \
+            extensions/cloudbath-line-image-archive/src/previs-phase2b.test.ts \
             extensions/cloudbath-line-image-archive/src/profiles.test.ts \
             extensions/cloudbath-line-image-archive/src/r2.test.ts \
             extensions/cloudbath-line-image-archive/src/retry.test.ts \

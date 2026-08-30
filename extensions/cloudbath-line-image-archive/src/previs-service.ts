@@ -45,6 +45,14 @@ export class CloudbathPrevisService {
     });
   }
 
+  /** Latest version for an owner, used by LINE to validate an edit range. */
+  async readLatest(params: {
+    previsProjectId: string;
+    claim: PrevisAccessClaim;
+  }): Promise<PrevisVersion | undefined> {
+    return await this.store.readLatest(params);
+  }
+
   /** Freezes one version. Calls no provider and generates nothing. */
   async approve(params: {
     previsProjectId: string;

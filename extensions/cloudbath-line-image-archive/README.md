@@ -803,37 +803,50 @@ The player's camera solve is a **review approximation** of the same film
 vocabulary, not CozyClay's geometry. The authoritative solve stays in the
 `.cclayproject` the engine produced.
 
-### Still not wired (Phase 2B and later)
+### LINE create / edit / approve (Phase 2B)
 
-- LINE routing and natural-language editing.
+A previs request is routed **deterministically**, not by hoping the model picks
+the right tool. `CloudbathPrevisLineRouter.handleBeforeDispatch` classifies the
+message and returns `{ handled: true }`, so the turn ends before the model runs.
+That is the fix for the structural routing problem: a character-led scene
+request could previously be understood semantically and then answered with a
+generic `[[confirm:...]]` yes/no prompt instead of invoking the workflow. A
+generic confirm can no longer substitute for a previs action, because the model
+is never given the turn.
+
+Three intents are recognised, and nothing else is claimed — every other message,
+including the generic video path and the exact `ยืนยัน VIDEO ####` gate, passes
+through untouched:
+
+| intent  | trigger                                                        | effect                     |
+| ------- | -------------------------------------------------------------- | -------------------------- |
+| create  | named cast + scene wording (the word "previs" is not required) | previs v1 + stable URL     |
+| edit    | a time range such as `10-14` after a seconds word              | a new immutable version    |
+| approve | exactly `APPROVE PREVIS` or `อนุมัติ PREVIS`                   | freezes the latest version |
+
+Character names are matched against the names the Character Library actually
+holds, so an unknown name fails closed naming it rather than silently recasting
+the scene. Ambiguous library entries fail closed too, via the same
+`resolveNamedRecord` the video workflow uses. Cast order fixes the stand-in
+letters for the life of the project: Twong stays A and Twong2 stays B across
+v1/v2/v3. A Product is never required.
+
+The **active previs** is keyed by the trusted account / LINE group / owner
+triple — never a global "latest" — so a different group or a different owner
+resolves nothing. LINE mutations authorise on that triple, never on the browser
+capability token, which exists only for review.
+
+Duplicate webhook delivery is absorbed by replaying the first reply for the same
+inbound message id, so a retry cannot create a second previs or append a second
+version. Concurrent edits still contend on the Phase 1 version slot: one wins,
+the other is refused loudly rather than silently dropped.
+
+Nothing here is paid. Creating, editing or approving a previs performs no
+provider call, produces no video draft, and never consumes a `VIDEO ####` code.
+`APPROVE PREVIS` only records that a previs version is approved.
+
+### Still not wired (later phases)
+
+- Turning an approved previs into a Final Video Draft.
 - CozyClay's live editor: prompt blocks, frame capture and Kimodo motion stay
   recorded as deferrals on every version.
-
-### Versions, review URL and approval
-
-Versions are **immutable and append-only**. A natural-language time-range edit
-(`วิ 10-14 ให้ Twong หมุนตัวกลับ`) splits any movement straddling the window so
-the untouched portions survive with their original beat, then appends a new
-version. v1 stays retrievable; the head moves to v2.
-
-The stable review URL is Cloudbath-owned and permanent, in the same shape as the
-Character view URL:
-
-```
-https://<cloudbath-host>/previs/<PREVIS-ID>/<token>/<capability>[/v<n>]
-```
-
-Capabilities are `timeline`, `cast`, `camera` and `artifact`. Without a version
-suffix the URL resolves the **latest** version; `/v1` pins a historical one.
-Access fails closed on the token and, for mutations, on the full
-account/group/owner triple. Raw CozyClay editor URLs, localhost endpoints,
-public R2 and signed R2 URLs are never handed out — the `.cclayproject` lives in
-**private** R2 under a durable content-addressed object key, which is the
-canonical identity. A signed URL expires and can never address the artifact
-later, so it is never stored as one.
-
-`APPROVE PREVIS` marks one version approved and frozen, making it eligible for
-the existing video-draft pipeline. It calls no provider, generates nothing, and
-does **not** stand in for the exact `ยืนยัน VIDEO ####` confirmation the paid
-path still requires. An edit after approval starts unapproved: inheriting
-approval would let new blocking ride into the paid pipeline on older consent.

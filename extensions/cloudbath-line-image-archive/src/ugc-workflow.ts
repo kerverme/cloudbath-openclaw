@@ -371,7 +371,12 @@ function canonicalR2ObjectKey(
   }
 }
 
-function propertyReferences(
+/**
+ * Shared reference reader. Exported so previs freezes character locks with the
+ * SAME implementation the video workflow uses -- the two must never disagree
+ * about a character's canonical references.
+ */
+export function propertyReferences(
   page: NotionPage,
   names: readonly string[],
   kind: UgcReferenceAsset["kind"],
@@ -912,6 +917,27 @@ export class UgcNotionWorkflowClient {
   /**
    * Scene rows for a project with the fields finalization reads. Read-only.
    */
+  /**
+   * Character Library display names.
+   *
+   * Previs matches an inbound LINE message against the names the library really
+   * holds, so an unknown name fails closed instead of being guessed out of free
+   * text and silently recasting a scene.
+   */
+  async listCharacterNames(params: {
+    capabilities: Readonly<Record<UgcCapabilityId, NotionTarget>>;
+  }): Promise<readonly string[]> {
+    const pages = await this.queryAll(params.capabilities.CHARACTER_LIBRARY, {});
+    const names = new Set<string>();
+    for (const page of pages) {
+      const name = plainText(page.properties?.Name).trim();
+      if (name) {
+        names.add(name);
+      }
+    }
+    return Object.freeze([...names]);
+  }
+
   async listScenes(params: {
     capabilities: Readonly<Record<UgcCapabilityId, NotionTarget>>;
     projectPageId: string;
