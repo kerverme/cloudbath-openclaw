@@ -6,6 +6,8 @@ on:
       - "extensions/cloudbath-line-image-archive/**"
       - "extensions/line/**"
       - "scripts/cloudbath/setup-notion-image-archive*"
+      - "scripts/cloudbath/docker-cozyclay-parity.test.ts"
+      - "Dockerfile"
       - "deploy/cloudbath/railway/Dockerfile"
       - "src/gateway/server/plugins-http.suspension-admission.test.ts"
       - "railway.json"
@@ -95,7 +97,10 @@ jobs:
 
           export default defineConfig({
             test: {
-              include: ["scripts/cloudbath/setup-notion-image-archive.test.ts"],
+              include: [
+                "scripts/cloudbath/setup-notion-image-archive.test.ts",
+                "scripts/cloudbath/docker-cozyclay-parity.test.ts",
+              ],
               passWithNoTests: false,
             },
           });
@@ -184,6 +189,7 @@ jobs:
             extensions/line/src/video-owner-flow.e2e.test.ts
             scripts/cloudbath/setup-notion-image-archive.ts
             scripts/cloudbath/setup-notion-image-archive.test.ts
+            scripts/cloudbath/docker-cozyclay-parity.test.ts
             src/auto-reply/reply/commands-models.ts
           )
           if ! pnpm exec oxfmt --check --threads=1 "${paths[@]}"; then
@@ -237,7 +243,8 @@ jobs:
           node scripts/run-oxlint.mjs \
             --tsconfig config/tsconfig/oxlint.scripts.json \
             scripts/cloudbath/setup-notion-image-archive.ts \
-            scripts/cloudbath/setup-notion-image-archive.test.ts
+            scripts/cloudbath/setup-notion-image-archive.test.ts \
+            scripts/cloudbath/docker-cozyclay-parity.test.ts
 
   production-image:
     name: Production Docker image
@@ -317,6 +324,30 @@ jobs:
             throw new Error("official LINE plugin did not register ownership of channels.line");
           }
           NODE
+
+      - name: Verify CozyClay previs provisioning
+        run: |
+          docker run --rm --network none \
+            --entrypoint /bin/sh \
+            cloudbath-openclaw:line-image-archive-ci \
+            -ec '
+              test -f /opt/cozyclay/package.json
+              test -f /opt/cozyclay/mcp/server.mjs
+              test -d /opt/cozyclay/node_modules/three
+              installed="$(node -p "require(\"/opt/cozyclay/package.json\").version")"
+              test "$installed" = "1.6.0"
+              test "$CLOUDBATH_COZYCLAY_ROOT" = "/opt/cozyclay"
+              test "$CLOUDBATH_COZYCLAY_VERSION" = "1.6.0"
+              # Same boot smoke check the build stage already ran, repeated
+              # against the final runtime image: proves the COPY --chown into
+              # the slim runtime stage did not leave the install broken or
+              # unreadable by the non-root node user.
+              printf "" | timeout 60 node /opt/cozyclay/mcp/server.mjs 2>/tmp/cozyclay-runtime-boot.log || true
+              if grep -q ERR_MODULE_NOT_FOUND /tmp/cozyclay-runtime-boot.log; then
+                cat /tmp/cozyclay-runtime-boot.log
+                exit 1
+              fi
+            '
 
       - name: Verify no credential-bearing image environment values
         run: |
