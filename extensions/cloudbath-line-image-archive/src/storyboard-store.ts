@@ -27,6 +27,14 @@ export const CLOUDBATH_STORYBOARD_ACTIVE_NAMESPACE = "cloudbath-storyboard-activ
 export const CLOUDBATH_STORYBOARD_DEDUPE_NAMESPACE = "cloudbath-storyboard-dedupe-v1";
 export const CLOUDBATH_STORYBOARD_DRAFT_NAMESPACE = "cloudbath-storyboard-draft-v1";
 export const CLOUDBATH_STORYBOARD_MAX_ENTRIES = 20_000;
+/**
+ * How long a storyboard stays the owner's ACTIVE one.
+ *
+ * Long enough to iterate on a scene across a conversation, short enough that an
+ * abandoned storyboard stops intercepting "สร้างวิดีโอ" and bare time-range
+ * edits. The version history it points at is durable and never expires.
+ */
+export const CLOUDBATH_STORYBOARD_ACTIVE_TTL_MS = 24 * 60 * 60 * 1_000;
 
 export function storyboardHeadKey(storyboardId: string): string {
   return `storyboard-head:${storyboardId}`;

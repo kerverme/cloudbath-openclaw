@@ -19,12 +19,19 @@ export const STORYBOARD_DEFAULT_RESOLUTION: StoryboardResolution = "720p";
 /** Upper bound on one storyboard scene. Longer is a product decision, not a parse. */
 export const STORYBOARD_MAX_DURATION_SECONDS = 60;
 
+/**
+ * Aspect ratios, anchored so a clock time is not one.
+ *
+ * Unanchored, "14:30" contains "4:3" and "11:15" contains "1:1", so ordinary
+ * chat resolved to an aspect ratio and made a message look like a scene
+ * request. The digit guards require the ratio to stand alone.
+ */
 const ASPECT_WORDS: ReadonlyArray<readonly [RegExp, StoryboardAspectRatio]> = [
-  [/9\s*:\s*16|แนวตั้ง/u, "9:16"],
-  [/16\s*:\s*9|แนวนอน/u, "16:9"],
-  [/1\s*:\s*1/u, "1:1"],
-  [/4\s*:\s*3/u, "4:3"],
-  [/2\.39\s*:\s*1/u, "2.39:1"],
+  [/(?<![\d.])9\s*:\s*16(?!\d)|แนวตั้ง/u, "9:16"],
+  [/(?<![\d.])16\s*:\s*9(?!\d)|แนวนอน/u, "16:9"],
+  [/(?<![\d.])1\s*:\s*1(?!\d)/u, "1:1"],
+  [/(?<![\d.])4\s*:\s*3(?!\d)/u, "4:3"],
+  [/(?<!\d)2\.39\s*:\s*1(?!\d)/u, "2.39:1"],
 ];
 
 const RESOLUTION_WORDS: ReadonlyArray<readonly [RegExp, StoryboardResolution]> = [
@@ -196,16 +203,18 @@ export function parseStoryboardActions(
   return actions.toSorted((a, b) => a.index - b.index);
 }
 
-/** A short descriptive run right after the verb, e.g. "เบาๆ" in "คุยกันเบาๆ". */
+/**
+ * A short descriptive run right after the verb, e.g. "เบาๆ" in "คุยกันเบาๆ".
+ *
+ * The tail is matched as a STRING, not code point by code point: the previous
+ * per-character test could never match a multi-character clause marker such as
+ * "แล้ว", so the modifier ran on into the next clause and carried it into the
+ * beat action and the video plan.
+ */
 function readModifier(text: string, end: number): string {
-  let taken = "";
-  for (const character of text.slice(end, end + MAX_MODIFIER_LENGTH)) {
-    if (MODIFIER_STOP.test(character)) {
-      break;
-    }
-    taken += character;
-  }
-  return taken;
+  const tail = text.slice(end, end + MAX_MODIFIER_LENGTH);
+  const stop = tail.search(MODIFIER_STOP);
+  return stop === -1 ? tail : tail.slice(0, stop);
 }
 
 /** Cast member named closest before the verb (subject) and closest after it (object). */

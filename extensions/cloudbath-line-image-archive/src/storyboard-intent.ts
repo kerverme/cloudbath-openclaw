@@ -52,6 +52,15 @@ const CREATE_VIDEO_PATTERN =
  */
 const SCENE_NOUNS = /ฉาก|คลิป|วิดีโอ|วีดีโอ|scene\b|shot\b|storyboard/iu;
 
+/**
+ * Wording that asks for a CHANGE, required before a time range is an edit.
+ *
+ * A range alone is far too weak: "วิธีนี้ 3-6 ดีไหม" and "ช่วง 10-14 ว่างไหม"
+ * both parse as ranges, and an unguarded edit permanently appends a version
+ * whose beat action is that chat text.
+ */
+const EDIT_MARKER = /ให้|เปลี่ยน|แก้|ตัด|เอา|ใส่|ลบ|ทำให้|ย้าย|zoom|change|make|cut|replace|set\b|swap/iu;
+
 const CASTING_MARKER = /(?:^|\s)(?:ใช้|ให้)\s*\S/u;
 
 /**
@@ -111,7 +120,7 @@ export function parseStoryboardIntent(params: {
   const matched = matchKnownNames(text, params.knownCharacterNames);
   const unknownNames = findUnknownCastNames(text, params.knownCharacterNames);
   const range = parseTimeRange(text);
-  if (range) {
+  if (range && EDIT_MARKER.test(text)) {
     return {
       kind: "edit",
       fromSeconds: range.fromSecond,

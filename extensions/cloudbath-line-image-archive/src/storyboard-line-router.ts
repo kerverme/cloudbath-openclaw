@@ -271,9 +271,9 @@ export class CloudbathStoryboardLineRouter {
     claim: StoryboardAccessClaim,
     active: ActiveStoryboardContext,
   ): Promise<string> {
-    if (intent.unknownNames[0]) {
-      return unknownCharacterReply(intent.unknownNames[0]);
-    }
+    // Unknown-name fail-closed applies to CREATE, where the cast is being
+    // chosen. An edit instruction is free-form, so a Latin word after "ให้"
+    // ("ให้ zoom in") is direction, not a missing character.
     if (!intent.action.trim()) {
       return REPLY.emptyAction;
     }

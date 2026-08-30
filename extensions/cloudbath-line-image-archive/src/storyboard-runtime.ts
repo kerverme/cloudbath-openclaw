@@ -13,6 +13,7 @@ import {
 } from "./storyboard-line-router.js";
 import {
   CLOUDBATH_STORYBOARD_ACTIVE_NAMESPACE,
+  CLOUDBATH_STORYBOARD_ACTIVE_TTL_MS,
   CLOUDBATH_STORYBOARD_DEDUPE_NAMESPACE,
   CLOUDBATH_STORYBOARD_DRAFT_NAMESPACE,
   CLOUDBATH_STORYBOARD_HEAD_NAMESPACE,
@@ -34,6 +35,7 @@ export type StoryboardStateApi = Readonly<{
     namespace: string;
     maxEntries: number;
     overflowPolicy: "evict-oldest" | "reject-new";
+    defaultTtlMs?: number;
   }): AsyncKeyedStore<T>;
 }>;
 
@@ -65,10 +67,16 @@ export function createCloudbathStoryboardLineRouter(deps: {
       now,
     }),
     resolver: deps.resolver,
+    // Bounded on purpose. "สร้างวิดีโอ" and bare time-range edits are only
+    // claimed while a storyboard is active, so an active record that never
+    // expired would intercept those phrases forever and leave the owner with
+    // no route back to the existing paid flow. Versions themselves are durable
+    // and unaffected; only the "what am I editing right now" pointer ages out.
     active: deps.state.openKeyedStore<ActiveStoryboardContext>({
       namespace: CLOUDBATH_STORYBOARD_ACTIVE_NAMESPACE,
       maxEntries: CLOUDBATH_STORYBOARD_MAX_ENTRIES,
       overflowPolicy: "evict-oldest",
+      defaultTtlMs: CLOUDBATH_STORYBOARD_ACTIVE_TTL_MS,
     }),
     // A prepared draft is a transient review artifact, not history: it can be
     // re-prepared from the storyboard at any time. Evicting the oldest is

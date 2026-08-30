@@ -135,6 +135,30 @@ describe("request parsing regressions", () => {
     expect(readStoryboardDuration("ใช้ Twong เดิน 12s")).toBe(12);
   });
 
+  it("does not read a clock time as an aspect ratio", () => {
+    // "14:30" contains "4:3" and "11:15" contains "1:1".
+    expect(readStoryboardAspectRatio("Twong ประชุม 14:30")).toBeUndefined();
+    expect(readStoryboardAspectRatio("Twong มาถึง 11:15")).toBeUndefined();
+    expect(readStoryboardAspectRatio("Twong 10:30 นะ")).toBeUndefined();
+  });
+
+  it("still reads every real aspect form", () => {
+    expect(readStoryboardAspectRatio("แนวตั้ง")).toBe("9:16");
+    expect(readStoryboardAspectRatio("แนวนอน")).toBe("16:9");
+    expect(readStoryboardAspectRatio("9:16")).toBe("9:16");
+    expect(readStoryboardAspectRatio("16:9")).toBe("16:9");
+    expect(readStoryboardAspectRatio("1:1")).toBe("1:1");
+    expect(readStoryboardAspectRatio("4:3")).toBe("4:3");
+    expect(readStoryboardAspectRatio("2.39:1")).toBe("2.39:1");
+  });
+
+  it("stops a modifier at a multi-character clause marker", () => {
+    // The per-character scan could never match "แล้ว", so the modifier ran on.
+    const actions = parseStoryboardActions("ให้ Twong คุยกันเบาๆแล้วเดินออกไป", ["Twong"]);
+    const dialogue = actions.find((action) => action.kind === "dialogue");
+    expect(dialogue?.phrase).toBe("คุยกันเบาๆ");
+  });
+
   it("strips the time-range span out of an edit instruction", () => {
     expect(stripTimeRangeSpan("วิ 10-14 ให้ Twong หันกลับมามอง Twong2")).toBe(
       "ให้ Twong หันกลับมามอง Twong2",

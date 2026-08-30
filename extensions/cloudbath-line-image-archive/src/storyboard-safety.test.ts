@@ -190,6 +190,50 @@ describe("classifier breadth (regression)", () => {
   });
 });
 
+describe("a time range alone is not an edit", () => {
+  it("ignores chat that merely contains a range", async () => {
+    const h = harness();
+    await h.dispatch(CREATE_MESSAGE, { messageId: "m1" });
+    for (const message of ["วิธีนี้ 3-6 ดีไหม", "ช่วง 10-14 ว่างไหม", "Twong 3-6 นะ"]) {
+      const result = await h.dispatch(message, { messageId: `r-${message}` });
+      expect(result.source, message).not.toBe("storyboard");
+    }
+    // Still only v1: no chat message appended a version.
+    expect((await h.latest()).versionNumber).toBe(1);
+  });
+
+  it("still accepts a real edit instruction", async () => {
+    const h = harness();
+    await h.dispatch(CREATE_MESSAGE, { messageId: "m1" });
+    const result = await h.dispatch("วิ 10-14 ให้ Twong หันกลับมามอง Twong2", {
+      messageId: "m2",
+    });
+    expect(result.source).toBe("storyboard");
+    expect((await h.latest()).versionNumber).toBe(2);
+  });
+
+  it("treats direction words after ให้ as direction, not a missing character", async () => {
+    const h = harness();
+    await h.dispatch(CREATE_MESSAGE, { messageId: "m1" });
+    const result = await h.dispatch("วิ 3-6 ให้ zoom in", { messageId: "m2" });
+    expect(result.text).not.toMatch(/ไม่พบตัวละคร/u);
+    expect((await h.latest()).versionNumber).toBe(2);
+  });
+
+  it("prints an edit hint the router will accept", async () => {
+    const h = harness();
+    const created = await h.dispatch(CREATE_MESSAGE, { messageId: "m1" });
+    const hint = /วิ (\d+)-(\d+)/u.exec(created.text ?? "");
+    expect(hint).not.toBeNull();
+    const [, from, to] = hint!;
+    expect(Number(to)).toBeGreaterThan(Number(from));
+    const applied = await h.dispatch(`วิ ${from}-${to} ให้เปลี่ยนเป็น close-up`, {
+      messageId: "m2",
+    });
+    expect(applied.text).toContain("Storyboard v2");
+  });
+});
+
 describe("edit instructions carry no timestamps into the plan", () => {
   it("stores the action without the range span and keeps it out of the plan", async () => {
     const h = harness();

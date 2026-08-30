@@ -45,7 +45,10 @@ export function formatStoryboardForLine(params: {
     ...document.cast.map((member) => `${member.displayName} · ${member.characterId}`),
     "",
     "พิมพ์แก้ได้ เช่น:",
-    `“วิ ${document.beats[0]?.endSeconds ?? 0}-${document.durationSeconds} ให้เปลี่ยนเป็น close-up”`,
+    // The LAST beat's own window is always a valid range, including on a
+    // single-beat storyboard where "first beat end -> duration" would be empty
+    // and the router would reject the hint it just printed.
+    `“วิ ${document.beats.at(-1)?.startSeconds ?? 0}-${document.durationSeconds} ให้เปลี่ยนเป็น close-up”`,
     "",
     "เมื่อพร้อม:",
     "“สร้างวิดีโอ”",

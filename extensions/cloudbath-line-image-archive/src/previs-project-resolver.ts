@@ -68,14 +68,21 @@ export function createPrevisProjectResolver(
     if (cachedNames && now - cachedNames.at < CHARACTER_NAMES_TTL_MS) {
       return cachedNames.names;
     }
-    const names = deps.notion
-      .listCharacterNames({ capabilities: deps.capabilities })
-      .catch((error: unknown) => {
-        cachedNames = undefined;
-        throw error;
-      });
-    cachedNames = { at: now, names };
-    return names;
+    const slot: { at: number; names: Promise<readonly string[]> } = {
+      at: now,
+      names: deps.notion
+        .listCharacterNames({ capabilities: deps.capabilities })
+        .catch((error: unknown) => {
+          // Clear only THIS slot: a slow failure must not evict a newer
+          // successful entry and restore the double scan per turn.
+          if (cachedNames === slot) {
+            cachedNames = undefined;
+          }
+          throw error;
+        }),
+    };
+    cachedNames = slot;
+    return slot.names;
   };
 
   return {
