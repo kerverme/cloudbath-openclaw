@@ -28,6 +28,18 @@ import {
   cozyClayEngineConfig,
   resolveCozyClayProvisioning,
 } from "./src/previs-cozyclay-runtime.js";
+import {
+  CLOUDBATH_PREVIS_ACTIVE_MAX_ENTRIES,
+  CLOUDBATH_PREVIS_ACTIVE_NAMESPACE,
+  CLOUDBATH_PREVIS_DEDUPE_NAMESPACE,
+  CloudbathPrevisLineRouter,
+  type ActivePrevisContext,
+} from "./src/previs-line-router.js";
+import {
+  CLOUDBATH_PREVIS_DISPLAY_NAMES_NAMESPACE,
+  createPrevisProjectResolver,
+  type PrevisDisplayNameRecord,
+} from "./src/previs-project-resolver.js";
 import { createPrevisReviewRouteHandler, type PrevisReviewRuntime } from "./src/previs-route.js";
 import { CloudbathPrevisService } from "./src/previs-service.js";
 import {
@@ -138,6 +150,7 @@ export default definePluginEntry({
     let characterAssetView: CharacterAssetViewRuntime | undefined;
     let previsReview: PrevisReviewRuntime | undefined;
     let previsService: CloudbathPrevisService | undefined;
+    let previsLineRouter: CloudbathPrevisLineRouter | undefined;
     let activeConfig: ArchiveConfig | undefined;
 
     api.registerHttpRoute({
@@ -342,12 +355,47 @@ export default definePluginEntry({
                 new CozyClayMcpEngine(cozyClayEngineConfig(provisioning)),
                 createPrevisArtifactSink({ r2, bucketName: config.r2.bucketName }),
               );
+              // Deterministic LINE routing: a recognised previs request is
+              // handled in before_dispatch, so the model never gets the turn
+              // and can no longer answer with a generic confirmation.
+              previsLineRouter = new CloudbathPrevisLineRouter({
+                service: previsService,
+                resolver: createPrevisProjectResolver({
+                  // The SAME workflow the video tool uses, so previs attaches to
+                  // a real UGC project and shot rather than a shadow identity.
+                  workflow: ugcWorkflow!,
+                  notion: ugcNotion,
+                  capabilities: workspaceConfig.ugc.capabilities,
+                  displayNames: api.runtime.state.openKeyedStore<PrevisDisplayNameRecord>({
+                    namespace: CLOUDBATH_PREVIS_DISPLAY_NAMES_NAMESPACE,
+                    maxEntries: CLOUDBATH_PREVIS_ACTIVE_MAX_ENTRIES,
+                    overflowPolicy: "evict-oldest",
+                  }),
+                }),
+                active: api.runtime.state.openKeyedStore<ActivePrevisContext>({
+                  namespace: CLOUDBATH_PREVIS_ACTIVE_NAMESPACE,
+                  maxEntries: CLOUDBATH_PREVIS_ACTIVE_MAX_ENTRIES,
+                  overflowPolicy: "evict-oldest",
+                }),
+                dedupe: api.runtime.state.openKeyedStore<{ reply: string }>({
+                  namespace: CLOUDBATH_PREVIS_DEDUPE_NAMESPACE,
+                  maxEntries: CLOUDBATH_PREVIS_ACTIVE_MAX_ENTRIES,
+                  overflowPolicy: "evict-oldest",
+                }),
+                registry: {
+                  lookup: async (accountId, groupId) =>
+                    await workspaceRegistry!.lookup(accountId, groupId),
+                },
+                now: Date.now,
+                logger,
+              });
               logger.info("previs_engine_ready", {
                 cozyClayVersion: provisioning.version,
                 cozyClayRoot: provisioning.root,
               });
             } catch (error) {
               previsService = undefined;
+              previsLineRouter = undefined;
               logger.warn("previs_engine_unavailable", {
                 reason: error instanceof Error ? error.message : "unknown",
               });
@@ -402,6 +450,7 @@ export default definePluginEntry({
             ...(characterAssetView ? { characterAssetView } : {}),
             ...(previsReview ? { previsReview } : {}),
             ...(previsService ? { previsService } : {}),
+            ...(previsLineRouter ? { previsLineRouter } : {}),
             ...(keepWatchingPipeline ? { keepWatchingPipeline } : {}),
             ...(pipeline ? { pipeline } : {}),
             ...(activeConfig ? { activeConfig } : {}),
@@ -491,6 +540,12 @@ export default definePluginEntry({
       const characterResult = await runtime.ugcCharacterWorkflow?.handleBeforeDispatch(event, ctx);
       if (characterResult) {
         return characterResult;
+      }
+      // Previs claims the turn before the model runs, so a character-led scene
+      // request cannot terminate as a generic confirmation.
+      const previsResult = await runtime.previsLineRouter?.handleBeforeDispatch(event, ctx);
+      if (previsResult) {
+        return previsResult;
       }
       await runtime.ugcWorkflow?.observeTurn({
         channelId: ctx.channelId,

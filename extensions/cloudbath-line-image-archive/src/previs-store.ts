@@ -211,6 +211,22 @@ export class PrevisStore {
     return approved;
   }
 
+  /**
+   * Owner-scoped read of the latest version.
+   *
+   * Authorised by the trusted account/group/owner triple, NOT by the browser
+   * capability token: a LINE mutation must never be gated on a URL secret.
+   */
+  async readLatest(params: {
+    previsProjectId: string;
+    claim: PrevisAccessClaim;
+  }): Promise<PrevisVersion | undefined> {
+    const head = await this.requireHead(params.previsProjectId, params.claim);
+    return await this.deps.versions.lookup(
+      previsVersionKey(params.previsProjectId, head.latestVersionNumber),
+    );
+  }
+
   /** Resolves the stable review URL to a version: latest by default. */
   async resolveForReview(params: {
     previsProjectId: string;
