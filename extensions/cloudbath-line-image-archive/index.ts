@@ -22,7 +22,14 @@ import {
 import { CLOUDBATH_NOTION_TOOL_NAMES, createCloudbathNotionTools } from "./src/notion-tools.js";
 import { NotionArchiveClient } from "./src/notion.js";
 import { ArchivePipeline } from "./src/pipeline.js";
+import { createPrevisArtifactSink } from "./src/previs-artifact-sink.js";
+import { CozyClayMcpEngine } from "./src/previs-cozyclay-engine.js";
+import {
+  cozyClayEngineConfig,
+  resolveCozyClayProvisioning,
+} from "./src/previs-cozyclay-runtime.js";
 import { createPrevisReviewRouteHandler, type PrevisReviewRuntime } from "./src/previs-route.js";
+import { CloudbathPrevisService } from "./src/previs-service.js";
 import {
   CLOUDBATH_PREVIS_HEAD_NAMESPACE,
   CLOUDBATH_PREVIS_MAX_ENTRIES,
@@ -130,6 +137,7 @@ export default definePluginEntry({
     let ugcCharacterWorkflow: UgcCharacterImageWorkflow | undefined;
     let characterAssetView: CharacterAssetViewRuntime | undefined;
     let previsReview: PrevisReviewRuntime | undefined;
+    let previsService: CloudbathPrevisService | undefined;
     let activeConfig: ArchiveConfig | undefined;
 
     api.registerHttpRoute({
@@ -303,22 +311,47 @@ export default definePluginEntry({
             // a project behind its stable URL. Immutable history has to fail
             // closed: refusing a new previs is recoverable, losing an approved
             // version an owner is comparing against is not.
-            previsReview = {
-              store: new PrevisStore({
-                heads: api.runtime.state.openKeyedStore<PrevisProjectHead>({
-                  namespace: CLOUDBATH_PREVIS_HEAD_NAMESPACE,
-                  maxEntries: CLOUDBATH_PREVIS_MAX_ENTRIES,
-                  overflowPolicy: "reject-new",
-                }),
-                versions: api.runtime.state.openKeyedStore<PrevisVersion>({
-                  namespace: CLOUDBATH_PREVIS_VERSION_NAMESPACE,
-                  maxEntries: CLOUDBATH_PREVIS_MAX_ENTRIES,
-                  overflowPolicy: "reject-new",
-                }),
-                now: Date.now,
-                artifactKeyPrefix: "previs/cozyclay",
+            const previsStore = new PrevisStore({
+              heads: api.runtime.state.openKeyedStore<PrevisProjectHead>({
+                namespace: CLOUDBATH_PREVIS_HEAD_NAMESPACE,
+                maxEntries: CLOUDBATH_PREVIS_MAX_ENTRIES,
+                overflowPolicy: "reject-new",
               }),
-            };
+              versions: api.runtime.state.openKeyedStore<PrevisVersion>({
+                namespace: CLOUDBATH_PREVIS_VERSION_NAMESPACE,
+                maxEntries: CLOUDBATH_PREVIS_MAX_ENTRIES,
+                overflowPolicy: "reject-new",
+              }),
+              now: Date.now,
+              artifactKeyPrefix: "previs/cozyclay",
+            });
+            previsReview = { store: previsStore };
+            // The engine is verified at startup, not per request: a wrong path
+            // or an unexpected CozyClay version must stop the service rather
+            // than surface as a confusing render failure much later. Previs is
+            // optional, so a missing install disables it instead of taking the
+            // whole plugin down with it.
+            try {
+              const provisioning = await resolveCozyClayProvisioning({
+                root: config.previs.cozyClayRoot,
+                expectedVersion: config.previs.cozyClayVersion,
+              });
+              previsService = new CloudbathPrevisService(
+                previsStore,
+                config.publicAssetBaseUrl,
+                new CozyClayMcpEngine(cozyClayEngineConfig(provisioning)),
+                createPrevisArtifactSink({ r2, bucketName: config.r2.bucketName }),
+              );
+              logger.info("previs_engine_ready", {
+                cozyClayVersion: provisioning.version,
+                cozyClayRoot: provisioning.root,
+              });
+            } catch (error) {
+              previsService = undefined;
+              logger.warn("previs_engine_unavailable", {
+                reason: error instanceof Error ? error.message : "unknown",
+              });
+            }
           }
           await ugcCharacterWorkflow.cleanupExpiredPendingImages();
         }
@@ -368,6 +401,7 @@ export default definePluginEntry({
             ...(ugcCharacterWorkflow ? { ugcCharacterWorkflow } : {}),
             ...(characterAssetView ? { characterAssetView } : {}),
             ...(previsReview ? { previsReview } : {}),
+            ...(previsService ? { previsService } : {}),
             ...(keepWatchingPipeline ? { keepWatchingPipeline } : {}),
             ...(pipeline ? { pipeline } : {}),
             ...(activeConfig ? { activeConfig } : {}),

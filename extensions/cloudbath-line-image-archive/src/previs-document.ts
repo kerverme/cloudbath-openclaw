@@ -83,8 +83,18 @@ function defaultPlacements(cast: readonly PrevisCastMember[]): readonly PrevisPl
   );
 }
 
-/** One shot covering the whole scene, framed on the first cast member. */
-function defaultShots(durationSeconds: number, focus: string): readonly PrevisShot[] {
+/**
+ * One shot covering the whole scene, framed on the first cast member.
+ *
+ * Cast size picks the size: a single subject reads at a medium shot, but a
+ * two-hander framed that tight puts the second stand-in outside the frame,
+ * which is exactly the blocking a reviewer opened the previs to check.
+ */
+function defaultShots(
+  durationSeconds: number,
+  focus: string,
+  castSize: number,
+): readonly PrevisShot[] {
   return Object.freeze([
     Object.freeze({
       shotId: "SHOT-1",
@@ -92,7 +102,7 @@ function defaultShots(durationSeconds: number, focus: string): readonly PrevisSh
       endSecond: durationSeconds,
       camera: Object.freeze({
         focus,
-        size: "medium shot",
+        size: castSize > 1 ? "medium-wide shot" : "medium shot",
         view: "profile",
         level: "eye",
         side: "right",
@@ -127,7 +137,7 @@ export function createPrevisDocument(params: {
     cast,
     placements: defaultPlacements(cast),
     movements: sortMovements(movements),
-    shots: defaultShots(params.durationSeconds, cast[0]!.standIn),
+    shots: defaultShots(params.durationSeconds, cast[0]!.standIn, cast.length),
   });
 }
 
