@@ -157,6 +157,12 @@ export type ArchiveConfig = {
   };
   /** Public origin only. Private object identity and credentials never appear here. */
   publicAssetBaseUrl: string | undefined;
+  previs: {
+    /** Install root of the pinned CozyClay release; verified at startup. */
+    cozyClayRoot: string | undefined;
+    /** Expected CozyClay version. A mismatch disables previs rather than guessing. */
+    cozyClayVersion: string | undefined;
+  };
   retry: {
     maxAttempts: number;
     baseDelayMs: number;

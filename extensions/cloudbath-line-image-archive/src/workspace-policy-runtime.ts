@@ -4,6 +4,7 @@ import type { LineGroupWorkspacePolicyRegistry } from "./group-workspace-policy.
 import type { KeepWatchingPipeline } from "./keep-watching.js";
 import type { ArchivePipeline } from "./pipeline.js";
 import type { PrevisReviewRuntime } from "./previs-route.js";
+import type { CloudbathPrevisService } from "./previs-service.js";
 import type { ArchiveConfig } from "./types.js";
 import type { UgcCharacterImageWorkflow } from "./ugc-character-image.js";
 import type { CloudbathUgcVideoWorkflow } from "./ugc-workflow.js";
@@ -18,6 +19,8 @@ export type CloudbathWorkspacePolicyRuntime = {
   ugcCharacterWorkflow?: UgcCharacterImageWorkflow;
   characterAssetView?: CharacterAssetViewRuntime;
   previsReview?: PrevisReviewRuntime;
+  /** Bound engine + private-R2 sink. Phase 2B LINE routing calls this. */
+  previsService?: CloudbathPrevisService;
   keepWatchingPipeline?: KeepWatchingPipeline;
   pipeline?: ArchivePipeline;
   activeConfig?: ArchiveConfig;

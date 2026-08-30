@@ -242,7 +242,8 @@ describe("previs stable review URL", () => {
     expect(url.search).toBe("");
     const parsed = parsePrevisViewPath(url.pathname);
     expect(parsed?.previsProjectId).toBe(result.previsProjectId);
-    expect(parsed?.capability).toBe("timeline");
+    // The bare stable URL is the human review page; JSON keeps explicit segments.
+    expect(parsed?.capability).toBe("review");
   });
 
   it("never exposes a CozyClay editor, localhost or signed R2 URL", async () => {
@@ -474,10 +475,7 @@ describe("previs authorization", () => {
   it("returns 404 from the review route for a bad token and 405 for a write", async () => {
     const { store, result } = await prepare();
     const handler = createPrevisReviewRouteHandler(() => ({ store }));
-    const badToken = new URL(result.reviewUrl).pathname.replace(
-      /\/[^/]+\/timeline$/u,
-      `/${"c".repeat(22)}/timeline`,
-    );
+    const badToken = new URL(result.reviewUrl).pathname.replace(/\/[^/]+$/u, `/${"c".repeat(22)}`);
 
     const notFound = createMockServerResponse();
     await handler({ method: "GET", url: badToken } as IncomingMessage, notFound);
@@ -496,7 +494,7 @@ describe("previs authorization", () => {
     const handler = createPrevisReviewRouteHandler(() => ({ store }));
     const response = createMockServerResponse();
     await handler(
-      { method: "GET", url: new URL(result.reviewUrl).pathname } as IncomingMessage,
+      { method: "GET", url: `${new URL(result.reviewUrl).pathname}/timeline` } as IncomingMessage,
       response,
     );
     expect(response.statusCode).toBe(200);

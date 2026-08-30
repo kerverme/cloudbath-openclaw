@@ -61,6 +61,12 @@ export type PrevisMovement = Readonly<{
   /** Plain-language beat, e.g. "walks past B and slows". */
   beat: string;
   to?: Readonly<{ x: number; z: number }>;
+  /**
+   * Yaw in degrees the stand-in turns to across this leg. Optional and additive:
+   * a beat that only relocates leaves facing alone, and a turn-in-place beat
+   * ("หมุนตัวกลับ") sets this without a `to`.
+   */
+  facingTo?: number;
 }>;
 
 /** Camera intent for a shot, in CozyClay's film vocabulary. */

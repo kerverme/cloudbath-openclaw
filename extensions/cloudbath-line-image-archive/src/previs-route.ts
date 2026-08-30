@@ -1,5 +1,6 @@
 import type { OpenClawPluginHttpRouteHandler } from "openclaw/plugin-sdk/plugin-entry";
 import { movementsInRange } from "./previs-document.js";
+import { renderPrevisReviewPage } from "./previs-review-page.js";
 import type { PrevisStore } from "./previs-store.js";
 import { PREVIS_TIMELINE_FPS, type PrevisVersion } from "./previs-types.js";
 import { parsePrevisViewPath, type PrevisViewCapability } from "./previs-url.js";
@@ -88,7 +89,7 @@ function previsArtifactView(version: PrevisVersion): Readonly<Record<string, unk
 }
 
 const VIEWS: Record<
-  PrevisViewCapability,
+  Exclude<PrevisViewCapability, "review">,
   (version: PrevisVersion) => Readonly<Record<string, unknown>>
 > = {
   timeline: previsTimelineView,
@@ -122,6 +123,29 @@ export function createPrevisReviewRouteHandler(
       });
       if (!resolved) {
         return finish(res, 404);
+      }
+      if (reference.capability === "review") {
+        const page = renderPrevisReviewPage({
+          version: resolved.version,
+          latestVersionNumber: resolved.head.latestVersionNumber,
+          ...(resolved.head.approvedVersionNumber === undefined
+            ? {}
+            : { approvedVersionNumber: resolved.head.approvedVersionNumber }),
+          isLatest: resolved.version.versionNumber === resolved.head.latestVersionNumber,
+        });
+        const html = Buffer.from(page.html, "utf8");
+        res.statusCode = 200;
+        res.setHeader("Cache-Control", "private, no-store");
+        res.setHeader("Content-Type", "text/html; charset=utf-8");
+        res.setHeader("Content-Length", html.byteLength);
+        res.setHeader("Content-Security-Policy", page.csp);
+        // The capability token sits in the path, so no outbound request may
+        // carry this URL as a referrer.
+        res.setHeader("Referrer-Policy", "no-referrer");
+        res.setHeader("X-Content-Type-Options", "nosniff");
+        res.setHeader("X-Frame-Options", "DENY");
+        res.end(req.method === "HEAD" ? undefined : html);
+        return true;
       }
       const body = Buffer.from(
         JSON.stringify({

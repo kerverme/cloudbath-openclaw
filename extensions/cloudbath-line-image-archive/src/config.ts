@@ -237,6 +237,12 @@ export function resolveArchiveConfig(
       pluginConfig.publicAssetBaseUrl,
       env.RAILWAY_PUBLIC_DOMAIN,
     ),
+    previs: {
+      // Both are optional overrides. Left unset, the runtime resolver uses the
+      // pinned defaults the production image installs.
+      cozyClayRoot: env.CLOUDBATH_COZYCLAY_ROOT?.trim() || undefined,
+      cozyClayVersion: env.CLOUDBATH_COZYCLAY_VERSION?.trim() || undefined,
+    },
     retry: {
       maxAttempts: DEFAULT_RETRY_ATTEMPTS,
       baseDelayMs: DEFAULT_RETRY_BASE_DELAY_MS,

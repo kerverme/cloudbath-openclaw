@@ -757,27 +757,57 @@ Aspect ratio is the one field written directly into the artifact:
 `stage.shotAspect` accepts `9:16` in CozyClay's scene normaliser, but no MCP
 tool sets it headlessly. CozyClay honours the written value on `open_project`.
 
-### Phase 1 is foundation only — what is NOT wired yet
+### Production engine and provisioning (Phase 2A)
 
-Being explicit so nobody deploys this expecting a working previs engine:
+The engine is wired for real. At service start the plugin resolves a **pinned**
+CozyClay install and verifies its version against that package's own
+`package.json`; a wrong path or version disables previs and logs
+`previs_engine_unavailable` rather than rendering with an unverified engine.
+Nothing resolves CozyClay at request time — no `npx`, no `@latest`, no download.
 
-- `CozyClayMcpEngine` is **not instantiated in the production runtime**. It is
-  constructed only by its e2e test. `PrevisStore` and the review route _are_
-  wired in `index.ts`, so the URL and version chain are live, but
-  `preparePrevis()` is not called from any production path and therefore
-  receives neither an engine nor an artifact sink. Every previs created today
-  would carry `artifactObjectKey: null`.
-- **There is no provisioning path for CozyClay.** `cozyclay` is not a declared
-  dependency, nothing installs it in the Dockerfile or Railway config, and no
-  env var or plugin-config key feeds `CozyClayEngineConfig`. A deployment that
-  wants a real engine must first pin CozyClay 1.6.0 into the image and add
-  config plumbing for its `mcp/server.mjs` path.
-- The review surface is **JSON only** — no 3D viewport, no video, no preview
-  frame, no interactive timeline. Frame capture is editor-gated upstream and is
-  recorded as a deferral on every version.
+The production image installs CozyClay 1.6.0 in its own build stage
+(`FROM ... AS cozyclay`), verifies the version, installs the pinned MCP runtime
+dependencies and boots the server once, so a missing dependency fails the build
+instead of the first render. `CLOUDBATH_COZYCLAY_ROOT` and
+`CLOUDBATH_COZYCLAY_VERSION` point the runtime at that install.
 
-None of this blocks the layer's contracts: identity mapping, the version chain,
-the stable URL and the approval boundary are all live and tested.
+`CloudbathPrevisService` binds the engine and the private-R2 artifact sink once
+and is the seam Phase 2B's LINE routing will call. It is deliberately **not**
+registered as a model-facing tool yet.
+
+**Concurrency and process safety.** CozyClay's stdio server always starts its
+live hub and rejects port 0, so each render allocates its own ephemeral loopback
+port and its own `mkdtemp` project root. Renders are bounded by a timeout, the
+MCP client is closed on every path, and the temp root is removed on success,
+failure and timeout — so a failed render leaves no orphan process and no
+partial version.
+
+### The review page
+
+`/previs/<ID>/<TOKEN>` serves a **human 3D review page**: play, pause, scrub, a
+playhead, current second and duration, the version and approved/draft state, the
+cast, the current shot and the current action. `/previs/<ID>/<TOKEN>/v1` reviews
+a historical version; the bare URL always follows latest. The JSON capability
+endpoints keep their explicit segments and are unchanged.
+
+The viewer is Cloudbath-owned and dependency-free. CozyClay's own studio is an
+AGPL Vite application; serving it — or an adaptation of it — would ship AGPL
+frontend code over a network and engage the section 13 source-offer obligation.
+Rendering Cloudbath's own `PrevisDocument` with our own arithmetic keeps the
+AGPL work confined to the separate MCP process and keeps the browser free of
+third-party code. There are no external scripts, styles, fonts or images, so
+nothing can leak the capability token in the URL; the page is served with a
+closed CSP, `no-store` and `no-referrer`, and never renders the R2 object key.
+
+The player's camera solve is a **review approximation** of the same film
+vocabulary, not CozyClay's geometry. The authoritative solve stays in the
+`.cclayproject` the engine produced.
+
+### Still not wired (Phase 2B and later)
+
+- LINE routing and natural-language editing.
+- CozyClay's live editor: prompt blocks, frame capture and Kimodo motion stay
+  recorded as deferrals on every version.
 
 ### Versions, review URL and approval
 
