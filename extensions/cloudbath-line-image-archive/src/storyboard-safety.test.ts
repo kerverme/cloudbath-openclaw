@@ -279,6 +279,18 @@ describe("previs is legacy: only an explicit request reaches it", () => {
   });
 });
 
+describe("a failed dedupe write does not lose the storyboard", () => {
+  it("still replies when the dedupe row cannot be written", async () => {
+    const warn = vi.fn();
+    // Break only the dedupe write; creation itself must still succeed.
+    const h = harness({ logger: { warn }, failDedupeWrite: true });
+    const result = await h.dispatch(CREATE_MESSAGE, { messageId: "m1" });
+    expect(result.text).toContain("Storyboard v1");
+    expect((await h.storyboardVersions.entries()).length).toBe(1);
+    expect(warn).toHaveBeenCalledWith("storyboard_dedupe_write_failed", expect.anything());
+  });
+});
+
 describe("edit versus new scene", () => {
   it("ignores plain chat that carries a range and a weak verb", async () => {
     const h = harness();

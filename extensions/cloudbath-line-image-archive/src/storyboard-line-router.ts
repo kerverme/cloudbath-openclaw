@@ -229,7 +229,16 @@ export class CloudbathStoryboardLineRouter {
       return { handled: true, text: await running };
     }
     const pending = this.execute(intent, claim, active).then(async (text) => {
-      await this.deps.dedupe.register(dedupeKey, { reply: text }, { ttlMs: DEDUPE_TTL_MS });
+      // A failed dedupe write must not discard a storyboard that WAS created:
+      // rejecting here loses the owner's reply and leaves the retry free to
+      // mint a second Notion project and scene.
+      await this.deps.dedupe
+        .register(dedupeKey, { reply: text }, { ttlMs: DEDUPE_TTL_MS })
+        .catch((error: unknown) => {
+          this.deps.logger?.warn("storyboard_dedupe_write_failed", {
+            reason: error instanceof Error ? error.message : "unknown",
+          });
+        });
       return text;
     });
     this.inFlight.set(dedupeKey, pending);

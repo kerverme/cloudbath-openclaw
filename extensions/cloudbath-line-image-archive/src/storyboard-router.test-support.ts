@@ -101,7 +101,12 @@ type DispatchOutcome = {
 };
 
 export function harness(
-  options: { resolver?: StoryboardProjectResolver; logger?: { warn: LoggerWarn } } = {},
+  options: {
+    resolver?: StoryboardProjectResolver;
+    logger?: { warn: LoggerWarn };
+    /** Makes the storyboard dedupe write fail, without touching creation. */
+    failDedupeWrite?: boolean;
+  } = {},
 ) {
   const shared = options.resolver ?? resolver();
   const storyboardVersions = mem<StoryboardVersion>();
@@ -149,12 +154,21 @@ export function harness(
   });
 
   let nextDraft = 0;
+  const baseDedupe = dedupeStore();
+  const dedupe: StoryboardDedupeStore = options.failDedupeWrite
+    ? {
+        lookup: baseDedupe.lookup,
+        register: async () => {
+          throw new Error("plugin state write failed");
+        },
+      }
+    : baseDedupe;
   const storyboardRouter = new CloudbathStoryboardLineRouter({
     store,
     resolver: shared,
     active,
     drafts,
-    dedupe: dedupeStore(),
+    dedupe,
     registry: { lookup: async () => ({ policyId: "UGC", boundByOwnerId: OWNER }) },
     now: () => Date.parse("2026-08-30T10:00:00.000Z"),
     randomId: () => `draft-${(nextDraft += 1)}`,
@@ -211,6 +225,7 @@ export function harness(
   };
 
   return {
+    dedupe,
     dispatch,
     latest,
     versionAt,
