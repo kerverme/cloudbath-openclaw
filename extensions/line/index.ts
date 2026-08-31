@@ -45,6 +45,7 @@ import {
   LINE_VIDEO_MODEL_PREFERENCE_NAMESPACE,
   type LineVideoModelPreferenceState,
 } from "./src/video-model-preference.js";
+import { installLineStoryboardVideoRuntime } from "./src/video-storyboard-runtime.js";
 
 type RegisteredLineCardCommand = OpenClawPluginCommandDefinition;
 // Inline `import(...)` type (no top-level `./src/` import statement) keeps this
@@ -120,6 +121,9 @@ function createLineCardCommandLoader(api: OpenClawPluginApi) {
     return registered;
   });
 }
+
+/** Identifies this plugin as the installer, so only it can clear the runtime slot. */
+const LINE_STORYBOARD_RUNTIME_OWNER = Symbol("line.storyboard-video-runtime.owner");
 
 export default defineBundledChannelEntry({
   id: "line",
@@ -233,6 +237,41 @@ export default defineBundledChannelEntry({
       // owner's "make me a video" request with no reachable tool at all.
       { names: [LINE_VIDEO_DRAFT_TOOL_NAME] },
     );
+
+    // The storyboard plugin's only route into the paid pipeline. Installed
+    // eagerly so it is resolvable the moment a storyboard asks, but the
+    // implementation is imported lazily on first use, like the routers below.
+    //
+    // Everything it does is LINE-owned and runs against LINE-owned state: the
+    // live catalog check, the quote, the cost guard and — critically — the
+    // 4-digit allocation, which uses THIS plugin's draft store. That is what
+    // keeps a single VIDEO code space; plugin state is partitioned by plugin
+    // id, so an allocator on the storyboard side would be a second one.
+    installLineStoryboardVideoRuntime(LINE_STORYBOARD_RUNTIME_OWNER, {
+      prepareStoryboardVideoDraft: async (request) => {
+        const [
+          { prepareLineStoryboardVideoDraft },
+          { resolveLineAccount },
+          { resolveLineProviderApiKey },
+          { getRuntimeConfig },
+        ] = await Promise.all([
+          import("./src/video-storyboard-draft.js"),
+          import("./src/accounts.js"),
+          import("./src/openrouter-auth.js"),
+          import("openclaw/plugin-sdk/runtime-config-snapshot"),
+        ]);
+        return await prepareLineStoryboardVideoDraft(request, {
+          draftStore: videoDraftStore,
+          resolveApiKey: async () => await resolveLineProviderApiKey(),
+          // Account-scoped, so the budget is the one configured for THIS
+          // account rather than the global default.
+          cfg: resolveLineAccount({
+            cfg: getRuntimeConfig(),
+            accountId: request.accountId,
+          }).config,
+        });
+      },
+    });
 
     // Deterministic pre-agent routing, registered before the chat model-switch
     // router below (before_dispatch is first-claim-wins): the exact "ยืนยัน

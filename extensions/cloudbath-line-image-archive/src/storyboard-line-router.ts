@@ -16,6 +16,7 @@ import type { PrevisProjectResolver } from "./previs-line-router.js";
 import { compileStoryboardDocument } from "./storyboard-compiler.js";
 import { formatFinalVideoDraftForLine, formatStoryboardForLine } from "./storyboard-format.js";
 import { parseStoryboardIntent, type StoryboardIntent } from "./storyboard-intent.js";
+import type { StoryboardPaidDraftRuntime } from "./storyboard-paid-draft-runtime.js";
 import {
   isDurationTooLong,
   STORYBOARD_DEFAULT_ASPECT_RATIO,
@@ -88,6 +89,12 @@ export type StoryboardLineRouterDeps = Readonly<{
   };
   now: () => number;
   randomId?: PrepareFinalVideoDraftParams["randomId"];
+  /**
+   * Injected only by tests. Left undefined, the paid handoff resolves the LINE
+   * runtime itself; set to null it is disabled, which is how a build without
+   * the LINE plugin behaves.
+   */
+  paidDraftRuntime?: StoryboardPaidDraftRuntime | null;
   logger?: { warn: (event: string, fields?: Record<string, unknown>) => void };
 }>;
 
@@ -406,6 +413,16 @@ export class CloudbathStoryboardLineRouter {
         drafts: this.deps.drafts,
         now: this.deps.now,
         ...(this.deps.randomId ? { randomId: this.deps.randomId } : {}),
+        // The paid draft is scoped to the conversation that may confirm it, in
+        // the SAME shape the LINE paid flow already uses, so a code minted here
+        // is resolvable by the existing gate and by nothing else.
+        paid: {
+          conversationId: claim.lineGroupId,
+          deliveryTo: `line:group:${claim.lineGroupId}`,
+          ...(this.deps.paidDraftRuntime === undefined
+            ? {}
+            : { runtime: this.deps.paidDraftRuntime }),
+        },
       });
       await this.touchActive(active);
       return formatFinalVideoDraftForLine(draft);

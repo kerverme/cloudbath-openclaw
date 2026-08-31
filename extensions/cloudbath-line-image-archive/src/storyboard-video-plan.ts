@@ -9,8 +9,15 @@
  */
 
 import { randomBytes } from "node:crypto";
+import {
+  tryGetStoryboardPaidDraftRuntime,
+  type StoryboardPaidDraftRequest,
+  type StoryboardPaidDraftResult,
+  type StoryboardPaidDraftRuntime,
+} from "./storyboard-paid-draft-runtime.js";
 import type {
   StoryboardCostEstimate,
+  StoryboardDraftConfirmation,
   StoryboardFinalVideoDraft,
   StoryboardPlanCharacter,
   StoryboardVideoModelSelection,
@@ -135,7 +142,65 @@ export type PrepareFinalVideoDraftParams = Readonly<{
   drafts: AsyncKeyedStore<StoryboardFinalVideoDraft>;
   now: () => number;
   randomId?: () => string;
+  /**
+   * How this draft reaches the LINE conversation, needed only for the paid
+   * handoff: the LINE draft is scoped to the owner and conversation that will
+   * be allowed to confirm it.
+   */
+  paid?: Readonly<{
+    conversationId: string;
+    deliveryTo?: string;
+    /** Defaults to the installed LINE runtime; injected in tests. */
+    runtime?: StoryboardPaidDraftRuntime | null;
+  }>;
 }>;
+
+/**
+ * Turns a compiled plan into the single instruction string the provider gets.
+ *
+ * Beat order and timing are the point of a storyboard, so they are rendered
+ * explicitly rather than flattened into prose a model would have to re-derive.
+ */
+export function compileStoryboardProviderPrompt(plan: StoryboardVideoPlan): string {
+  const cast = plan.characters
+    .map((character) => `${character.characterId} (${character.displayName})`)
+    .join(", ");
+  const beats = plan.beats.map(
+    (beat) =>
+      `${beat.startSeconds}-${beat.endSeconds}s | ${beat.framing} | camera: ${beat.camera} | ${beat.action}` +
+      (beat.dialogue ? ` | dialogue: ${beat.dialogue}` : ""),
+  );
+  return [
+    plan.environment ? `Setting: ${plan.environment}` : undefined,
+    cast ? `Cast: ${cast}` : undefined,
+    `Duration: ${plan.durationSeconds}s · ${plan.aspectRatio} · ${plan.resolution}`,
+    "Beats:",
+    ...beats,
+  ]
+    .filter((line): line is string => Boolean(line))
+    .join("\n");
+}
+
+/**
+ * Reference assets for the paid request, in frozen cast order.
+ *
+ * Only IDENTITY references are handed over. A downstream adapter binds them to
+ * subjects by position, and identity is what keeps CHAR-6 looking like CHAR-6;
+ * product and style assets are not identity and would shift that binding.
+ */
+function paidReferenceAssets(
+  version: StoryboardVersion,
+): StoryboardPaidDraftRequest["referenceAssets"] {
+  return version.characterLocks.flatMap((lock) =>
+    lock.identityReferences.map((reference) =>
+      Object.freeze({
+        kind: reference.kind,
+        source: reference.source,
+        locator: reference.locator,
+      }),
+    ),
+  );
+}
 
 /**
  * Prepares a Final Video Draft from a storyboard version. Calls NO provider.
@@ -150,7 +215,33 @@ export async function prepareStoryboardFinalVideoDraft(
   params: PrepareFinalVideoDraftParams,
 ): Promise<StoryboardFinalVideoDraft> {
   const { version } = params;
-  const model = resolveStoryboardVideoModel();
+  const plan = compileStoryboardVideoPlan(version);
+  const paid = await requestPaidDraft(params, plan);
+  // A refused paid draft is NOT a failed turn: the storyboard is still real and
+  // the owner still gets it, minus a confirmation code. Only the LINE-allocated
+  // code makes a draft billable, so a rejection simply leaves it unbillable.
+  const model: StoryboardVideoModelSelection =
+    paid?.kind === "created"
+      ? Object.freeze({
+          kind: "provider-bound",
+          providerModelId: paid.modelId,
+          displayName: STORYBOARD_PREFERRED_VIDEO_MODEL_DISPLAY_NAME,
+        })
+      : resolveStoryboardVideoModel();
+  const estimatedCost: StoryboardCostEstimate =
+    paid?.kind === "created"
+      ? Object.freeze({
+          kind: "available",
+          amountUsd: paid.estimatedCostUsd,
+          // Provenance comes from the plugin that owns the provider; this side
+          // deliberately names no provider of its own.
+          source: paid.pricingSource,
+        })
+      : estimateStoryboardCost(model);
+  const confirmation: StoryboardDraftConfirmation =
+    paid?.kind === "created"
+      ? Object.freeze({ kind: "ready" as const, code: paid.draftId })
+      : Object.freeze({ kind: "deferred" as const });
   const draftId = await generateStoryboardDraftId(
     params.drafts,
     ...(params.randomId ? ([params.randomId] as const) : ([] as const)),
@@ -172,13 +263,12 @@ export async function prepareStoryboardFinalVideoDraft(
     aspectRatio: version.document.aspectRatio,
     resolution: version.document.resolution,
     model,
-    estimatedCost: estimateStoryboardCost(model),
-    plan: compileStoryboardVideoPlan(version),
-    // Always deferred here. A `ready` confirmation carries a code minted by the
-    // LINE paid draft store's own allocator, which only exists once a provider
-    // model is bound -- constructing one from this side could only invent an
-    // empty or colliding code.
-    confirmation: Object.freeze({ kind: "deferred" as const }),
+    estimatedCost,
+    plan,
+    // Never minted here. A `ready` code is always the one the LINE plugin
+    // allocated in its own store; this side has no 4-digit allocator at all,
+    // so it cannot invent a code that collides with a pending paid draft.
+    confirmation,
     createdAt: new Date(params.now()).toISOString(),
   });
   const claimed = await params.drafts.registerIfAbsent(storyboardDraftKey(draftId), draft);
@@ -186,4 +276,51 @@ export async function prepareStoryboardFinalVideoDraft(
     throw new Error("Storyboard draft id was taken concurrently; retry");
   }
   return draft;
+}
+
+/**
+ * Hands the compiled plan to the LINE plugin, which allocates the paid draft.
+ *
+ * Returns undefined when no paid handoff is possible (the caller supplied no
+ * conversation scope, or the LINE runtime is not installed), which keeps the
+ * storyboard's own draft provider-neutral exactly as before. A thrown error is
+ * swallowed into a rejection for the same reason: a paid-side failure must not
+ * lose the storyboard the owner just asked for.
+ */
+async function requestPaidDraft(
+  params: PrepareFinalVideoDraftParams,
+  plan: StoryboardVideoPlan,
+): Promise<StoryboardPaidDraftResult | undefined> {
+  const paid = params.paid;
+  if (!paid) {
+    return undefined;
+  }
+  const runtime = paid.runtime === undefined ? tryGetStoryboardPaidDraftRuntime() : paid.runtime;
+  if (!runtime) {
+    return undefined;
+  }
+  const { version } = params;
+  try {
+    return await runtime.prepareStoryboardVideoDraft({
+      accountId: version.accountId,
+      conversationId: paid.conversationId,
+      ownerSenderId: version.ownerSenderId,
+      ...(paid.deliveryTo ? { deliveryTo: paid.deliveryTo } : {}),
+      prompt: compileStoryboardProviderPrompt(plan),
+      durationSeconds: plan.durationSeconds,
+      aspectRatio: plan.aspectRatio,
+      resolution: plan.resolution,
+      // Asking is not granting: the LINE side only honours this when the live
+      // catalog reports audio support for the bound model.
+      audio: true,
+      storyboardId: version.storyboardId,
+      storyboardVersionNumber: version.versionNumber,
+      characterLocks: version.characterLocks.map((lock) =>
+        Object.freeze({ code: lock.code, pageId: lock.pageId }),
+      ),
+      referenceAssets: paidReferenceAssets(version),
+    });
+  } catch {
+    return { kind: "rejected", reason: "paid_draft_unavailable" };
+  }
 }
