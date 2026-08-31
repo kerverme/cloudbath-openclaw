@@ -19,8 +19,8 @@
  */
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import {
-  DEFAULT_VIDEO_MAX_ESTIMATED_COST_USD,
   evaluateLineVideoCostGuard,
+  resolveLineVideoMaxEstimatedCostUsd,
   resolveLineVideoOutputSize,
 } from "./video-cost-guard.js";
 import { createLineVideoDraft, type LineVideoDraftStore } from "./video-draft-store.js";
@@ -289,23 +289,10 @@ export async function prepareLineStoryboardVideoDraft(
     aspectRatio: request.aspectRatio,
     audio,
     estimatedCostUsd: costGuard.estimatedCostUsd,
-    maxAllowedUsd: resolveMaxAllowedUsd(deps.cfg),
+    // The guard's own resolver, so the snapshotted ceiling is by construction
+    // the one the guard just compared against.
+    maxAllowedUsd: resolveLineVideoMaxEstimatedCostUsd(deps.cfg),
     pricingSource: `openrouter:${model.id}`,
     ...(outputSize ? { outputSize } : {}),
   };
-}
-
-/**
- * The budget the quote was accepted against, snapshotted into the draft reply.
- *
- * Recomputed from the same config the guard used rather than returned by the
- * guard, because the guard only reports a limit on the REJECTION path.
- */
-function resolveMaxAllowedUsd(
-  cfg: Pick<OpenClawConfig, never> & { videoGeneration?: { maxEstimatedCostUsd?: number } },
-): number {
-  const configured = cfg.videoGeneration?.maxEstimatedCostUsd;
-  return typeof configured === "number" && Number.isFinite(configured) && configured > 0
-    ? configured
-    : DEFAULT_VIDEO_MAX_ESTIMATED_COST_USD;
 }

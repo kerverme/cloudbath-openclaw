@@ -349,3 +349,28 @@ describe("no test in this file can spend money", () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 });
+
+describe("the snapshotted ceiling is the one the guard used", () => {
+  it("falls back to the global default for an unusable configured limit", async () => {
+    // A zero, negative or non-finite limit must not read as "no limit"; the
+    // guard's own resolver decides, so this can never drift from it.
+    for (const maxEstimatedCostUsd of [0, -1, Number.NaN]) {
+      const h = harness({ maxEstimatedCostUsd });
+      const result = await prepareLineStoryboardVideoDraft(request(), h.deps);
+      expect(result, String(maxEstimatedCostUsd)).toMatchObject({
+        kind: "rejected",
+        reason: "over_limit",
+        maxAllowedUsd: DEFAULT_VIDEO_MAX_ESTIMATED_COST_USD,
+      });
+      expect(await h.draftStore.entries()).toEqual([]);
+    }
+  });
+
+  it("allows a quote exactly at the configured ceiling", async () => {
+    // The guard rejects strictly above the limit; a draft priced exactly at it
+    // is allowed, and the snapshot records that same ceiling.
+    const h = harness({ maxEstimatedCostUsd: 3.468 });
+    const result = await prepareLineStoryboardVideoDraft(request(), h.deps);
+    expect(result).toMatchObject({ kind: "created", maxAllowedUsd: 3.468 });
+  });
+});
