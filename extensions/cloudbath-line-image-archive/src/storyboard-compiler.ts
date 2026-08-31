@@ -131,7 +131,14 @@ function planBeats(
   ];
 }
 
-/** Drops generated beats before requested ones until every beat can hold >= 1s. */
+/**
+ * Drops generated beats before requested ones until every beat can hold >= 1s.
+ *
+ * When even the requested beats cannot all be seated -- a duration shorter than
+ * the number of actions named -- the EARLIEST requested beats are kept and the
+ * tail is truncated. Something has to give at that point; keeping the opening
+ * of the scene is the least surprising choice.
+ */
 function trimToDuration(
   beats: readonly PlannedBeat[],
   durationSeconds: number,

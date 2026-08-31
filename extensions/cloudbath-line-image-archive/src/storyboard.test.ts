@@ -185,6 +185,17 @@ describe("request parsing regressions", () => {
     );
   });
 
+  it("does not eat the first letter of the word after a range", () => {
+    // The optional trailing unit used to match the "s" of "set"/"slow".
+    expect(stripTimeRangeSpan("วิ 3-6 set close-up")).toBe("set close-up");
+    expect(stripTimeRangeSpan("วิ 3-6 slow motion")).toBe("slow motion");
+  });
+
+  it("does not treat a bare English 'in' as a location marker", () => {
+    expect(readStoryboardEnvironment("ใช้ Twong ให้ zoom in ตอนท้าย 12 วิ")).toBe("");
+    expect(readStoryboardEnvironment("Twong walks in the cafe")).toBe("cafe");
+  });
+
   it("requires a standalone unit before reading a time range", () => {
     // "วิ" as the first syllable of another word is not a seconds marker.
     expect(parseStoryboardTimeRange("วิธีนี้ 3-6 เอาไหม")).toBeUndefined();

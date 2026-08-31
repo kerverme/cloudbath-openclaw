@@ -83,7 +83,7 @@ function findStoryboardUnknownCast(text: string, knownNames: readonly string[]):
 
 const NEW_SCENE_MARKER = /ใหม่|new\s+(?:scene|shot|storyboard)/iu;
 
-const EDIT_MARKER = /ให้|เปลี่ยน|แก้|ตัด|เอา|ใส่|ลบ|ทำให้|ย้าย|zoom|change|make|cut|replace|set\b|swap/iu;
+const EDIT_MARKER = /ให้|เปลี่ยน|แก้ไข|แก้|ตัด|ใส่|ลบ|ทำให้|ย้าย|zoom|change|cut|replace|set\b|swap/iu;
 
 const CASTING_MARKER = /(?:^|\s)(?:ใช้|ให้)\s*\S/u;
 
@@ -95,7 +95,7 @@ const CASTING_MARKER = /(?:^|\s)(?:ใช้|ให้)\s*\S/u;
  * a timestamp as part of the thing to depict.
  */
 const RANGE_SPAN =
-  /(?:วินาที|วิ|ช่วง|seconds?|sec)?\s*\d{1,3}\s*(?:-|–|—|ถึง|to)\s*\d{1,3}\s*(?:วินาที|วิ|seconds?|sec|s)?/giu;
+  /(?:วินาที|วิ|ช่วง|seconds?|sec)?\s*\d{1,3}\s*(?:-|–|—|ถึง|to)\s*\d{1,3}(?:\s*(?:วินาที|วิ|seconds?\b|sec\b|s\b))?/giu;
 
 export function stripTimeRangeSpan(text: string): string {
   return text.replace(RANGE_SPAN, " ").replace(/\s+/gu, " ").trim();
@@ -144,11 +144,15 @@ export function parseStoryboardIntent(params: {
   }
 
   const matched = matchKnownNames(text, params.knownCharacterNames);
+  const hasAction = parseStoryboardActions(text, params.knownCharacterNames).length > 0;
   const unknownNames = findStoryboardUnknownCast(text, params.knownCharacterNames);
   const range = parseStoryboardTimeRange(text);
   // An explicit new-scene request outranks an edit even when it names a range:
   // "ทำฉากใหม่ 10-15 วิ ให้ Twong เดิน" asks for a scene, not a rewrite.
-  if (range && EDIT_MARKER.test(text) && !NEW_SCENE_MARKER.test(text)) {
+  // An explicit scene noun with an action asks for a NEW scene, even when it
+  // also names a range ("ทำคลิป ให้ Twong เดิน 10-15 วิ" is a 10-15s clip).
+  const asksForNewScene = NEW_SCENE_MARKER.test(text) || (SCENE_NOUNS.test(text) && hasAction);
+  if (range && EDIT_MARKER.test(text) && !asksForNewScene) {
     return {
       kind: "edit",
       fromSeconds: range.fromSeconds,
@@ -163,7 +167,6 @@ export function parseStoryboardIntent(params: {
   // casting instruction carrying a recognised action. A bare verb beside a
   // character name is conversation, and claiming it would mint a real Notion
   // project and scene for a question.
-  const hasAction = parseStoryboardActions(text, params.knownCharacterNames).length > 0;
   const durationSeconds = readStoryboardDuration(text);
   const aspectRatio = readStoryboardAspectRatio(text);
   const resolution = readStoryboardResolution(text);
@@ -186,7 +189,11 @@ export function parseStoryboardIntent(params: {
     kind: "create",
     characterNames: matched,
     unknownNames,
-    explicitCasting: CASTING_MARKER.test(text),
+    // A second storyboard needs an explicit cast list, OR a self-contained
+    // request: an action plus a dimension the owner actually named.
+    explicitCasting:
+      CASTING_MARKER.test(text) ||
+      (hasAction && (durationSeconds !== undefined || aspectRatio !== undefined)),
     ...(durationSeconds === undefined ? {} : { durationSeconds }),
     ...(aspectRatio === undefined ? {} : { aspectRatio }),
     ...(resolution === undefined ? {} : { resolution }),

@@ -279,6 +279,35 @@ describe("previs is legacy: only an explicit request reaches it", () => {
   });
 });
 
+describe("edit versus new scene", () => {
+  it("ignores plain chat that carries a range and a weak verb", async () => {
+    const h = harness();
+    await h.dispatch(CREATE_MESSAGE, { messageId: "m1" });
+    for (const message of ["ช่วง 3-6 เอาไหม", "วิธีนี้ 3-6 เอาไหม"]) {
+      const result = await h.dispatch(message, { messageId: `w-${message}` });
+      expect(result.source, message).not.toBe("storyboard");
+    }
+    expect((await h.latest()).versionNumber).toBe(1);
+  });
+
+  it("treats a clip request naming a duration range as a new scene", async () => {
+    const h = harness();
+    await h.dispatch(CREATE_MESSAGE, { messageId: "m1" });
+    const result = await h.dispatch("ทำคลิป ให้ Twong เดิน 10-15 วิ", { messageId: "m2" });
+    expect(result.source).toBe("storyboard");
+    // A new storyboard, not a rewrite of beats 10-15.
+    expect(result.text).toContain("Storyboard v1");
+  });
+
+  it("accepts a self-contained second request without an explicit cast list", async () => {
+    const h = harness();
+    await h.dispatch(CREATE_MESSAGE, { messageId: "m1" });
+    const result = await h.dispatch("ทำคลิป Twong2 วิ่งในสวน 20 วิ", { messageId: "m2" });
+    expect(result.source).toBe("storyboard");
+    expect(result.text).toContain("Storyboard v1");
+  });
+});
+
 describe("create-path validation", () => {
   it("does not read a direction word as a missing character", async () => {
     const h = harness();

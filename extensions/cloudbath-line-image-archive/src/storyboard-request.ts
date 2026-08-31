@@ -137,7 +137,9 @@ export function readStoryboardResolution(text: string): StoryboardResolution | u
 export function readStoryboardEnvironment(text: string): string {
   // Thai runs words together ("เดินเข้ามาในร้านกาแฟ"), so the Thai markers
   // cannot require preceding whitespace the way the English ones do.
-  const marker = text.match(/(?:ใน|ที่)|(?:^|\s)(?:in|at)\s+(?:the\s+|a\s+)?/iu);
+  // English requires an article: a bare "in" is far more often a particle
+  // ("zoom in ตอนท้าย") than a location marker.
+  const marker = text.match(/(?:ใน|ที่)|(?:^|\s)(?:in|at)\s+(?:the|a)\s+/iu);
   if (marker?.index === undefined) {
     return "";
   }
