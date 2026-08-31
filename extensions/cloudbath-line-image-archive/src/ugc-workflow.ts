@@ -1208,7 +1208,14 @@ export class CloudbathUgcVideoWorkflow {
     startNewProject?: boolean;
     productName?: string;
     characterNames: readonly string[];
-    /** Caller-owned: decides each frozen lock's canonical `code`. */
+    /**
+     * Caller-owned: decides each frozen lock's canonical `code`.
+     *
+     * Also the single source of identity for the cast-lock guard on a
+     * continuation, so the codes compared are always the codes that froze the
+     * lock. `characterNames` stays display/label metadata and is never
+     * compared against a lock.
+     */
     resolveCharacterPages: () => Promise<Array<{ code: string; page: NotionPage }>>;
     sceneNumber?: number;
     prompt: string;
@@ -1247,9 +1254,12 @@ export class CloudbathUgcVideoWorkflow {
     let projectPage: NotionPage;
     const characterPages: Array<{ code: string; page: NotionPage }> = [];
     if (existingInstance) {
-      // Continuation runs entirely on frozen identity: no Product or
-      // Character row is re-resolved, so the owner need not repeat
-      // productName and a library edit cannot retarget this project.
+      // Continuation reuses frozen identity: the owner need not repeat
+      // productName, and the frozen Product/Character REFERENCES are reused
+      // verbatim so a library edit cannot retarget this project. The cast-lock
+      // guard below still resolves the named cast to canonical codes, because
+      // comparing a typed display name against a canonical lock is not an
+      // identity check at all.
       if (params.productName) {
         const named = await this.notion.resolveNamedRecord({
           capabilityId: "PRODUCT_LIBRARY",
@@ -1336,23 +1346,38 @@ export class CloudbathUgcVideoWorkflow {
     const project = { page: projectPage, recordId: instance.projectInstanceId };
 
     // The cast is frozen once per PROJECT INSTANCE. A later scene reuses the
-    // stored lock verbatim rather than re-reading the Character Library, so
-    // edits to a library row cannot reach an existing project -- while a
-    // deliberately new project freezes the then-current references.
+    // stored lock's REFERENCES verbatim, so edits to a library row cannot reach
+    // an existing project -- while a deliberately new project freezes the
+    // then-current ones. Only the canonical codes are resolved again, to check
+    // the request names the same cast.
     const lockKey = ugcProjectLockKey(instance.projectInstanceId);
     const existingLock = await this.projectLocks.lookup(lockKey);
     const frozenAt = new Date(this.now()).toISOString();
     let characterLocks: readonly UgcCharacterLock[];
     if (existingLock) {
       characterLocks = existingLock.characterLocks;
-      const requested = params.characterNames.map((code) => code.toLowerCase()).toSorted();
-      const locked = characterLocks.map((lock) => lock.code.toLowerCase()).toSorted();
-      if (requested.length > 0 && requested.join("|") !== locked.join("|")) {
-        throw new Error(
-          `This project is already locked to ${characterLocks
-            .map((lock) => lock.code)
-            .join(", ")}; start a new project to change its cast`,
-        );
+      // Identity is the canonical code the lock was FROZEN from, never the
+      // name the owner typed. Both are resolved through the caller's own
+      // resolver -- the same one that produced the frozen codes -- so a
+      // canonicalising caller compares CHAR-6 against CHAR-6 rather than
+      // "twong" against CHAR-6, which rejected every later scene in a project.
+      //
+      // Only identity is re-resolved. The frozen references below are still
+      // reused verbatim, so a Character Library edit cannot retarget an
+      // existing project; an unresolvable name fails closed in the resolver.
+      if (params.characterNames.length > 0) {
+        // Always resolves: a project reached through an existing lock never
+        // populated `characterPages`, which is filled only when creating one.
+        const resolved = await params.resolveCharacterPages();
+        const requested = resolved.map((entry) => entry.code.toLowerCase()).toSorted();
+        const locked = characterLocks.map((lock) => lock.code.toLowerCase()).toSorted();
+        if (requested.join("|") !== locked.join("|")) {
+          throw new Error(
+            `This project is already locked to ${characterLocks
+              .map((lock) => lock.code)
+              .join(", ")}; start a new project to change its cast`,
+          );
+        }
       }
     } else {
       characterLocks = Object.freeze(
