@@ -98,9 +98,10 @@ export function createPrevisProjectResolver(
         prompt: scenePrompt,
       });
 
-      // A continued project reuses its frozen lock, so the pages above may not
-      // have been resolved at all. Recover the owner's names from the durable
-      // record rather than inventing them from the codes.
+      // Previs always names a cast, so the resolve above ran and `displayByCode`
+      // covers it. The stored record still merges in first, so a name the owner
+      // gave an earlier scene survives eviction of nothing but this turn's map,
+      // and a lock with no known display name falls back to its canonical code.
       const stored = await deps.displayNames.lookup(
         previsDisplayNamesKey(resolved.instance.projectInstanceId),
       );

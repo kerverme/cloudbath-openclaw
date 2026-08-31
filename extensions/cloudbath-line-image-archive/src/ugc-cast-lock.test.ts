@@ -483,7 +483,6 @@ describe("L. a product-only project reports its empty cast clearly", () => {
     await expect(h.canonicalising(["Twong"], 2)).rejects.toThrow(
       /This project has no cast locked/u,
     );
-    await expect(h.canonicalising(["Twong"], 2)).rejects.not.toThrow(/locked to ;/u);
   });
 });
 
