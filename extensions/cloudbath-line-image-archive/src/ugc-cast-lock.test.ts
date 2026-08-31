@@ -372,6 +372,20 @@ describe("G. either caller can continue a project the other started", () => {
   });
 });
 
+describe("J. the resolve cost per continuation is bounded", () => {
+  it("resolves each named character exactly once per scene", async () => {
+    const h = harness();
+    await h.canonicalising(["Twong", "Twong2"], 1);
+    const afterFirst = h.notionCalls.resolveNamedRecord;
+    expect(afterFirst).toBe(2);
+
+    // A continuation re-resolves identity (and only identity): two names, two
+    // lookups. This is the change's new cost, pinned so it cannot creep.
+    await h.canonicalising(["Twong", "Twong2"], 2);
+    expect(h.notionCalls.resolveNamedRecord - afterFirst).toBe(2);
+  });
+});
+
 describe("I. a continuation whose lock is missing rebuilds it", () => {
   it("re-freezes the named cast instead of storing an empty lock", async () => {
     const h = harness();
@@ -389,5 +403,39 @@ describe("I. a continuation whose lock is missing rebuilds it", () => {
 
     const third = await h.canonicalising(["Twong", "Twong2"], 3);
     expect(third.sceneNumber).toBe(3);
+  });
+});
+
+describe("K. a lost lock cannot silently re-cast the project", () => {
+  it("rejects a rebuild that names a cast the instance never froze", async () => {
+    const h = harness();
+    await h.canonicalising(["Twong", "Twong2"], 1);
+    for (const { key } of await h.projectLocks.entries()) {
+      await h.projectLocks.delete(key);
+    }
+
+    // The lock is gone but the INSTANCE still carries the frozen page ids.
+    await expect(h.canonicalising(["Twong", "Other"], 2)).rejects.toThrow(
+      /already locked to a different cast/u,
+    );
+    expect(await h.lockedCodes()).toEqual([]);
+  });
+
+  it("writes no empty lock for a continuation that names no cast", async () => {
+    const h = harness();
+    await h.canonicalising(["Twong", "Twong2"], 1);
+    for (const { key } of await h.projectLocks.entries()) {
+      await h.projectLocks.delete(key);
+    }
+
+    // A cast-less continuation must leave the lock absent, not persist an
+    // empty one that answers every later scene with "already locked to ;".
+    const castless = await h.canonicalising([], 2);
+    expect(castless.characterLocks).toEqual([]);
+    expect((await h.projectLocks.entries()).length).toBe(0);
+
+    // A later scene that DOES name the cast still rebuilds it.
+    const rebuilt = await h.canonicalising(["Twong", "Twong2"], 3);
+    expect(rebuilt.characterLocks.map((lock) => lock.code)).toEqual(["CHAR-6", "CHAR-7"]);
   });
 });

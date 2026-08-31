@@ -1212,9 +1212,9 @@ export class CloudbathUgcVideoWorkflow {
      * Caller-owned: decides each frozen lock's canonical `code`.
      *
      * Also the single source of identity for the cast-lock guard on a
-     * continuation, so the codes compared are always the codes that froze the
-     * lock. `characterNames` stays display/label metadata and is never
-     * compared against a lock.
+     * continuation: the guard compares the resolved Character page ids, not
+     * `code` (which is caller-owned and differs between callers) and never
+     * `characterNames`, which stays display/label metadata.
      */
     resolveCharacterPages: () => Promise<Array<{ code: string; page: NotionPage }>>;
     sceneNumber?: number;
@@ -1257,7 +1257,7 @@ export class CloudbathUgcVideoWorkflow {
       // Continuation reuses frozen identity: the owner need not repeat
       // productName, and the frozen Product/Character REFERENCES are reused
       // verbatim so a library edit cannot retarget this project. The cast-lock
-      // guard below still resolves the named cast to canonical codes, because
+      // guard below still resolves the named cast to Character pages, because
       // comparing a typed display name against a canonical lock is not an
       // identity check at all.
       if (params.productName) {
@@ -1397,16 +1397,29 @@ export class CloudbathUgcVideoWorkflow {
         }
       }
     } else {
-      // A continuation reaches here only if the lock is missing (an evicted or
-      // never-written row). Freezing the empty `characterPages` of a
-      // continuation would store a zero-character lock and poison the project
-      // with "already locked to ;", so the cast is resolved and re-frozen.
-      const pagesToFreeze =
-        characterPages.length === 0 && params.characterNames.length > 0
+      // A continuation reaches here only when the lock row is missing (evicted,
+      // or never written). Freezing this scene's cast blind would silently
+      // re-cast the project, so the rebuild is checked against the page ids the
+      // INSTANCE froze at creation -- the identity that outlives the lock.
+      const rebuilt =
+        existingInstance && characterPages.length === 0 && params.characterNames.length > 0
           ? await params.resolveCharacterPages()
           : characterPages;
+      if (existingInstance && rebuilt.length > 0) {
+        const requested = rebuilt
+          .map((entry) => entry.page.id ?? "")
+          .toSorted((a, b) => a.localeCompare(b));
+        const frozen = [...existingInstance.characterPageIds].toSorted((a, b) =>
+          a.localeCompare(b),
+        );
+        if (requested.join("|") !== frozen.join("|")) {
+          throw new Error(
+            "This project is already locked to a different cast; start a new project to change it",
+          );
+        }
+      }
       characterLocks = Object.freeze(
-        pagesToFreeze.map((entry) =>
+        rebuilt.map((entry) =>
           freezeCharacterLock({
             code: entry.code,
             page: entry.page,
@@ -1416,17 +1429,22 @@ export class CloudbathUgcVideoWorkflow {
           }),
         ),
       );
-      await this.projectLocks.register(lockKey, {
-        version: 1,
-        projectInstanceId: instance.projectInstanceId,
-        projectPageId: project.page.id!,
-        projectRecordId: project.recordId,
-        accountId,
-        lineGroupId: groupId,
-        ownerSenderId,
-        characterLocks,
-        frozenAt,
-      });
+      // A product-only NEW project legitimately freezes an empty cast. A
+      // continuation must not: writing an empty lock here would answer every
+      // later scene with "already locked to ;".
+      if (!existingInstance || characterLocks.length > 0) {
+        await this.projectLocks.register(lockKey, {
+          version: 1,
+          projectInstanceId: instance.projectInstanceId,
+          projectPageId: project.page.id!,
+          projectRecordId: project.recordId,
+          accountId,
+          lineGroupId: groupId,
+          ownerSenderId,
+          characterLocks,
+          frozenAt,
+        });
+      }
     }
 
     const sceneNumber =
