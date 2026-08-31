@@ -1,0 +1,107 @@
+/**
+ * LINE rendering for storyboards and Final Video Drafts.
+ *
+ * Formatting is the LAST step and is derived entirely from the structured
+ * document — prose is never the source of truth, and nothing here is persisted
+ * as the storyboard itself.
+ */
+
+import type {
+  StoryboardCostEstimate,
+  StoryboardDraftConfirmation,
+  StoryboardDocument,
+  StoryboardFinalVideoDraft,
+  StoryboardVideoModelSelection,
+} from "./storyboard-types.js";
+
+function beatBlock(document: StoryboardDocument): string[] {
+  return document.beats.flatMap((beat) => {
+    const heading = beat.environmentNote
+      ? `${beat.framing} — ${beat.environmentNote}`
+      : beat.framing;
+    return [
+      "",
+      `${beat.startSeconds}–${beat.endSeconds} วิ`,
+      heading,
+      beat.action,
+      ...(beat.dialogue ? [`เสียง: ${beat.dialogue}`] : []),
+      ...(beat.camera && beat.camera !== "Static" ? [`กล้อง: ${beat.camera}`] : []),
+    ];
+  });
+}
+
+/** Renders one storyboard version for LINE. */
+export function formatStoryboardForLine(params: {
+  versionNumber: number;
+  document: StoryboardDocument;
+}): string {
+  const { document } = params;
+  const lines = [
+    `🎬 Storyboard v${params.versionNumber} — ${document.durationSeconds} วิ · ${document.aspectRatio}`,
+    ...(document.environment ? [`สถานที่: ${document.environment}`] : []),
+    ...beatBlock(document),
+    "",
+    "ตัวละคร:",
+    ...document.cast.map((member) => `${member.displayName} · ${member.characterId}`),
+    "",
+    "พิมพ์แก้ได้ เช่น:",
+    // The LAST beat's own window is always a valid range, including on a
+    // single-beat storyboard where "first beat end -> duration" would be empty
+    // and the router would reject the hint it just printed.
+    `“วิ ${document.beats.at(-1)?.startSeconds ?? 0}-${document.durationSeconds} ให้เปลี่ยนเป็น close-up”`,
+    "",
+    "เมื่อพร้อม:",
+    "“สร้างวิดีโอ”",
+  ];
+  return lines.join("\n");
+}
+
+function formatModel(model: StoryboardVideoModelSelection): string {
+  return model.kind === "provider-bound"
+    ? `${model.displayName} (${model.providerModelId})`
+    : `${model.displayName} (ยังไม่ผูกกับผู้ให้บริการ)`;
+}
+
+function formatCost(estimate: StoryboardCostEstimate): string {
+  return estimate.kind === "available"
+    ? `ราคาโดยประมาณ: ~$${estimate.amountUsd.toFixed(2)}`
+    : "ราคาโดยประมาณ: ยังไม่พร้อมใช้งาน";
+}
+
+/**
+ * Confirmation instructions, or an honest statement that it is not wired yet.
+ *
+ * The exact `ยืนยัน VIDEO ####` phrase is only printed for a draft the paid
+ * gate can actually resolve. Printing it for a deferred draft would either
+ * dead-end or, on a code collision, confirm somebody else\'s pending job.
+ */
+function confirmationLines(confirmation: StoryboardDraftConfirmation): readonly string[] {
+  return confirmation.kind === "ready"
+    ? ["ยืนยันด้วยข้อความนี้:", `ยืนยัน VIDEO ${confirmation.code}`]
+    : ["การยืนยันเพื่อสร้างวิดีโอจริงยังไม่เปิดใช้งาน (รอเชื่อมต่อผู้ให้บริการ)"];
+}
+
+/**
+ * Renders a Final Video Draft.
+ *
+ * The message states plainly that nothing has been generated or charged yet, so
+ * the owner is never left believing the draft alone started a paid job.
+ */
+export function formatFinalVideoDraftForLine(draft: StoryboardFinalVideoDraft): string {
+  return [
+    "🎬 Final Video Draft",
+    `Storyboard v${draft.storyboardVersionNumber}`,
+    `ความยาว: ${draft.durationSeconds} วิ · ${draft.aspectRatio} · ${draft.resolution}`,
+    `โมเดล: ${formatModel(draft.model)}`,
+    formatCost(draft.estimatedCost),
+    "",
+    "ตัวละคร:",
+    ...draft.plan.characters.map(
+      (character) => `${character.displayName} · ${character.characterId}`,
+    ),
+    "",
+    "ยังไม่มีการสร้างวิดีโอและยังไม่มีการคิดค่าใช้จ่าย",
+    "",
+    ...confirmationLines(draft.confirmation),
+  ].join("\n");
+}

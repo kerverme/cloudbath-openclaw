@@ -31,6 +31,8 @@ export type PrevisProjectResolverDeps = Readonly<{
    * recovered by guessing from the code.
    */
   displayNames: AsyncKeyedStore<PrevisDisplayNameRecord>;
+  /** Injectable clock for the Character-name memo; defaults to `Date.now`. */
+  now?: () => number;
 }>;
 
 export type PrevisDisplayNameRecord = Readonly<{
@@ -45,6 +47,9 @@ export type PrevisDisplayNameRecord = Readonly<{
 
 export const CLOUDBATH_PREVIS_DISPLAY_NAMES_NAMESPACE = "cloudbath-previs-display-names-v1";
 
+/** Short enough that a newly added Character shows up within one conversation. */
+const CHARACTER_NAMES_TTL_MS = 30_000;
+
 export function previsDisplayNamesKey(projectInstanceId: string): string {
   return `previs-display-names:${projectInstanceId}`;
 }
@@ -52,9 +57,36 @@ export function previsDisplayNamesKey(projectInstanceId: string): string {
 export function createPrevisProjectResolver(
   deps: PrevisProjectResolverDeps,
 ): PrevisProjectResolver {
+  // Single-slot, lifecycle-owned memo. Both the storyboard and previs routers
+  // classify EVERY owner message against this list, so an uncached read meant
+  // two full Character Library scans per chat turn. The in-flight promise is
+  // shared so concurrent classifications collapse into one request, and a
+  // failure is never cached.
+  let cachedNames: { at: number; names: Promise<readonly string[]> } | undefined;
+  const listCharacterNames = (): Promise<readonly string[]> => {
+    const now = deps.now?.() ?? Date.now();
+    if (cachedNames && now - cachedNames.at < CHARACTER_NAMES_TTL_MS) {
+      return cachedNames.names;
+    }
+    const slot: { at: number; names: Promise<readonly string[]> } = {
+      at: now,
+      names: deps.notion
+        .listCharacterNames({ capabilities: deps.capabilities })
+        .catch((error: unknown) => {
+          // Clear only THIS slot: a slow failure must not evict a newer
+          // successful entry and restore the double scan per turn.
+          if (cachedNames === slot) {
+            cachedNames = undefined;
+          }
+          throw error;
+        }),
+    };
+    cachedNames = slot;
+    return slot.names;
+  };
+
   return {
-    listCharacterNames: async () =>
-      await deps.notion.listCharacterNames({ capabilities: deps.capabilities }),
+    listCharacterNames: async () => await listCharacterNames(),
 
     resolveProject: async ({ claim, characterNames, scenePrompt }) => {
       if (characterNames.length === 0) {

@@ -383,3 +383,77 @@ describe("production resolver: create -> edit -> approve keeps canonical codes",
     expect(h.workflow.calls).toHaveLength(1);
   });
 });
+
+describe("Character-name lookups are shared, not repeated per router", () => {
+  /** Builds a resolver over a counting Notion stub with an injectable clock. */
+  function countingResolver(now: () => number) {
+    const calls = { listCharacterNames: 0 };
+    const resolver = createPrevisProjectResolver({
+      workflow: fakeWorkflow() as never,
+      notion: {
+        listCharacterNames: async () => {
+          calls.listCharacterNames += 1;
+          return ["Twong", "Twong2"];
+        },
+        resolveNamedRecord: async () => ({}) as never,
+      } as never,
+      capabilities: CAPABILITIES,
+      displayNames: mem<PrevisDisplayNameRecord>(),
+      now,
+    });
+    return { calls, resolver };
+  }
+
+  it("reads the Character Library once for repeated classifications", async () => {
+    // The storyboard and previs routers both classify every owner message, so
+    // an uncached read meant two full scans per chat turn.
+    const { calls, resolver } = countingResolver(() => 1_000);
+    const claim = { accountId: ACCOUNT, lineGroupId: GROUP, ownerSenderId: OWNER };
+    expect(await resolver.listCharacterNames(claim)).toEqual(["Twong", "Twong2"]);
+    expect(await resolver.listCharacterNames(claim)).toEqual(["Twong", "Twong2"]);
+    expect(calls.listCharacterNames).toBe(1);
+  });
+
+  it("collapses concurrent classifications into one request", async () => {
+    const { calls, resolver } = countingResolver(() => 1_000);
+    const claim = { accountId: ACCOUNT, lineGroupId: GROUP, ownerSenderId: OWNER };
+    await Promise.all([resolver.listCharacterNames(claim), resolver.listCharacterNames(claim)]);
+    expect(calls.listCharacterNames).toBe(1);
+  });
+
+  it("re-reads once the entry goes stale, so a new Character appears", async () => {
+    let clock = 1_000;
+    const { calls, resolver } = countingResolver(() => clock);
+    const claim = { accountId: ACCOUNT, lineGroupId: GROUP, ownerSenderId: OWNER };
+    await resolver.listCharacterNames(claim);
+    clock += 60_000;
+    await resolver.listCharacterNames(claim);
+    expect(calls.listCharacterNames).toBe(2);
+  });
+
+  it("never caches a failure", async () => {
+    let fail = true;
+    const calls = { listCharacterNames: 0 };
+    const resolver = createPrevisProjectResolver({
+      workflow: fakeWorkflow() as never,
+      notion: {
+        listCharacterNames: async () => {
+          calls.listCharacterNames += 1;
+          if (fail) {
+            throw new Error("notion unavailable");
+          }
+          return ["Twong"];
+        },
+        resolveNamedRecord: async () => ({}) as never,
+      } as never,
+      capabilities: CAPABILITIES,
+      displayNames: mem<PrevisDisplayNameRecord>(),
+      now: () => 1_000,
+    });
+    const claim = { accountId: ACCOUNT, lineGroupId: GROUP, ownerSenderId: OWNER };
+    await expect(resolver.listCharacterNames(claim)).rejects.toThrow(/notion unavailable/u);
+    fail = false;
+    expect(await resolver.listCharacterNames(claim)).toEqual(["Twong"]);
+    expect(calls.listCharacterNames).toBe(2);
+  });
+});

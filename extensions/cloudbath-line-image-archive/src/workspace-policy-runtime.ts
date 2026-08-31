@@ -6,6 +6,7 @@ import type { ArchivePipeline } from "./pipeline.js";
 import type { CloudbathPrevisLineRouter } from "./previs-line-router.js";
 import type { PrevisReviewRuntime } from "./previs-route.js";
 import type { CloudbathPrevisService } from "./previs-service.js";
+import type { CloudbathStoryboardLineRouter } from "./storyboard-line-router.js";
 import type { ArchiveConfig } from "./types.js";
 import type { UgcCharacterImageWorkflow } from "./ugc-character-image.js";
 import type { CloudbathUgcVideoWorkflow } from "./ugc-workflow.js";
@@ -24,6 +25,11 @@ export type CloudbathWorkspacePolicyRuntime = {
   previsService?: CloudbathPrevisService;
   /** Deterministic LINE create/edit/approve routing for previs. */
   previsLineRouter?: CloudbathPrevisLineRouter;
+  /**
+   * Deterministic LINE routing for the DEFAULT storyboard video flow. Runs
+   * ahead of `previsLineRouter`, which now serves explicit legacy requests.
+   */
+  storyboardLineRouter?: CloudbathStoryboardLineRouter;
   keepWatchingPipeline?: KeepWatchingPipeline;
   pipeline?: ArchivePipeline;
   activeConfig?: ArchiveConfig;
