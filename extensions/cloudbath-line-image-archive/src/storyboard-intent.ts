@@ -129,9 +129,12 @@ function hasCastingMarker(text: string, knownNames: readonly string[]): boolean 
  * The stored `action` becomes the beat's instruction and is copied into the
  * provider-neutral plan, so leaving "วิ 10-14" in it would hand a video model
  * a timestamp as part of the thing to depict.
+ *
+ * The trailing units must stay in step with `RANGE_TRAILING_UNIT`: a unit that
+ * parser accepts but this one does not is left behind in the beat.
  */
 const RANGE_SPAN =
-  /(?:วินาที|วิ|ช่วง|seconds?|sec)?\s*\d{1,3}\s*(?:-|–|—|ถึง|to)\s*\d{1,3}(?:\s*(?:วินาที|วิ|seconds?\b|sec\b|s\b))?/giu;
+  /(?:วินาที|วิ|ช่วง|seconds?|sec)?\s*\d{1,3}\s*(?:-|–|—|ถึง|to)\s*\d{1,3}(?:\s*(?:(?:วินาที|วิ)(?![\p{L}\p{M}])|seconds?\b|secs?\b|s\b))?/giu;
 
 export function stripTimeRangeSpan(text: string): string {
   return text.replace(RANGE_SPAN, " ").replace(/\s+/gu, " ").trim();

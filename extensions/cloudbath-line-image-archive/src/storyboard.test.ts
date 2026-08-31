@@ -643,6 +643,20 @@ describe("classifier boundaries", () => {
     expect(parseStoryboardTimeRange("ช่วง 3 ถึง 6 วิ")).toEqual({ fromSeconds: 3, toSeconds: 6 });
   });
 
+  it("leaves no accepted range unit behind in the stored edit action", () => {
+    // The parser and the stripper are two patterns that must accept the same
+    // units. When they drift, the range still parses but its unit survives into
+    // the beat action, which is copied verbatim into the provider-neutral plan.
+    for (const unit of ["seconds", "secs", "sec", "s", "วิ", "วินาที"]) {
+      const content = `10-14 ${unit} ให้ Twong หันกลับมามอง Twong2`;
+      expect(parseStoryboardTimeRange(content), content).toEqual({
+        fromSeconds: 10,
+        toSeconds: 14,
+      });
+      expect(stripTimeRangeSpan(content), content).toBe("ให้ Twong หันกลับมามอง Twong2");
+    }
+  });
+
   it("strips a trailing-unit range out of the stored edit action", () => {
     // The action becomes the beat instruction and is copied into the plan, so a
     // surviving "10-14 seconds" would hand a video model a timestamp to depict.
