@@ -17,9 +17,11 @@ import { compileStoryboardDocument } from "./storyboard-compiler.js";
 import { formatFinalVideoDraftForLine, formatStoryboardForLine } from "./storyboard-format.js";
 import { parseStoryboardIntent, type StoryboardIntent } from "./storyboard-intent.js";
 import {
+  isDurationTooLong,
   STORYBOARD_DEFAULT_ASPECT_RATIO,
   STORYBOARD_DEFAULT_DURATION_SECONDS,
   STORYBOARD_DEFAULT_RESOLUTION,
+  STORYBOARD_MAX_DURATION_SECONDS,
 } from "./storyboard-request.js";
 import { activeStoryboardKey, StoryboardStore } from "./storyboard-store.js";
 import {
@@ -102,6 +104,15 @@ function unknownCharacterReply(name: string): string {
 
 function rangeOutsideReply(from: number, to: number, duration: number): string {
   return `ช่วงเวลา ${from}-${to} วิ อยู่นอกความยาว Storyboard ${duration} วิ`;
+}
+
+/** A reversed range is in bounds but backwards; saying "outside" misleads. */
+function rangeReversedReply(from: number, to: number): string {
+  return `ช่วงเวลา ${from}-${to} วิ กลับด้าน กรุณาระบุเวลาเริ่มก่อนเวลาจบ`;
+}
+
+function durationTooLongReply(seconds: number): string {
+  return `ความยาว ${seconds} วิ เกินสูงสุด ${STORYBOARD_MAX_DURATION_SECONDS} วิ`;
 }
 
 /** Native LINE group id, or undefined for anything that is not a group. */
@@ -252,6 +263,9 @@ export class CloudbathStoryboardLineRouter {
     if (intent.unknownNames[0]) {
       return unknownCharacterReply(intent.unknownNames[0]);
     }
+    if (isDurationTooLong(intent.durationSeconds)) {
+      return durationTooLongReply(intent.durationSeconds!);
+    }
     try {
       const resolved = await this.deps.resolver.resolveProject({
         claim,
@@ -311,14 +325,15 @@ export class CloudbathStoryboardLineRouter {
       return REPLY.missingVersion;
     }
     const duration = latest.document.durationSeconds;
-    if (
-      !Number.isFinite(intent.fromSeconds) ||
-      !Number.isFinite(intent.toSeconds) ||
-      intent.fromSeconds < 0 ||
-      intent.toSeconds <= intent.fromSeconds ||
-      intent.toSeconds > duration
-    ) {
-      // Never silently clamp: the owner must know the range was not applied.
+    if (!Number.isFinite(intent.fromSeconds) || !Number.isFinite(intent.toSeconds)) {
+      return rangeOutsideReply(intent.fromSeconds, intent.toSeconds, duration);
+    }
+    // Never silently clamp: the owner must know the range was not applied, and
+    // must be told WHICH way it was wrong.
+    if (intent.toSeconds <= intent.fromSeconds) {
+      return rangeReversedReply(intent.fromSeconds, intent.toSeconds);
+    }
+    if (intent.fromSeconds < 0 || intent.toSeconds > duration) {
       return rangeOutsideReply(intent.fromSeconds, intent.toSeconds, duration);
     }
     try {

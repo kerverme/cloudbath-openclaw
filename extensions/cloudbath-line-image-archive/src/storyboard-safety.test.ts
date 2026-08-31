@@ -1,16 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   CREATE_MESSAGE,
-  expectNoPaidCalls,
+  expectNothingBillable,
   harness,
   NAMES,
-  paidSpies,
   resolver,
 } from "./storyboard-router.test-support.js";
 
 describe("E. a generic confirmation can never pay", () => {
   it("leaves bare agreements to the normal flow and drafts nothing", async () => {
-    const paid = paidSpies();
     const h = harness();
     await h.dispatch(CREATE_MESSAGE, { messageId: "m1" });
 
@@ -20,7 +18,7 @@ describe("E. a generic confirmation can never pay", () => {
       expect(result.handled, message).toBe(false);
     }
     expect((await h.drafts.entries()).length).toBe(0);
-    expectNoPaidCalls(paid);
+    await expectNothingBillable(h);
   });
 });
 
@@ -231,6 +229,68 @@ describe("a time range alone is not an edit", () => {
       messageId: "m2",
     });
     expect(applied.text).toContain("Storyboard v2");
+  });
+});
+
+describe("previs is legacy: only an explicit request reaches it", () => {
+  it("never renders a previs for a message storyboard declines", async () => {
+    const h = harness();
+    await h.dispatch(CREATE_MESSAGE, { messageId: "m1" });
+    // Each of these is declined by storyboard; none may reach the previs engine.
+    for (const message of [
+      "เอาแบบ 16:9 นะ Twong",
+      "วิธีนี้ 3-6 เอาไหม",
+      "Twong ยืนอยู่ไหน",
+      "Twong คิดว่าวิธีนี้ดีไหม",
+    ]) {
+      const result = await h.dispatch(message, { messageId: `d-${message}` });
+      expect(result.source, message).not.toBe("previs");
+    }
+    await expectNothingBillable(h);
+  });
+
+  it("answers an edit with no active storyboard without invoking previs", async () => {
+    const h = harness();
+    const result = await h.dispatch("วิ 3-6 ให้ Twong หันกลับ", { messageId: "e1" });
+    expect(result.source).not.toBe("previs");
+    expect(result.text ?? "").not.toContain("Previs");
+    await expectNothingBillable(h);
+  });
+
+  it("still routes an explicit PREVIS request to previs", async () => {
+    const h = harness();
+    const result = await h.dispatch(`PREVIS ${CREATE_MESSAGE}`, { messageId: "p1" });
+    expect(result.source).toBe("previs");
+    expect(result.text).toContain("Previs v1");
+  });
+});
+
+describe("create-path validation", () => {
+  it("does not read a direction word as a missing character", async () => {
+    const h = harness();
+    const result = await h.dispatch("ใช้ Twong กับ Twong2 ให้ zoom in ตอนท้าย 12 วิ แนวตั้ง", {
+      messageId: "z1",
+    });
+    expect(result.text).not.toMatch(/ไม่พบตัวละคร/u);
+    expect(result.text).toContain("Storyboard v1");
+  });
+
+  it("refuses an over-long request instead of silently making 15 วิ", async () => {
+    const h = harness();
+    const result = await h.dispatch("ใช้ Twong กับ Twong2 ให้เดินคุยกัน 90 วิ แนวตั้ง", {
+      messageId: "l1",
+    });
+    expect(result.text).toContain("90");
+    expect(result.text).toContain("60");
+    expect((await h.storyboardVersions.entries()).length).toBe(0);
+  });
+
+  it("names a reversed range as reversed, not as out of bounds", async () => {
+    const h = harness();
+    await h.dispatch(CREATE_MESSAGE, { messageId: "m1" });
+    const result = await h.dispatch("วิ 14-10 ให้ Twong หันกลับ", { messageId: "m2" });
+    expect(result.text).toContain("กลับด้าน");
+    expect((await h.latest()).versionNumber).toBe(1);
   });
 });
 

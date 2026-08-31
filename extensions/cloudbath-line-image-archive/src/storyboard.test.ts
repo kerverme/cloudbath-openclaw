@@ -7,6 +7,7 @@ import {
 import { formatStoryboardForLine } from "./storyboard-format.js";
 import { parseStoryboardIntent, stripTimeRangeSpan } from "./storyboard-intent.js";
 import {
+  isDurationTooLong,
   parseStoryboardActions,
   parseStoryboardTimeRange,
   readStoryboardAspectRatio,
@@ -158,6 +159,24 @@ describe("request parsing regressions", () => {
     const actions = parseStoryboardActions("ให้ Twong คุยกันเบาๆแล้วเดินออกไป", ["Twong"]);
     const dialogue = actions.find((action) => action.kind === "dialogue");
     expect(dialogue?.phrase).toBe("คุยกันเบาๆ");
+  });
+
+  it("reports an over-long duration instead of defaulting silently", () => {
+    expect(readStoryboardDuration("ทำคลิป 90 วิ ให้ Twong เดิน")).toBe(90);
+    expect(isDurationTooLong(90)).toBe(true);
+    expect(isDurationTooLong(15)).toBe(false);
+    expect(isDurationTooLong(undefined)).toBe(false);
+  });
+
+  it("reads an environment written without spaces, and stops at a companion", () => {
+    expect(readStoryboardEnvironment("Twong เดินเข้ามาในร้านกาแฟ")).toBe("ร้านกาแฟ");
+    expect(readStoryboardEnvironment("Twong walks in the cafe with Twong2")).toBe("cafe");
+  });
+
+  it("strips every range from an edit instruction, not just the first", () => {
+    expect(stripTimeRangeSpan("วิ 10-14 ให้ Twong เดินจาก 1-2 ก้าว")).not.toMatch(
+      /\d{1,3}\s*-\s*\d{1,3}/u,
+    );
   });
 
   it("requires a standalone unit before reading a time range", () => {

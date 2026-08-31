@@ -52,6 +52,7 @@ import type { PrevisProjectHead, PrevisVersion } from "./src/previs-types.js";
 import { CLOUDBATH_PREVIS_VIEW_ROUTE } from "./src/previs-url.js";
 import { resolveSchemaForAgent } from "./src/profiles.js";
 import { R2ArchiveClient } from "./src/r2.js";
+import { isExplicitPrevisRequest } from "./src/storyboard-intent.js";
 import type { CloudbathStoryboardLineRouter } from "./src/storyboard-line-router.js";
 import { createCloudbathStoryboardLineRouter } from "./src/storyboard-runtime.js";
 import type {
@@ -570,9 +571,14 @@ export default definePluginEntry({
       if (storyboardResult) {
         return storyboardResult;
       }
-      // Previs claims the turn before the model runs, so a character-led scene
-      // request cannot terminate as a generic confirmation.
-      const previsResult = await runtime.previsLineRouter?.handleBeforeDispatch(event, ctx);
+      // Previs is now LEGACY and reachable only by explicit request. Without
+      // this gate, every message the storyboard router declines fell through to
+      // previs, whose classifier is much looser -- so a decline meant a CozyClay
+      // render, an R2 artifact and a real Notion scene, which is exactly the
+      // default-path behaviour this change exists to stop.
+      const previsResult = isExplicitPrevisRequest(event.content ?? "")
+        ? await runtime.previsLineRouter?.handleBeforeDispatch(event, ctx)
+        : undefined;
       if (previsResult) {
         return previsResult;
       }

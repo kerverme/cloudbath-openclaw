@@ -109,9 +109,14 @@ export function readStoryboardDuration(text: string): number | undefined {
     /(?:^|[^\p{L}\p{N}])(\d{1,3})\s*(?:วินาที|วิ|seconds?|sec|s)(?![\p{L}\p{N}\p{M}])/iu,
   );
   const seconds = Number(match?.[1]);
-  return Number.isSafeInteger(seconds) && seconds >= 1 && seconds <= STORYBOARD_MAX_DURATION_SECONDS
-    ? seconds
-    : undefined;
+  // Returned uncapped so the caller can tell "named 90 วิ" from "named none";
+  // silently substituting the 15s default hid the request the owner made.
+  return Number.isSafeInteger(seconds) && seconds >= 1 ? seconds : undefined;
+}
+
+/** True when the request named a length this product will not storyboard. */
+export function isDurationTooLong(seconds: number | undefined): boolean {
+  return seconds !== undefined && seconds > STORYBOARD_MAX_DURATION_SECONDS;
 }
 
 export function readStoryboardAspectRatio(text: string): StoryboardAspectRatio | undefined {
@@ -130,14 +135,16 @@ export function readStoryboardResolution(text: string): StoryboardResolution | u
  * without swallowing the aspect word that follows it.
  */
 export function readStoryboardEnvironment(text: string): string {
-  const marker = text.match(/(?:^|\s)(?:ใน|ที่|in\s+(?:the\s+|a\s+)?|at\s+(?:the\s+|a\s+)?)/iu);
+  // Thai runs words together ("เดินเข้ามาในร้านกาแฟ"), so the Thai markers
+  // cannot require preceding whitespace the way the English ones do.
+  const marker = text.match(/(?:ใน|ที่)|(?:^|\s)(?:in|at)\s+(?:the\s+|a\s+)?/iu);
   if (marker?.index === undefined) {
     return "";
   }
   const rest = text.slice(marker.index + marker[0].length);
   const collected: string[] = [];
   for (const token of rest.split(/\s+/u)) {
-    if (!token || isDimensionToken(token)) {
+    if (!token || isDimensionToken(token) || CONNECTIVE_TOKEN.test(token)) {
       break;
     }
     collected.push(token);
@@ -149,6 +156,9 @@ export function readStoryboardEnvironment(text: string): string {
   }
   return collected.join(" ").replace(/[,.]+$/u, "");
 }
+
+/** Starts a companion clause, so the location has ended ("cafe with Twong2"). */
+const CONNECTIVE_TOKEN = /^(?:with|and|กับ|และ|ร่วมกับ|พร้อม)$/iu;
 
 function isDimensionToken(token: string): boolean {
   return (

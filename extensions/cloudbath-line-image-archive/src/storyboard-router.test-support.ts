@@ -8,6 +8,7 @@ import {
 import { CloudbathPrevisService } from "./previs-service.js";
 import { PrevisStore, type PrevisArtifactSink, type PrevisEngine } from "./previs-store.js";
 import type { PrevisProjectHead, PrevisVersion } from "./previs-types.js";
+import { isExplicitPrevisRequest } from "./storyboard-intent.js";
 import {
   CloudbathStoryboardLineRouter,
   type StoryboardDedupeStore,
@@ -177,7 +178,12 @@ export function harness(
     if (storyboardResult) {
       return { source: "storyboard", ...storyboardResult };
     }
-    const previsResult = await previsRouter.handleBeforeDispatch(event, ctx);
+    // Mirrors index.ts: previs is legacy and only an EXPLICIT request reaches
+    // it. Calling it unconditionally here would let the harness pass while
+    // production sent every declined message into a CozyClay render.
+    const previsResult = isExplicitPrevisRequest(content)
+      ? await previsRouter.handleBeforeDispatch(event, ctx)
+      : undefined;
     if (previsResult) {
       return { source: "previs", ...previsResult };
     }
@@ -217,13 +223,25 @@ export function harness(
   };
 }
 
-/** Stand-ins for every billable surface. None may be touched by this flow. */
-export function paidSpies() {
-  return { seedance: vi.fn(), runway: vi.fn(), videoGenerate: vi.fn() };
-}
-
-export function expectNoPaidCalls(spies: ReturnType<typeof paidSpies>): void {
-  expect(spies.seedance).not.toHaveBeenCalled();
-  expect(spies.runway).not.toHaveBeenCalled();
-  expect(spies.videoGenerate).not.toHaveBeenCalled();
+/**
+ * Asserts nothing billable happened, using signals that can actually fail.
+ *
+ * An earlier version created `vi.fn()` spies that were wired to nothing, so the
+ * assertion was vacuous. These four are real: the CozyClay engine and the R2
+ * artifact sink are the only I/O a previs create performs, and a paid job needs
+ * a draft the LINE gate can resolve.
+ */
+export async function expectNothingBillable(h: {
+  previsEngineCalls: { mock: { calls: unknown[] } };
+  previsArtifactCalls: { mock: { calls: unknown[] } };
+  previsVersions: AsyncKeyedStore<PrevisVersion>;
+  drafts: AsyncKeyedStore<StoryboardFinalVideoDraft>;
+}): Promise<void> {
+  expect(h.previsEngineCalls).not.toHaveBeenCalled();
+  expect(h.previsArtifactCalls).not.toHaveBeenCalled();
+  expect((await h.previsVersions.entries()).length).toBe(0);
+  for (const { value } of await h.drafts.entries()) {
+    // A draft the paid gate could resolve would need a `ready` confirmation.
+    expect(value.confirmation).toEqual({ kind: "deferred" });
+  }
 }

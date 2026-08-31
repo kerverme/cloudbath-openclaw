@@ -10,7 +10,7 @@
  * previs router), and anything shaped like the exact paid confirmation.
  */
 
-import { findUnknownCastNames, matchKnownNames } from "./previs-intent.js";
+import { matchKnownNames } from "./previs-intent.js";
 import {
   normalizeStoryboardText,
   parseStoryboardActions,
@@ -61,6 +61,26 @@ const SCENE_NOUNS = /ฉาก|คลิป|วิดีโอ|วีดีโ�
  * whose beat action is that chat text.
  */
 /** Asks for a NEW scene rather than a change to the current one. */
+/**
+ * Latin tokens in an explicit CAST LIST that the library does not hold.
+ *
+ * Only "ใช้ X" / "กับ X" / "และ X" count. The previs scan also triggers on
+ * "ให้ X", but "ให้" introduces DIRECTION as often as cast, so it refused
+ * "ให้ zoom in ตอนท้าย" as a missing character named "zoom".
+ */
+const CAST_LIST_NAME = /(?:ใช้|กับ|และ)\s*([A-Za-z][A-Za-z0-9_-]{1,31})/gu;
+
+function findStoryboardUnknownCast(text: string, knownNames: readonly string[]): string[] {
+  const unknown: string[] = [];
+  for (const match of text.matchAll(CAST_LIST_NAME)) {
+    const candidate = match[1]!;
+    if (!knownNames.includes(candidate) && !unknown.includes(candidate)) {
+      unknown.push(candidate);
+    }
+  }
+  return unknown;
+}
+
 const NEW_SCENE_MARKER = /ใหม่|new\s+(?:scene|shot|storyboard)/iu;
 
 const EDIT_MARKER = /ให้|เปลี่ยน|แก้|ตัด|เอา|ใส่|ลบ|ทำให้|ย้าย|zoom|change|make|cut|replace|set\b|swap/iu;
@@ -75,7 +95,7 @@ const CASTING_MARKER = /(?:^|\s)(?:ใช้|ให้)\s*\S/u;
  * a timestamp as part of the thing to depict.
  */
 const RANGE_SPAN =
-  /(?:วินาที|วิ|ช่วง|seconds?|sec)?\s*\d{1,3}\s*(?:-|–|—|ถึง|to)\s*\d{1,3}\s*(?:วินาที|วิ|seconds?|sec|s)?/iu;
+  /(?:วินาที|วิ|ช่วง|seconds?|sec)?\s*\d{1,3}\s*(?:-|–|—|ถึง|to)\s*\d{1,3}\s*(?:วินาที|วิ|seconds?|sec|s)?/giu;
 
 export function stripTimeRangeSpan(text: string): string {
   return text.replace(RANGE_SPAN, " ").replace(/\s+/gu, " ").trim();
@@ -124,7 +144,7 @@ export function parseStoryboardIntent(params: {
   }
 
   const matched = matchKnownNames(text, params.knownCharacterNames);
-  const unknownNames = findUnknownCastNames(text, params.knownCharacterNames);
+  const unknownNames = findStoryboardUnknownCast(text, params.knownCharacterNames);
   const range = parseStoryboardTimeRange(text);
   // An explicit new-scene request outranks an edit even when it names a range:
   // "ทำฉากใหม่ 10-15 วิ ให้ Twong เดิน" asks for a scene, not a rewrite.

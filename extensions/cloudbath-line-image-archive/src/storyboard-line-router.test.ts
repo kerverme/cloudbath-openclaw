@@ -1,14 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
   CREATE_MESSAGE,
-  expectNoPaidCalls,
+  expectNothingBillable,
   harness,
-  paidSpies,
 } from "./storyboard-router.test-support.js";
 
 describe("A. natural video request creates a storyboard", () => {
   it("routes to storyboard before the model and preserves every requested dimension", async () => {
-    const paid = paidSpies();
     const h = harness();
     const result = await h.dispatch(CREATE_MESSAGE, { messageId: "m1" });
 
@@ -36,7 +34,7 @@ describe("A. natural video request creates a storyboard", () => {
     expect((await h.previsVersions.entries()).length).toBe(0);
     expect(h.previsEngineCalls).not.toHaveBeenCalled();
     expect(h.previsArtifactCalls).not.toHaveBeenCalled();
-    expectNoPaidCalls(paid);
+    await expectNothingBillable(h);
   });
 
   it("covers the duration with ordered, non-overlapping beats", async () => {
@@ -73,7 +71,6 @@ describe("A. natural video request creates a storyboard", () => {
 
 describe("B. storyboard edit appends a new version", () => {
   it("creates v2 and leaves v1 untouched", async () => {
-    const paid = paidSpies();
     const h = harness();
     await h.dispatch(CREATE_MESSAGE, { messageId: "m1" });
     const v1Before = structuredClone(await h.versionAt(1));
@@ -100,7 +97,7 @@ describe("B. storyboard edit appends a new version", () => {
 
     // v1 is byte-for-byte what it was before the edit.
     expect(await h.versionAt(1)).toEqual(v1Before);
-    expectNoPaidCalls(paid);
+    await expectNothingBillable(h);
   });
 
   it("accepts Thai and English time grammars", async () => {
@@ -122,7 +119,6 @@ describe("B. storyboard edit appends a new version", () => {
 
 describe("C. an out-of-range edit fails closed", () => {
   it("creates no version, clamps nothing and calls nothing", async () => {
-    const paid = paidSpies();
     const h = harness();
     await h.dispatch(CREATE_MESSAGE, { messageId: "m1" });
 
@@ -136,13 +132,12 @@ describe("C. an out-of-range edit fails closed", () => {
     // Nothing was clamped into the valid range either.
     const beats = (await h.latest()).document.beats;
     expect(beats.every((beat) => beat.endSeconds <= 15)).toBe(true);
-    expectNoPaidCalls(paid);
+    await expectNothingBillable(h);
   });
 });
 
 describe("D. สร้างวิดีโอ prepares a Final Video Draft", () => {
   it("drafts from the latest version and calls no provider", async () => {
-    const paid = paidSpies();
     const h = harness();
     await h.dispatch(CREATE_MESSAGE, { messageId: "m1" });
     await h.dispatch("วิ 10-14 ให้ Twong หันกลับมามอง Twong2", { messageId: "m2" });
@@ -176,7 +171,7 @@ describe("D. สร้างวิดีโอ prepares a Final Video Draft", ()
       reason: "provider-binding-deferred",
     });
     expect(result.text).toContain("ยังไม่พร้อมใช้งาน");
-    expectNoPaidCalls(paid);
+    await expectNothingBillable(h);
   });
 
   it("carries the real project linkage and canonical cast into the plan", async () => {
