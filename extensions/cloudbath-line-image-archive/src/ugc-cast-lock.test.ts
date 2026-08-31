@@ -279,9 +279,36 @@ describe("E2. an id-less Character row fails closed", () => {
     } as unknown as NotionPage;
 
     await expect(h.canonicalising(["Twong", "Twong2"], 2)).rejects.toThrow(
-      /Character Library row with no id/u,
+      // Named by canonical code, the identity the guard actually works in.
+      /Character "CHAR-6" has no Character Library page id/u,
     );
     expect(await h.lockedCodes()).toEqual(["CHAR-6", "CHAR-7"]);
+  });
+});
+
+describe("E3. a corrupt frozen lock fails closed", () => {
+  it("names the culprit instead of throwing inside the comparator", async () => {
+    const h = harness();
+    await h.canonicalising(["Twong", "Twong2"], 1);
+
+    // Corrupt the stored lock's page id, as a partially written row would be.
+    for (const { key, value } of await h.projectLocks.entries()) {
+      await h.projectLocks.register(key, {
+        ...value,
+        characterLocks: value.characterLocks.map((lock, index) => {
+          if (index !== 0) {
+            return lock;
+          }
+          const corrupt = structuredClone(lock) as { pageId?: string };
+          delete corrupt.pageId;
+          return corrupt as typeof lock;
+        }),
+      });
+    }
+
+    await expect(h.canonicalising(["Twong", "Twong2"], 2)).rejects.toThrow(
+      /Character "CHAR-6" has no Character Library page id/u,
+    );
   });
 });
 
@@ -421,20 +448,20 @@ describe("K. a lost lock cannot silently re-cast the project", () => {
     expect(await h.lockedCodes()).toEqual([]);
   });
 
-  it("writes no empty lock for a continuation that names no cast", async () => {
+  it("refuses a cast-less continuation instead of dropping the identity", async () => {
     const h = harness();
     await h.canonicalising(["Twong", "Twong2"], 1);
     for (const { key } of await h.projectLocks.entries()) {
       await h.projectLocks.delete(key);
     }
 
-    // A cast-less continuation must leave the lock absent, not persist an
-    // empty one that answers every later scene with "already locked to ;".
-    const castless = await h.canonicalising([], 2);
-    expect(castless.characterLocks).toEqual([]);
+    // References can only be rebuilt from names. Preparing this scene anyway
+    // would carry no identity references at all, so it fails closed and no
+    // empty lock is written.
+    await expect(h.canonicalising([], 2)).rejects.toThrow(/cast needs naming again/u);
     expect((await h.projectLocks.entries()).length).toBe(0);
 
-    // A later scene that DOES name the cast still rebuilds it.
+    // Naming the cast again rebuilds the lock and the project continues.
     const rebuilt = await h.canonicalising(["Twong", "Twong2"], 3);
     expect(rebuilt.characterLocks.map((lock) => lock.code)).toEqual(["CHAR-6", "CHAR-7"]);
   });

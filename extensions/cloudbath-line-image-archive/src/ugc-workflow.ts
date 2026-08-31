@@ -1135,6 +1135,27 @@ function nativeGroupId(value: string | undefined): string | undefined {
   return /^C[A-Za-z0-9_-]+$/u.test(groupId) ? groupId : undefined;
 }
 
+/**
+ * Character page ids, sorted, with every entry required to exist.
+ *
+ * Both sides of a cast comparison run through this. An absent id would either
+ * compare equal to another absent one -- passing a cast guard it should fail --
+ * or throw a bare TypeError inside the comparator, so a malformed row or a
+ * corrupt lock fails closed here with a message that names the culprit.
+ */
+function sortedCharacterPageIds(
+  entries: ReadonlyArray<{ id: string | undefined; label: string }>,
+): readonly string[] {
+  return entries
+    .map((entry) => {
+      if (!entry.id) {
+        throw new Error(`Character "${entry.label}" has no Character Library page id`);
+      }
+      return entry.id;
+    })
+    .toSorted((left, right) => left.localeCompare(right));
+}
+
 export class CloudbathUgcVideoWorkflow {
   constructor(
     private readonly config: NonNullable<WorkspacePolicyConfig["ugc"]>,
@@ -1373,21 +1394,12 @@ export class CloudbathUgcVideoWorkflow {
       // rather than silently matching a stale frozen string.
       if (params.characterNames.length > 0) {
         const resolved = await params.resolveCharacterPages();
-        const requested: string[] = [];
-        for (const entry of resolved) {
-          // An id-less page would compare equal to any other id-less one, so a
-          // malformed row must fail closed rather than pass the cast guard.
-          if (!entry.page.id) {
-            throw new Error(
-              `Character "${entry.code}" resolved to a Character Library row with no id`,
-            );
-          }
-          requested.push(entry.page.id);
-        }
-        requested.sort((a, b) => a.localeCompare(b));
-        const locked = characterLocks
-          .map((lock) => lock.pageId)
-          .toSorted((a, b) => a.localeCompare(b));
+        const requested = sortedCharacterPageIds(
+          resolved.map((entry) => ({ id: entry.page.id, label: entry.code })),
+        );
+        const locked = sortedCharacterPageIds(
+          characterLocks.map((lock) => ({ id: lock.pageId, label: lock.code })),
+        );
         if (requested.join("|") !== locked.join("|")) {
           throw new Error(
             `This project is already locked to ${characterLocks
@@ -1401,16 +1413,29 @@ export class CloudbathUgcVideoWorkflow {
       // or never written). Freezing this scene's cast blind would silently
       // re-cast the project, so the rebuild is checked against the page ids the
       // INSTANCE froze at creation -- the identity that outlives the lock.
+      if (
+        existingInstance &&
+        characterPages.length === 0 &&
+        params.characterNames.length === 0 &&
+        existingInstance.characterPageIds.length > 0
+      ) {
+        // The lock is gone and this scene names nobody. References can only be
+        // rebuilt from NAMES, so proceeding would prepare a scene carrying no
+        // identity at all -- worse than asking the owner to name the cast.
+        throw new Error(
+          "This project's cast needs naming again before another scene can be prepared",
+        );
+      }
       const rebuilt =
         existingInstance && characterPages.length === 0 && params.characterNames.length > 0
           ? await params.resolveCharacterPages()
           : characterPages;
       if (existingInstance && rebuilt.length > 0) {
-        const requested = rebuilt
-          .map((entry) => entry.page.id ?? "")
-          .toSorted((a, b) => a.localeCompare(b));
-        const frozen = [...existingInstance.characterPageIds].toSorted((a, b) =>
-          a.localeCompare(b),
+        const requested = sortedCharacterPageIds(
+          rebuilt.map((entry) => ({ id: entry.page.id, label: entry.code })),
+        );
+        const frozen = sortedCharacterPageIds(
+          existingInstance.characterPageIds.map((id) => ({ id, label: id })),
         );
         if (requested.join("|") !== frozen.join("|")) {
           throw new Error(
