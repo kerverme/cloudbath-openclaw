@@ -1135,6 +1135,27 @@ function nativeGroupId(value: string | undefined): string | undefined {
   return /^C[A-Za-z0-9_-]+$/u.test(groupId) ? groupId : undefined;
 }
 
+/**
+ * Character page ids, sorted, with every entry required to exist.
+ *
+ * Both sides of a cast comparison run through this. An absent id would either
+ * compare equal to another absent one -- passing a cast guard it should fail --
+ * or throw a bare TypeError inside the comparator, so a malformed row or a
+ * corrupt lock fails closed here with a message that names the culprit.
+ */
+function sortedCharacterPageIds(
+  entries: ReadonlyArray<{ id: string | undefined; label: string }>,
+): readonly string[] {
+  return entries
+    .map((entry) => {
+      if (!entry.id) {
+        throw new Error(`Character "${entry.label}" has no Character Library page id`);
+      }
+      return entry.id;
+    })
+    .toSorted((left, right) => (left < right ? -1 : left > right ? 1 : 0));
+}
+
 export class CloudbathUgcVideoWorkflow {
   constructor(
     private readonly config: NonNullable<WorkspacePolicyConfig["ugc"]>,
@@ -1208,7 +1229,14 @@ export class CloudbathUgcVideoWorkflow {
     startNewProject?: boolean;
     productName?: string;
     characterNames: readonly string[];
-    /** Caller-owned: decides each frozen lock's canonical `code`. */
+    /**
+     * Caller-owned: decides each frozen lock's canonical `code`.
+     *
+     * Also the single source of identity for the cast-lock guard on a
+     * continuation: the guard compares the resolved Character page ids, not
+     * `code` (which is caller-owned and differs between callers) and never
+     * `characterNames`, which stays display/label metadata.
+     */
     resolveCharacterPages: () => Promise<Array<{ code: string; page: NotionPage }>>;
     sceneNumber?: number;
     prompt: string;
@@ -1247,9 +1275,12 @@ export class CloudbathUgcVideoWorkflow {
     let projectPage: NotionPage;
     const characterPages: Array<{ code: string; page: NotionPage }> = [];
     if (existingInstance) {
-      // Continuation runs entirely on frozen identity: no Product or
-      // Character row is re-resolved, so the owner need not repeat
-      // productName and a library edit cannot retarget this project.
+      // Continuation reuses frozen identity: the owner need not repeat
+      // productName, and the frozen Product/Character REFERENCES are reused
+      // verbatim so a library edit cannot retarget this project. The cast-lock
+      // guard below still resolves the named cast to Character pages, because
+      // comparing a typed display name against a canonical lock is not an
+      // identity check at all.
       if (params.productName) {
         const named = await this.notion.resolveNamedRecord({
           capabilityId: "PRODUCT_LIBRARY",
@@ -1336,27 +1367,99 @@ export class CloudbathUgcVideoWorkflow {
     const project = { page: projectPage, recordId: instance.projectInstanceId };
 
     // The cast is frozen once per PROJECT INSTANCE. A later scene reuses the
-    // stored lock verbatim rather than re-reading the Character Library, so
-    // edits to a library row cannot reach an existing project -- while a
-    // deliberately new project freezes the then-current references.
+    // stored lock's REFERENCES verbatim, so edits to a library row cannot reach
+    // an existing project -- while a deliberately new project freezes the
+    // then-current ones. Only the canonical codes are resolved again, to check
+    // the request names the same cast.
     const lockKey = ugcProjectLockKey(instance.projectInstanceId);
     const existingLock = await this.projectLocks.lookup(lockKey);
     const frozenAt = new Date(this.now()).toISOString();
     let characterLocks: readonly UgcCharacterLock[];
     if (existingLock) {
       characterLocks = existingLock.characterLocks;
-      const requested = params.characterNames.map((code) => code.toLowerCase()).toSorted();
-      const locked = characterLocks.map((lock) => lock.code.toLowerCase()).toSorted();
-      if (requested.length > 0 && requested.join("|") !== locked.join("|")) {
-        throw new Error(
-          `This project is already locked to ${characterLocks
-            .map((lock) => lock.code)
-            .join(", ")}; start a new project to change its cast`,
+      // Identity is the Character Library PAGE the lock was frozen from, never
+      // the name the owner typed and never the lock's `code`.
+      //
+      // `code` is caller-owned and deliberately differs between the two
+      // callers -- `cloudbath_ugc_video_prepare` freezes the typed code while
+      // previs canonicalises to CHAR-6 -- so comparing codes only ever works
+      // when the same caller created and continued the project. The page id is
+      // the one identity both resolve to, so a project stays continuable by
+      // either. Comparing the typed name instead is what rejected every later
+      // previs/storyboard scene with "already locked to CHAR-6, CHAR-7".
+      //
+      // Only identity is re-resolved. The frozen references below are reused
+      // verbatim, so a Character Library edit still cannot retarget an existing
+      // project; a name that no longer resolves fails closed in the resolver
+      // rather than silently matching a stale frozen string.
+      if (params.characterNames.length > 0) {
+        const resolved = await params.resolveCharacterPages();
+        const requested = sortedCharacterPageIds(
+          resolved.map((entry) => ({ id: entry.page.id, label: entry.code })),
         );
+        const locked = sortedCharacterPageIds(
+          characterLocks.map((lock) => ({ id: lock.pageId, label: lock.code })),
+        );
+        if (requested.join("|") !== locked.join("|")) {
+          // A product-only project froze an empty cast, so listing it produced
+          // "already locked to ;". Name the real situation instead.
+          throw new Error(
+            characterLocks.length === 0
+              ? "This project has no cast locked; start a new project to give it characters"
+              : `This project is already locked to ${characterLocks
+                  .map((lock) => lock.code)
+                  .join(", ")}; start a new project to change its cast`,
+          );
+        }
       }
     } else {
+      // A continuation reaches here only when the lock row is missing (evicted,
+      // or never written). Freezing this scene's cast blind would silently
+      // re-cast the project, so the rebuild is checked against the page ids the
+      // INSTANCE froze at creation -- the identity that outlives the lock.
+      if (
+        existingInstance &&
+        params.characterNames.length === 0 &&
+        existingInstance.characterPageIds.length > 0
+      ) {
+        // The lock is gone and this scene names nobody. References can only be
+        // rebuilt from NAMES, so proceeding would prepare a scene carrying no
+        // identity at all -- worse than asking the owner to name the cast.
+        throw new Error(
+          "This project's cast needs naming again before another scene can be prepared",
+        );
+      }
+      let rebuilt =
+        existingInstance && params.characterNames.length > 0
+          ? await params.resolveCharacterPages()
+          : characterPages;
+      if (existingInstance && rebuilt.length > 0) {
+        const requested = sortedCharacterPageIds(
+          rebuilt.map((entry) => ({ id: entry.page.id, label: entry.code })),
+        );
+        const frozen = sortedCharacterPageIds(
+          existingInstance.characterPageIds.map((id) => ({ id, label: id })),
+        );
+        if (requested.join("|") !== frozen.join("|")) {
+          throw new Error(
+            "This project is already locked to a different cast; start a new project to change it",
+          );
+        }
+        // Cast ORDER is load-bearing: previs assigns its stand-in letters by
+        // lock index, so rebuilding in the order this message happened to name
+        // the cast would swap A and B and point stored blocking at the wrong
+        // character. Restore the instance's frozen order.
+        const orderByPageId = new Map(
+          existingInstance.characterPageIds.map((id, index) => [id, index]),
+        );
+        rebuilt = rebuilt.toSorted(
+          (left, right) =>
+            (orderByPageId.get(left.page.id ?? "") ?? 0) -
+            (orderByPageId.get(right.page.id ?? "") ?? 0),
+        );
+      }
       characterLocks = Object.freeze(
-        characterPages.map((entry) =>
+        rebuilt.map((entry) =>
           freezeCharacterLock({
             code: entry.code,
             page: entry.page,
@@ -1366,17 +1469,22 @@ export class CloudbathUgcVideoWorkflow {
           }),
         ),
       );
-      await this.projectLocks.register(lockKey, {
-        version: 1,
-        projectInstanceId: instance.projectInstanceId,
-        projectPageId: project.page.id!,
-        projectRecordId: project.recordId,
-        accountId,
-        lineGroupId: groupId,
-        ownerSenderId,
-        characterLocks,
-        frozenAt,
-      });
+      // A product-only NEW project legitimately freezes an empty cast. A
+      // continuation must not: writing an empty lock here would answer every
+      // later scene with "already locked to ;".
+      if (!existingInstance || characterLocks.length > 0) {
+        await this.projectLocks.register(lockKey, {
+          version: 1,
+          projectInstanceId: instance.projectInstanceId,
+          projectPageId: project.page.id!,
+          projectRecordId: project.recordId,
+          accountId,
+          lineGroupId: groupId,
+          ownerSenderId,
+          characterLocks,
+          frozenAt,
+        });
+      }
     }
 
     const sceneNumber =
