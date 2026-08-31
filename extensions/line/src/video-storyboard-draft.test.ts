@@ -374,3 +374,35 @@ describe("the snapshotted ceiling is the one the guard used", () => {
     expect(result).toMatchObject({ kind: "created", maxAllowedUsd: 3.468 });
   });
 });
+
+describe("the cross-plugin seam round-trips and is owner-guarded", () => {
+  it("resolves what LINE installed, and only the installer can clear it", async () => {
+    const [{ installLineStoryboardVideoRuntime, clearLineStoryboardVideoRuntime }, consumer] =
+      await Promise.all([
+        import("./video-storyboard-runtime.js"),
+        import("../../cloudbath-line-image-archive/src/storyboard-paid-draft-runtime.js"),
+      ]);
+    const owner = Symbol("line.test-owner");
+    const runtime = {
+      prepareStoryboardVideoDraft: async () => ({ kind: "rejected" as const, reason: "test" }),
+    };
+    try {
+      expect(consumer.tryGetStoryboardPaidDraftRuntime()).toBeNull();
+
+      installLineStoryboardVideoRuntime(owner, runtime as never);
+      // The storyboard side resolves the SAME object through its own
+      // structurally-typed view of the shared registry key.
+      expect(consumer.tryGetStoryboardPaidDraftRuntime()).toBe(runtime);
+
+      // A different plugin cannot evict LINE's runtime.
+      expect(clearLineStoryboardVideoRuntime(Symbol("someone-else"))).toBe(false);
+      expect(consumer.tryGetStoryboardPaidDraftRuntime()).toBe(runtime);
+
+      expect(clearLineStoryboardVideoRuntime(owner)).toBe(true);
+      expect(consumer.tryGetStoryboardPaidDraftRuntime()).toBeNull();
+    } finally {
+      // The slot lives on globalThis, so it must not outlive this test.
+      clearLineStoryboardVideoRuntime(owner);
+    }
+  });
+});
