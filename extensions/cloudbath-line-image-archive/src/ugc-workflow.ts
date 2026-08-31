@@ -1153,7 +1153,7 @@ function sortedCharacterPageIds(
       }
       return entry.id;
     })
-    .toSorted((left, right) => left.localeCompare(right));
+    .toSorted((left, right) => (left < right ? -1 : left > right ? 1 : 0));
 }
 
 export class CloudbathUgcVideoWorkflow {
@@ -1401,10 +1401,14 @@ export class CloudbathUgcVideoWorkflow {
           characterLocks.map((lock) => ({ id: lock.pageId, label: lock.code })),
         );
         if (requested.join("|") !== locked.join("|")) {
+          // A product-only project froze an empty cast, so listing it produced
+          // "already locked to ;". Name the real situation instead.
           throw new Error(
-            `This project is already locked to ${characterLocks
-              .map((lock) => lock.code)
-              .join(", ")}; start a new project to change its cast`,
+            characterLocks.length === 0
+              ? "This project has no cast locked; start a new project to give it characters"
+              : `This project is already locked to ${characterLocks
+                  .map((lock) => lock.code)
+                  .join(", ")}; start a new project to change its cast`,
           );
         }
       }

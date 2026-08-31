@@ -71,6 +71,7 @@ function freshLibrary(): Record<string, NotionPage> {
     Twong: characterPage({ name: "Twong", number: 6 }),
     Twong2: characterPage({ name: "Twong2", number: 7 }),
     Other: characterPage({ name: "Other", number: 99 }),
+    "Cloudbath Serum": { id: "page-product-1" } as unknown as NotionPage,
   };
 }
 
@@ -143,12 +144,17 @@ function harness() {
   );
 
   /** Mirrors `createPrevisProjectResolver`: names in, canonical codes frozen. */
-  const canonicalising = async (characterNames: readonly string[], sceneNumber?: number) =>
+  const canonicalising = async (
+    characterNames: readonly string[],
+    sceneNumber?: number,
+    productName?: string,
+  ) =>
     await workflow.resolveProjectScene({
       accountId: ACCOUNT,
       groupId: GROUP,
       ownerSenderId: OWNER,
       characterNames,
+      ...(productName ? { productName } : {}),
       resolveCharacterPages: async () => {
         const pages: Array<{ code: string; page: NotionPage }> = [];
         for (const name of characterNames) {
@@ -464,5 +470,19 @@ describe("K. a lost lock cannot silently re-cast the project", () => {
     // Naming the cast again rebuilds the lock and the project continues.
     const rebuilt = await h.canonicalising(["Twong", "Twong2"], 3);
     expect(rebuilt.characterLocks.map((lock) => lock.code)).toEqual(["CHAR-6", "CHAR-7"]);
+  });
+});
+
+describe("L. a product-only project reports its empty cast clearly", () => {
+  it('does not answer with the garbled "already locked to ;"', async () => {
+    const h = harness();
+    // A product-only project legitimately freezes an empty cast.
+    await h.canonicalising([], 1, "Cloudbath Serum");
+    expect(await h.lockedCodes()).toEqual([]);
+
+    await expect(h.canonicalising(["Twong"], 2)).rejects.toThrow(
+      /This project has no cast locked/u,
+    );
+    await expect(h.canonicalising(["Twong"], 2)).rejects.not.toThrow(/locked to ;/u);
   });
 });
