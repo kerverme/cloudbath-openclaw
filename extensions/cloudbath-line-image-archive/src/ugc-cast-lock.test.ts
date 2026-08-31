@@ -486,3 +486,24 @@ describe("L. a product-only project reports its empty cast clearly", () => {
     await expect(h.canonicalising(["Twong"], 2)).rejects.not.toThrow(/locked to ;/u);
   });
 });
+
+describe("M. a rebuilt lock keeps the project's frozen cast order", () => {
+  it("does not reorder the cast to match the message that rebuilt it", async () => {
+    const h = harness();
+    const first = await h.canonicalising(["Twong", "Twong2"], 1);
+    expect(first.characterLocks.map((lock) => lock.code)).toEqual(["CHAR-6", "CHAR-7"]);
+    const frozenPageIds = first.characterLocks.map((lock) => lock.pageId);
+
+    for (const { key } of await h.projectLocks.entries()) {
+      await h.projectLocks.delete(key);
+    }
+
+    // Rebuilt from a message naming the cast in the OPPOSITE order. Previs
+    // assigns stand-in letters by lock index, so accepting this order would
+    // swap A and B and point stored blocking at the wrong character.
+    const rebuilt = await h.canonicalising(["Twong2", "Twong"], 2);
+    expect(rebuilt.characterLocks.map((lock) => lock.pageId)).toEqual(frozenPageIds);
+    expect(rebuilt.characterLocks.map((lock) => lock.code)).toEqual(["CHAR-6", "CHAR-7"]);
+    expect(await h.lockedCodes()).toEqual(["CHAR-6", "CHAR-7"]);
+  });
+});

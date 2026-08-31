@@ -1419,7 +1419,6 @@ export class CloudbathUgcVideoWorkflow {
       // INSTANCE froze at creation -- the identity that outlives the lock.
       if (
         existingInstance &&
-        characterPages.length === 0 &&
         params.characterNames.length === 0 &&
         existingInstance.characterPageIds.length > 0
       ) {
@@ -1430,8 +1429,8 @@ export class CloudbathUgcVideoWorkflow {
           "This project's cast needs naming again before another scene can be prepared",
         );
       }
-      const rebuilt =
-        existingInstance && characterPages.length === 0 && params.characterNames.length > 0
+      let rebuilt =
+        existingInstance && params.characterNames.length > 0
           ? await params.resolveCharacterPages()
           : characterPages;
       if (existingInstance && rebuilt.length > 0) {
@@ -1446,6 +1445,18 @@ export class CloudbathUgcVideoWorkflow {
             "This project is already locked to a different cast; start a new project to change it",
           );
         }
+        // Cast ORDER is load-bearing: previs assigns its stand-in letters by
+        // lock index, so rebuilding in the order this message happened to name
+        // the cast would swap A and B and point stored blocking at the wrong
+        // character. Restore the instance's frozen order.
+        const orderByPageId = new Map(
+          existingInstance.characterPageIds.map((id, index) => [id, index]),
+        );
+        rebuilt = rebuilt.toSorted(
+          (left, right) =>
+            (orderByPageId.get(left.page.id ?? "") ?? 0) -
+            (orderByPageId.get(right.page.id ?? "") ?? 0),
+        );
       }
       characterLocks = Object.freeze(
         rebuilt.map((entry) =>
