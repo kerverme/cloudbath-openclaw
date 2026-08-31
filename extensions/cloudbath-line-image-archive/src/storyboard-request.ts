@@ -144,7 +144,12 @@ export function readStoryboardEnvironment(text: string): string {
   const rest = text.slice(marker.index + marker[0].length);
   const collected: string[] = [];
   for (const token of rest.split(/\s+/u)) {
-    if (!token || isDimensionToken(token) || CONNECTIVE_TOKEN.test(token)) {
+    // A spaced Thai marker ("… ใน ร้านกาแฟ") leaves an empty leading token;
+    // breaking on it returned no environment at all.
+    if (!token) {
+      continue;
+    }
+    if (isDimensionToken(token) || CONNECTIVE_TOKEN.test(token)) {
       break;
     }
     collected.push(token);

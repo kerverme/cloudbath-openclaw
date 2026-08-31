@@ -5,7 +5,11 @@ import {
   compileStoryboardDocument,
 } from "./storyboard-compiler.js";
 import { formatStoryboardForLine } from "./storyboard-format.js";
-import { parseStoryboardIntent, stripTimeRangeSpan } from "./storyboard-intent.js";
+import {
+  isExplicitPrevisRequest,
+  parseStoryboardIntent,
+  stripTimeRangeSpan,
+} from "./storyboard-intent.js";
 import {
   isDurationTooLong,
   parseStoryboardActions,
@@ -170,6 +174,8 @@ describe("request parsing regressions", () => {
 
   it("reads an environment written without spaces, and stops at a companion", () => {
     expect(readStoryboardEnvironment("Twong เดินเข้ามาในร้านกาแฟ")).toBe("ร้านกาแฟ");
+    // A spaced Thai marker leaves an empty leading token.
+    expect(readStoryboardEnvironment("Twong เดิน 15 วิ ใน ร้านกาแฟ")).toBe("ร้านกาแฟ");
     expect(readStoryboardEnvironment("Twong walks in the cafe with Twong2")).toBe("cafe");
   });
 
@@ -482,6 +488,22 @@ describe("intent classification", () => {
       knownCharacterNames: NAMES,
     });
     expect(intent?.kind).toBe("create");
+  });
+
+  it("recognises an explicit previs request anywhere in the message", () => {
+    for (const content of ["PREVIS ใช้ Twong", "ทำ previs ให้ Twong เดิน 10 วิ", "APPROVE PREVIS"]) {
+      expect(isExplicitPrevisRequest(content), content).toBe(true);
+    }
+    expect(isExplicitPrevisRequest("ใช้ Twong เดิน 15 วิ แนวตั้ง")).toBe(false);
+  });
+
+  it("does not claim conversation that merely mentions a scene noun", () => {
+    for (const content of ["ฉากนี้ Twong น่ารักมาก", "ดูคลิป Twong หน่อย", "storyboard ของ Twong อยู่ไหน"]) {
+      expect(
+        parseStoryboardIntent({ content, knownCharacterNames: NAMES }),
+        content,
+      ).toBeUndefined();
+    }
   });
 
   it("never claims the exact paid confirmation or an explicit previs request", () => {

@@ -178,10 +178,12 @@ export function harness(
     if (storyboardResult) {
       return { source: "storyboard", ...storyboardResult };
     }
-    // Mirrors index.ts: previs is legacy and only an EXPLICIT request reaches
-    // it. Calling it unconditionally here would let the harness pass while
-    // production sent every declined message into a CozyClay render.
-    const previsResult = isExplicitPrevisRequest(content)
+    // Mirrors index.ts: previs answers an explicit request, or anything at all
+    // while no storyboard is active. Calling it unconditionally would let the
+    // harness pass while production sent declined messages into CozyClay.
+    const previsMayAnswer =
+      isExplicitPrevisRequest(content) || !(await storyboardRouter.hasActiveStoryboard(event, ctx));
+    const previsResult = previsMayAnswer
       ? await previsRouter.handleBeforeDispatch(event, ctx)
       : undefined;
     if (previsResult) {

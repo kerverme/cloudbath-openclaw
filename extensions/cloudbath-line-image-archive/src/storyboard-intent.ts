@@ -30,7 +30,7 @@ import {
 const PAID_CONFIRMATION_PATTERN = /^ยืนยัน\s+VIDEO\s+\d{4}$/iu;
 
 /** Explicit legacy previs invocation, which stays routed to the previs flow. */
-const EXPLICIT_PREVIS_PATTERN = /^\s*previs\b|พรีวิส|^\s*approve\s+previs\s*$|^\s*อนุมัติ\s+previs/iu;
+const EXPLICIT_PREVIS_PATTERN = /\bprevis\b|พรีวิส|^\s*อนุมัติ\s+previs/iu;
 
 /**
  * "Prepare the video" — tight on purpose.
@@ -170,10 +170,14 @@ export function parseStoryboardIntent(params: {
   // A named dimension the parsers actually resolved, an explicit video noun, or
   // a casting instruction carrying a recognised action. A loose keyword match is
   // not enough: a claimed create writes a real Notion project and scene.
+  // A named dimension is a request on its own. A scene noun or an action is
+  // not: "ฉากนี้ Twong น่ารักมาก" and "ดูคลิป Twong หน่อย" merely mention one,
+  // and a claimed create writes a real Notion project and scene.
+  const instructing = hasAction || CASTING_MARKER.test(text);
   const looksLikeScene =
     durationSeconds !== undefined ||
     aspectRatio !== undefined ||
-    SCENE_NOUNS.test(text) ||
+    (SCENE_NOUNS.test(text) && instructing) ||
     (hasAction && CASTING_MARKER.test(text));
   if (matched.length === 0 || !looksLikeScene) {
     return undefined;

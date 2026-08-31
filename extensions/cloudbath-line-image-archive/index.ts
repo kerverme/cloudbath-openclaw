@@ -571,12 +571,19 @@ export default definePluginEntry({
       if (storyboardResult) {
         return storyboardResult;
       }
-      // Previs is now LEGACY and reachable only by explicit request. Without
-      // this gate, every message the storyboard router declines fell through to
-      // previs, whose classifier is much looser -- so a decline meant a CozyClay
-      // render, an R2 artifact and a real Notion scene, which is exactly the
-      // default-path behaviour this change exists to stop.
-      const previsResult = isExplicitPrevisRequest(event.content ?? "")
+      // Previs is now LEGACY. It still sees an explicit request, and it still
+      // sees everything else when this owner has NO active storyboard -- which
+      // keeps its shipped behaviour, including the documented bare
+      // `วิ 10-14 ...` edit that follows an explicit previs create.
+      //
+      // Once a storyboard IS active, previs is skipped: otherwise every message
+      // the storyboard router deliberately declines fell through to previs,
+      // whose classifier is much looser, so a decline meant a CozyClay render,
+      // an R2 artifact and a real Notion scene.
+      const previsMayAnswer =
+        isExplicitPrevisRequest(event.content ?? "") ||
+        !(await runtime.storyboardLineRouter?.hasActiveStoryboard(event, ctx));
+      const previsResult = previsMayAnswer
         ? await runtime.previsLineRouter?.handleBeforeDispatch(event, ctx)
         : undefined;
       if (previsResult) {

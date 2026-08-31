@@ -430,6 +430,24 @@ export class CloudbathStoryboardLineRouter {
       : undefined;
   }
 
+  /**
+   * Whether this owner is currently iterating on a storyboard.
+   *
+   * The plugin uses this to decide whether previs may see the turn: with no
+   * storyboard active, previs keeps its shipped behaviour, including the
+   * documented bare `วิ 10-14 ...` edit that follows an explicit previs create.
+   */
+  async hasActiveStoryboard(
+    event: StoryboardDispatchEvent,
+    context: StoryboardDispatchContext,
+  ): Promise<boolean> {
+    if (context.channelId?.trim().toLowerCase() !== "line") {
+      return false;
+    }
+    const claim = this.trustedClaim(event, context);
+    return claim ? Boolean(await this.readActive(claim)) : false;
+  }
+
   /** Re-registers the active pointer so its TTL tracks last use, not creation. */
   private async touchActive(active: ActiveStoryboardContext): Promise<void> {
     await this.deps.active.register(

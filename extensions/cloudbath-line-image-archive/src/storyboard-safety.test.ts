@@ -249,11 +249,25 @@ describe("previs is legacy: only an explicit request reaches it", () => {
     await expectNothingBillable(h);
   });
 
-  it("answers an edit with no active storyboard without invoking previs", async () => {
+  it("keeps the shipped previs edit path when no storyboard is active", async () => {
+    // Backward compatibility: after an explicit previs create, the documented
+    // bare "วิ 10-14 ..." edit must still reach previs.
     const h = harness();
-    const result = await h.dispatch("วิ 3-6 ให้ Twong หันกลับ", { messageId: "e1" });
-    expect(result.source).not.toBe("previs");
-    expect(result.text ?? "").not.toContain("Previs");
+    await h.dispatch(`PREVIS ${CREATE_MESSAGE}`, { messageId: "p1" });
+    const edited = await h.dispatch("วิ 10-14 ให้ Twong หันกลับมามอง Twong2", {
+      messageId: "p2",
+    });
+    expect(edited.source).toBe("previs");
+    expect(edited.text).toContain("อัปเดต Previs");
+  });
+
+  it("stops sending declined messages to previs once a storyboard is active", async () => {
+    const h = harness();
+    await h.dispatch(CREATE_MESSAGE, { messageId: "m1" });
+    for (const message of ["เอาแบบ 16:9 นะ Twong", "Twong ยืนอยู่ไหน", "วิธีนี้ 3-6 เอาไหม"]) {
+      const result = await h.dispatch(message, { messageId: `s-${message}` });
+      expect(result.source, message).not.toBe("previs");
+    }
     await expectNothingBillable(h);
   });
 
