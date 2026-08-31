@@ -50,8 +50,11 @@ const CREATE_VIDEO_PATTERN =
  * scene requests — and a claimed create writes a real Notion project and scene.
  * Duration and aspect are detected by their own parsers instead, so a match
  * means the message really did name one.
+ *
+ * The Latin nouns carry `\b` on BOTH sides: "scene\b" alone still matched the
+ * tail of "obscene" and "shot\b" the tail of "snapshot".
  */
-const SCENE_NOUNS = /ฉาก|คลิป|วิดีโอ|วีดีโอ|scene\b|shot\b|storyboard/iu;
+const SCENE_NOUNS = /ฉาก|คลิป|วิดีโอ|วีดีโอ|\b(?:scenes?|shots?|storyboards?)\b/iu;
 
 /**
  * Wording that asks for a CHANGE, required before a time range is an edit.
@@ -81,11 +84,44 @@ function findStoryboardUnknownCast(text: string, knownNames: readonly string[]):
   return unknown;
 }
 
-const NEW_SCENE_MARKER = /ใหม่|new\s+(?:scene|shot|storyboard)/iu;
+const NEW_SCENE_MARKER = /ใหม่|\bnew\s+(?:scenes?|shots?|storyboards?)\b/iu;
 
-const EDIT_MARKER = /ให้|เปลี่ยน|แก้ไข|แก้|ตัด|ใส่|ลบ|ทำให้|ย้าย|zoom|change|cut|replace|set\b|swap/iu;
+// Same Latin-only `\b` rule as the action vocabulary: unbounded, "cut" matched
+// inside "haircut", "change" inside "exchange", and "set\b" inside "asset".
+const EDIT_MARKER =
+  /ให้|เปลี่ยน|แก้ไข|แก้|ตัด|ใส่|ลบ|ทำให้|ย้าย|\b(?:zooms?|changes?|cuts?|replaces?|sets?|swaps?)\b/iu;
 
-const CASTING_MARKER = /(?:^|\s)(?:ใช้|ให้)\s*\S/u;
+/** Names a cast outright. "ใช้ Twong กับ Twong2" is a cast list by itself. */
+const USE_CAST_MARKER = /(?:^|\s)ใช้\s*\S/u;
+
+/** Every "ให้" in the message, so what follows each one can be inspected. */
+const DIRECTION_MARKER = /ให้\s*/gu;
+
+/**
+ * Whether the message CASTS, rather than merely instructing.
+ *
+ * "ให้" is far too weak on its own. It introduces DIRECTION at least as often
+ * as cast -- "ให้ดูหน่อย", "ฉากนี้ให้ดูดีขึ้น" -- and casting strength is what
+ * lets a message mint a real Notion project and scene, so a bare "ให้" could
+ * start a storyboard out of ordinary conversation. It now counts only when a
+ * KNOWN cast name follows it, which is exactly how a real request reads:
+ * "... ให้ Twong เดินผ่าน Twong2 ...".
+ *
+ * Names are compared by prefix rather than built into a pattern so a cast name
+ * containing regex metacharacters cannot alter the match.
+ */
+function hasCastingMarker(text: string, knownNames: readonly string[]): boolean {
+  if (USE_CAST_MARKER.test(text)) {
+    return true;
+  }
+  for (const match of text.matchAll(DIRECTION_MARKER)) {
+    const rest = text.slice(match.index + match[0].length);
+    if (knownNames.some((name) => rest.startsWith(name))) {
+      return true;
+    }
+  }
+  return false;
+}
 
 /**
  * The range expression itself, so it does not survive into the beat.
@@ -165,16 +201,16 @@ export function parseStoryboardIntent(params: {
   const durationSeconds = readStoryboardDuration(text);
   const aspectRatio = readStoryboardAspectRatio(text);
   const resolution = readStoryboardResolution(text);
-  // A dimension the parsers actually resolved is a request on its own. A scene
-  // noun or a bare verb is not -- "ฉากนี้ Twong น่ารักมาก" and "ดูคลิป Twong
-  // หน่อย" merely mention one -- and a claimed create writes a real Notion
-  // project and scene, so those need an instruction alongside them.
-  const instructing = hasAction || CASTING_MARKER.test(text);
+  const casting = hasCastingMarker(text, params.knownCharacterNames);
+  // A dimension the parsers actually resolved is a request on its own. Short of
+  // that the message must name an ACTION to depict: a scene noun beside a cast
+  // reference is only talking ABOUT a scene -- "ฉากนี้ ให้ Twong ดูดีนะ",
+  // "ดูคลิป Twong หน่อย" -- and a claimed create writes a real Notion project
+  // and scene, so there is nothing to storyboard without a verb.
   const looksLikeScene =
     durationSeconds !== undefined ||
     aspectRatio !== undefined ||
-    (SCENE_NOUNS.test(text) && instructing) ||
-    (hasAction && CASTING_MARKER.test(text));
+    (hasAction && (SCENE_NOUNS.test(text) || casting));
   if (matched.length === 0 || !looksLikeScene) {
     return undefined;
   }
@@ -185,8 +221,7 @@ export function parseStoryboardIntent(params: {
     // A second storyboard needs an explicit cast list, OR a self-contained
     // request: an action plus a dimension the owner actually named.
     explicitCasting:
-      CASTING_MARKER.test(text) ||
-      (hasAction && (durationSeconds !== undefined || aspectRatio !== undefined)),
+      casting || (hasAction && (durationSeconds !== undefined || aspectRatio !== undefined)),
     ...(durationSeconds === undefined ? {} : { durationSeconds }),
     ...(aspectRatio === undefined ? {} : { aspectRatio }),
     ...(resolution === undefined ? {} : { resolution }),

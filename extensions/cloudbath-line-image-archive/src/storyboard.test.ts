@@ -561,3 +561,124 @@ describe("intent classification", () => {
     ).toBeUndefined();
   });
 });
+
+describe("classifier boundaries", () => {
+  it("never reads an action inside an unrelated English word", () => {
+    // `\b` is ASCII-only, so it belongs on the Latin alternatives and nowhere
+    // near the Thai ones. Unbounded, "brunch" was locomotion and "returns" a
+    // turn -- and a claimed action is part of what mints a Notion project.
+    for (const content of [
+      "brunch with Twong tomorrow",
+      "He returns tomorrow",
+      "Twong visits the office",
+      "the frunk is open",
+      "a stalks-and-leaves photo",
+    ]) {
+      expect(parseStoryboardActions(content, NAMES), content).toEqual([]);
+    }
+  });
+
+  it("still reads the English actions it is meant to", () => {
+    const cases = [
+      ["Twong walks past Twong2", "locomotion"],
+      ["Twong runs", "locomotion"],
+      ["Twong turns back", "transition"],
+      ["Twong looks back", "transition"],
+      ["Twong talks to Twong2", "dialogue"],
+      ["Twong sits down", "action"],
+      ["Twong stands", "action"],
+      ["Twong looks at Twong2", "action"],
+    ] as const;
+    for (const [content, kind] of cases) {
+      expect(
+        parseStoryboardActions(content, NAMES).map((a) => a.kind),
+        content,
+      ).toEqual([kind]);
+    }
+  });
+
+  it("never reads a scene noun inside a larger English word", () => {
+    // "scene\b" matched the tail of "obscene" and "shot\b" of "snapshot". Each
+    // message below also carries a real action, so before the boundary fix the
+    // embedded noun was the whole reason these classified as a create.
+    for (const content of [
+      "that was obscene, Twong walks away",
+      "send me the snapshot where Twong walks past Twong2",
+    ]) {
+      expect(
+        parseStoryboardIntent({ content, knownCharacterNames: NAMES }),
+        content,
+      ).toBeUndefined();
+    }
+  });
+
+  it("never reads an edit verb inside a larger English word", () => {
+    // "set\b" matched the tail of "asset". These carry a parseable range, so
+    // before the fix the embedded verb alone turned chat into an edit, which
+    // permanently appends a version whose beat action is that chat text.
+    for (const content of ["seconds 10-14 asset list for Twong", "sec 10-14 haircut for Twong"]) {
+      expect(
+        parseStoryboardIntent({ content, knownCharacterNames: NAMES }),
+        content,
+      ).toBeUndefined();
+    }
+  });
+
+  it("accepts an English range with a trailing unit", () => {
+    for (const content of ["10-14 seconds", "10–14 seconds", "10-14 sec", "10–14 sec"]) {
+      expect(parseStoryboardTimeRange(content), content).toEqual({
+        fromSeconds: 10,
+        toSeconds: 14,
+      });
+    }
+  });
+
+  it("keeps the range forms that already worked", () => {
+    for (const content of ["seconds 10-14", "sec 10-14", "วิ 10-14", "วินาที 10-14", "10-14s"]) {
+      expect(parseStoryboardTimeRange(content), content).toEqual({
+        fromSeconds: 10,
+        toSeconds: 14,
+      });
+    }
+    expect(parseStoryboardTimeRange("ช่วง 3 ถึง 6 วิ")).toEqual({ fromSeconds: 3, toSeconds: 6 });
+  });
+
+  it("strips a trailing-unit range out of the stored edit action", () => {
+    // The action becomes the beat instruction and is copied into the plan, so a
+    // surviving "10-14 seconds" would hand a video model a timestamp to depict.
+    const intent = parseStoryboardIntent({
+      content: "10-14 seconds ให้ Twong หันกลับมามอง Twong2",
+      knownCharacterNames: NAMES,
+    });
+    expect(intent?.kind).toBe("edit");
+    expect(intent && "action" in intent && intent.action).not.toMatch(/10|14|seconds/u);
+  });
+
+  it('does not let a bare "ให้" mint a storyboard', () => {
+    // "ให้" introduces direction at least as often as cast. On its own it was
+    // enough to classify ordinary conversation as a create, which writes a real
+    // Notion project and scene.
+    for (const content of [
+      "ฉากนี้ ให้ Twong ดูดีนะ",
+      "คลิป Twong ให้ดูหน่อย",
+      "ให้ Twong ช่วยดูหน่อย",
+      "ส่งรูป Twong ให้หน่อย",
+      "ให้ Twong2 พักก่อนนะ",
+    ]) {
+      expect(
+        parseStoryboardIntent({ content, knownCharacterNames: NAMES }),
+        content,
+      ).toBeUndefined();
+    }
+  });
+
+  it('still accepts the production request, whose "ให้" introduces the cast', () => {
+    const intent = parseStoryboardIntent({
+      content: PRODUCTION_REQUEST,
+      knownCharacterNames: NAMES,
+    });
+    expect(intent?.kind).toBe("create");
+    expect(intent && "explicitCasting" in intent && intent.explicitCasting).toBe(true);
+    expect(intent && "durationSeconds" in intent && intent.durationSeconds).toBe(15);
+  });
+});

@@ -46,31 +46,39 @@ const RESOLUTION_WORDS: ReadonlyArray<readonly [RegExp, StoryboardResolution]> =
  *
  * Order is load-bearing: "เดินผ่าน" must win over "เดิน" on the same span, so
  * matches are claimed in this order and overlapping later matches are dropped.
+ *
+ * Every LATIN alternative is wrapped in `\b`, and only the Latin ones. Without
+ * it a short verb matched inside an unrelated English word -- "brunch" became
+ * locomotion, "returns" a turn, "visits" a sit -- and a claimed action is part
+ * of what makes a message look like a scene request, which writes a real Notion
+ * project and scene. `\b` is ASCII-only, so it must never wrap the Thai
+ * alternatives: it would not fire between two Thai letters and would change
+ * where these patterns match.
  */
 const ACTION_PATTERNS: ReadonlyArray<
   Readonly<{ kind: StoryboardBeatKind; pattern: RegExp; framing: string; camera: string }>
 > = [
   {
     kind: "locomotion",
-    pattern: /เดินเข้ามา|เดินผ่าน|เดินไป|เดิน|วิ่ง|walks?\s+past|walks?\s+in|walks?|runs?/giu,
+    pattern: /เดินเข้ามา|เดินผ่าน|เดินไป|เดิน|วิ่ง|\b(?:walks?\s+past|walks?\s+in|walks?|runs?)\b/giu,
     framing: "Medium-wide tracking shot",
     camera: "Track with the subject",
   },
   {
     kind: "transition",
-    pattern: /หันกลับ|หมุนตัว|หัน|เหลียว|turns?\s+(?:back|around)|turns?|looks?\s+back/giu,
+    pattern: /หันกลับ|หมุนตัว|หัน|เหลียว|\b(?:turns?\s+(?:back|around)|turns?|looks?\s+back)\b/giu,
     framing: "Medium shot",
     camera: "Static",
   },
   {
     kind: "dialogue",
-    pattern: /คุยกัน|คุย|พูดคุย|พูด|ทักทาย|talks?|chats?|converses?|speaks?|greets?/giu,
+    pattern: /คุยกัน|คุย|พูดคุย|พูด|ทักทาย|\b(?:talks?|chats?|converses?|speaks?|greets?)\b/giu,
     framing: "Medium two-shot",
     camera: "Static",
   },
   {
     kind: "action",
-    pattern: /นั่งลง|นั่ง|ยืน|มองไปที่|มอง|sits?\s+down|sits?|stands?|looks?\s+at/giu,
+    pattern: /นั่งลง|นั่ง|ยืน|มองไปที่|มอง|\b(?:sits?\s+down|sits?|stands?|looks?\s+at)\b/giu,
     framing: "Medium shot",
     camera: "Static",
   },
@@ -263,8 +271,10 @@ function nearestNames(
  */
 const RANGE_LEADING_UNIT =
   /(?:(?:วินาที|วิ|ช่วง)(?![\p{L}\p{M}])|seconds?|sec)\s*(\d{1,3})\s*(?:-|–|—|ถึง|to)\s*(\d{1,3})/iu;
+// Longest unit first: `secs?\b` would otherwise claim the "sec" of "seconds"
+// and then fail its own boundary, leaving "10-14 seconds" unparsed.
 const RANGE_TRAILING_UNIT =
-  /(\d{1,3})\s*(?:-|–|—|ถึง|to)\s*(\d{1,3})\s*(?:(?:วินาที|วิ)(?![\p{L}\p{M}])|s\b|sec\b)/iu;
+  /(\d{1,3})\s*(?:-|–|—|ถึง|to)\s*(\d{1,3})\s*(?:(?:วินาที|วิ)(?![\p{L}\p{M}])|seconds?\b|secs?\b|s\b)/iu;
 
 export function parseStoryboardTimeRange(
   text: string,
