@@ -14,6 +14,7 @@ import {
   type StoryboardDedupeStore,
   type StoryboardProjectResolver,
 } from "./storyboard-line-router.js";
+import type { StoryboardPaidDraftRuntime } from "./storyboard-paid-draft-runtime.js";
 import { StoryboardStore } from "./storyboard-store.js";
 import type {
   ActiveStoryboardContext,
@@ -21,7 +22,13 @@ import type {
   StoryboardHead,
   StoryboardVersion,
 } from "./storyboard-types.js";
-import type { AsyncKeyedStore, UgcCharacterLock } from "./types.js";
+import type {
+  AsyncKeyedStore,
+  FrozenUgcVideoScope,
+  NotionTarget,
+  UgcCapabilityId,
+  UgcCharacterLock,
+} from "./types.js";
 
 /**
  * Shared fixtures for the storyboard routing suites.
@@ -106,6 +113,15 @@ export function harness(
     logger?: { warn: LoggerWarn };
     /** Makes the storyboard dedupe write fail, without touching creation. */
     failDedupeWrite?: boolean;
+    /**
+     * The LINE-owned paid-draft runtime. Left undefined the router resolves the
+     * installed one; null models a build with no LINE plugin, which is the
+     * provider-neutral behaviour every existing suite asserts.
+     */
+    paidDraftRuntime?: StoryboardPaidDraftRuntime | null;
+    /** Enables the workspace-scope freeze the LINE confirmation gate reads. */
+    draftScopes?: AsyncKeyedStore<FrozenUgcVideoScope>;
+    ugcCapabilities?: Readonly<Record<UgcCapabilityId, NotionTarget>>;
   } = {},
 ) {
   const shared = options.resolver ?? resolver();
@@ -172,6 +188,9 @@ export function harness(
     registry: { lookup: async () => ({ policyId: "UGC", boundByOwnerId: OWNER }) },
     now: () => Date.parse("2026-08-30T10:00:00.000Z"),
     randomId: () => `draft-${(nextDraft += 1)}`,
+    paidDraftRuntime: options.paidDraftRuntime ?? null,
+    ...(options.draftScopes ? { draftScopes: options.draftScopes } : {}),
+    ...(options.ugcCapabilities ? { ugcCapabilities: options.ugcCapabilities } : {}),
     ...(options.logger ? { logger: options.logger } : {}),
   });
 

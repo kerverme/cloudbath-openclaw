@@ -325,6 +325,11 @@ export default definePluginEntry({
             resolver: storyboardResolver,
             workspaceRegistry,
             logger,
+            // The confirmation gate reads a draft's scope from this store; the
+            // storyboard path writes into the same one the UGC tool path uses,
+            // so there is one scope contract rather than two.
+            ...(ugcDraftScopes ? { draftScopes: ugcDraftScopes } : {}),
+            ugcCapabilities: workspaceConfig.ugc.capabilities,
           });
           if (
             config.publicAssetBaseUrl &&
