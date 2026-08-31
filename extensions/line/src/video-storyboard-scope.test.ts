@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { buildStoryboardDraftScope } from "../../cloudbath-line-image-archive/src/storyboard-draft-scope.js";
-import { validateLineVideoUgcScope, type LineVideoUgcScope } from "./video-ugc-scope.js";
+import {
+  validateLineVideoUgcScope,
+  type LineGroupPolicyBinding,
+  type LineVideoUgcScope,
+} from "./video-ugc-scope.js";
 
 /**
  * The cross-plugin scope contract, asserted against the validator that spends.
@@ -45,11 +49,12 @@ const CFG = {
 } as never;
 
 const CLAIM = { accountId: ACCOUNT, lineGroupId: GROUP, ownerSenderId: OWNER };
-const BINDING = {
-  policyId: "UGC" as const,
+const BINDING: LineGroupPolicyBinding = {
+  policyId: "UGC",
   accountId: ACCOUNT,
   groupId: GROUP,
   boundByOwnerId: OWNER,
+  boundAt: "2026-08-30T00:00:00.000Z",
 };
 
 function lock(code: string, pageId: string) {
@@ -168,7 +173,7 @@ describe("a storyboard draft's scope satisfies the paid gate's own validator", (
       capabilities: CAPABILITIES,
       createdAt: "2026-08-30T10:00:00.000Z",
     }) as unknown as LineVideoUgcScope;
-    const base = {
+    const base: Parameters<typeof validateLineVideoUgcScope>[0] = {
       scope,
       cfg: CFG,
       binding: BINDING,
