@@ -54,9 +54,21 @@ export function previsDisplayNamesKey(projectInstanceId: string): string {
   return `previs-display-names:${projectInstanceId}`;
 }
 
+/**
+ * The resolver, plus a hook to drop its Character-name memo.
+ *
+ * A superset of `PrevisProjectResolver`, so every consumer typed on that
+ * interface is unaffected; only the plugin entry, which owns the save path,
+ * needs the extra method.
+ */
+export type PrevisProjectResolverWithCache = PrevisProjectResolver & {
+  /** Called after a Character Library write so a new name is visible at once. */
+  invalidateCharacterNames(): void;
+};
+
 export function createPrevisProjectResolver(
   deps: PrevisProjectResolverDeps,
-): PrevisProjectResolver {
+): PrevisProjectResolverWithCache {
   // Single-slot, lifecycle-owned memo. Both the storyboard and previs routers
   // classify EVERY owner message against this list, so an uncached read meant
   // two full Character Library scans per chat turn. The in-flight promise is
@@ -86,9 +98,16 @@ export function createPrevisProjectResolver(
   };
 
   return {
+    // Saving a Character is exactly when the memo is wrong: the owner names
+    // the new character in their very next message, and a stale list silently
+    // drops it from the cast instead of failing.
+    invalidateCharacterNames: () => {
+      cachedNames = undefined;
+    },
+
     listCharacterNames: async () => await listCharacterNames(),
 
-    resolveProject: async ({ claim, characterNames, scenePrompt }) => {
+    resolveProject: async ({ claim, characterNames, scenePrompt, startNewProjectOnCastChange }) => {
       if (characterNames.length === 0) {
         throw new Error("Previs requires at least one character");
       }
@@ -127,6 +146,7 @@ export function createPrevisProjectResolver(
         // Product stays optional: a character-only previs is a first-class shape.
         characterNames,
         resolveCharacterPages,
+        ...(startNewProjectOnCastChange ? { startNewProjectOnCastChange: true } : {}),
         prompt: scenePrompt,
       });
 

@@ -301,6 +301,10 @@ export class CloudbathStoryboardLineRouter {
         claim,
         characterNames: intent.characterNames,
         scenePrompt: intent.scenePrompt,
+        // "ใช้ X กับ Y" is the owner casting this scene. If that cast differs
+        // from the active project's frozen one they are starting new work, and
+        // the storyboard flow has no other way to open a project.
+        ...(intent.explicitCasting ? { startNewProjectOnCastChange: true } : {}),
       });
       const document = compileStoryboardDocument({
         scenePrompt: intent.scenePrompt,

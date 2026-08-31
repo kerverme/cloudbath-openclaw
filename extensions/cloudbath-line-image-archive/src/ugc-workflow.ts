@@ -1227,6 +1227,12 @@ export class CloudbathUgcVideoWorkflow {
     groupId: string;
     ownerSenderId: string;
     startNewProject?: boolean;
+    /**
+     * Opt-in: a named cast that differs from the active project's frozen cast
+     * opens a NEW project instead of throwing. Off by default, so
+     * `cloudbath_ugc_video_prepare` keeps refusing a cast change outright.
+     */
+    startNewProjectOnCastChange?: boolean;
     productName?: string;
     characterNames: readonly string[];
     /**
@@ -1257,10 +1263,48 @@ export class CloudbathUgcVideoWorkflow {
       lineGroupId: groupId,
       ownerSenderId,
     });
+    // Memoized: the cast is needed by the new-project check below AND by the
+    // lock guard further down, and a scene must still cost exactly one lookup
+    // per named character.
+    let resolvedPages: Array<{ code: string; page: NotionPage }> | undefined;
+    const resolveCharacterPagesOnce = async () =>
+      (resolvedPages ??= await params.resolveCharacterPages());
+
     const active = params.startNewProject ? undefined : await this.activeProjects.lookup(activeKey);
-    const activeInstance = active
+    let activeInstance = active
       ? await this.projectInstances.lookup(ugcProjectInstanceKey(active.projectInstanceId))
       : undefined;
+    // An explicitly cast request that names a DIFFERENT cast starts a new
+    // project rather than being refused.
+    //
+    // The frozen cast is what keeps one project's scenes consistent, so a
+    // continuation may not change it. But the storyboard flow has no other way
+    // to open a project: without this, an owner whose active project froze
+    // "Twong + Twong2" could never cast anyone else again -- every later
+    // request died with "already locked to CHAR-6, CHAR-7", telling them to
+    // start a new project while offering no way to do so, and the active
+    // pointer never expires. Identity rules are untouched: the new project
+    // freezes the newly named cast canonically, and within a project the
+    // page-id lock still holds.
+    if (
+      activeInstance &&
+      params.startNewProjectOnCastChange &&
+      params.characterNames.length > 0 &&
+      activeInstance.characterPageIds.length > 0
+    ) {
+      const requested = sortedCharacterPageIds(
+        (await resolveCharacterPagesOnce()).map((entry) => ({
+          id: entry.page.id,
+          label: entry.code,
+        })),
+      );
+      const frozen = sortedCharacterPageIds(
+        activeInstance.characterPageIds.map((id) => ({ id, label: id })),
+      );
+      if (requested.join("|") !== frozen.join("|")) {
+        activeInstance = undefined;
+      }
+    }
     // A finalized project is durably closed. Continuing it would reopen a
     // film the owner declared finished, so it fails closed; the owner must
     // start a new project explicitly.
@@ -1324,7 +1368,7 @@ export class CloudbathUgcVideoWorkflow {
       // Resolution is the caller's: `cloudbath_ugc_video_prepare` keeps the
       // code the owner typed, while previs canonicalises to the Character
       // Library's generated Character ID. The lifecycle below is shared.
-      characterPages.push(...(await params.resolveCharacterPages()));
+      characterPages.push(...(await resolveCharacterPagesOnce()));
       const characterPageIds = characterPages.map((entry) => entry.page.id!);
       // Random, not derived: two projects for the same product and cast
       // created in the same millisecond must still be distinct pieces of
@@ -1393,7 +1437,7 @@ export class CloudbathUgcVideoWorkflow {
       // project; a name that no longer resolves fails closed in the resolver
       // rather than silently matching a stale frozen string.
       if (params.characterNames.length > 0) {
-        const resolved = await params.resolveCharacterPages();
+        const resolved = await resolveCharacterPagesOnce();
         const requested = sortedCharacterPageIds(
           resolved.map((entry) => ({ id: entry.page.id, label: entry.code })),
         );
@@ -1431,7 +1475,7 @@ export class CloudbathUgcVideoWorkflow {
       }
       let rebuilt =
         existingInstance && params.characterNames.length > 0
-          ? await params.resolveCharacterPages()
+          ? await resolveCharacterPagesOnce()
           : characterPages;
       if (existingInstance && rebuilt.length > 0) {
         const requested = sortedCharacterPageIds(
