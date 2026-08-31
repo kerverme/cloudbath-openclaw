@@ -147,10 +147,9 @@ export function parseStoryboardIntent(params: {
   const hasAction = parseStoryboardActions(text, params.knownCharacterNames).length > 0;
   const unknownNames = findStoryboardUnknownCast(text, params.knownCharacterNames);
   const range = parseStoryboardTimeRange(text);
-  // An explicit new-scene request outranks an edit even when it names a range:
-  // "ทำฉากใหม่ 10-15 วิ ให้ Twong เดิน" asks for a scene, not a rewrite.
-  // An explicit scene noun with an action asks for a NEW scene, even when it
-  // also names a range ("ทำคลิป ให้ Twong เดิน 10-15 วิ" is a 10-15s clip).
+  // A new-scene request outranks an edit even when it names a range: both
+  // "ทำฉากใหม่ 10-15 วิ ให้ Twong เดิน" and "ทำคลิป ให้ Twong เดิน 10-15 วิ"
+  // ask for a scene of that length, not a rewrite of those seconds.
   const asksForNewScene = NEW_SCENE_MARKER.test(text) || (SCENE_NOUNS.test(text) && hasAction);
   if (range && EDIT_MARKER.test(text) && !asksForNewScene) {
     return {
@@ -163,19 +162,13 @@ export function parseStoryboardIntent(params: {
     };
   }
 
-  // A create request needs real cast AND either scene wording or an explicit
-  // casting instruction carrying a recognised action. A bare verb beside a
-  // character name is conversation, and claiming it would mint a real Notion
-  // project and scene for a question.
   const durationSeconds = readStoryboardDuration(text);
   const aspectRatio = readStoryboardAspectRatio(text);
   const resolution = readStoryboardResolution(text);
-  // A named dimension the parsers actually resolved, an explicit video noun, or
-  // a casting instruction carrying a recognised action. A loose keyword match is
-  // not enough: a claimed create writes a real Notion project and scene.
-  // A named dimension is a request on its own. A scene noun or an action is
-  // not: "ฉากนี้ Twong น่ารักมาก" and "ดูคลิป Twong หน่อย" merely mention one,
-  // and a claimed create writes a real Notion project and scene.
+  // A dimension the parsers actually resolved is a request on its own. A scene
+  // noun or a bare verb is not -- "ฉากนี้ Twong น่ารักมาก" and "ดูคลิป Twong
+  // หน่อย" merely mention one -- and a claimed create writes a real Notion
+  // project and scene, so those need an instruction alongside them.
   const instructing = hasAction || CASTING_MARKER.test(text);
   const looksLikeScene =
     durationSeconds !== undefined ||
