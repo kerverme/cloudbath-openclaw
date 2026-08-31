@@ -314,8 +314,10 @@ describe("Storyboard -> LINE draft -> real confirmation gate -> provider boundar
   it("submits exactly once, carrying the latest version and canonical cast", async () => {
     const h = harness();
     await h.storyboard(CREATE_MESSAGE, "m1");
-    // Edit, so a stale v1 submission would be visible.
-    await h.storyboard("วิ 10-14 ให้ Twong หันกลับมามอง Twong2", "m2");
+    // The edit introduces an action v1 CANNOT contain. "หันกลับ" would not
+    // work here: the compiler already generates a connective turn beat for v1,
+    // so asserting on it would pass against a stale version too.
+    await h.storyboard("วิ 10-14 ให้ Twong2 นั่งลงบนเก้าอี้", "m2");
     const drafted = await h.storyboard("สร้างวิดีโอ", "m3");
 
     const code = /ยืนยัน VIDEO (\d{4})/u.exec(drafted?.text ?? "")?.[1];
@@ -353,7 +355,7 @@ describe("Storyboard -> LINE draft -> real confirmation gate -> provider boundar
     // Canonical identity, and the v2 edit — not the stale v1.
     expect(submitted.prompt).toContain("CHAR-6");
     expect(submitted.prompt).toContain("CHAR-7");
-    expect(submitted.prompt).toContain("หันกลับ");
+    expect(submitted.prompt).toContain("นั่งลง");
 
     // Frozen identity references, in cast order.
     expect(submitted.inputImages?.map((asset) => asset.buffer.toString())).toEqual([
