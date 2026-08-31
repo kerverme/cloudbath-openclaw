@@ -490,3 +490,54 @@ describe("security and billing invariants", () => {
     expect(Object.keys(fields ?? {})).toEqual(["reason"]);
   });
 });
+
+describe("K. only the bound owner can drive a storyboard", () => {
+  const CTX = { channelId: "line", accountId: "acct-1", conversationId: "C1234567890abcdef" };
+  const OWNER_EVENT = { content: CREATE_MESSAGE, senderId: "U0987654321", isGroup: true };
+
+  it("refuses every turn that is not the bound owner on LINE", async () => {
+    // The routing harness always dispatches as the owner, so these guards are
+    // driven against the router directly. A storyboard writes a real Notion
+    // project and scene, so each of these must claim nothing at all.
+    const cases = [
+      ["senderIsOwner is false", { ...OWNER_EVENT, senderIsOwner: false }, CTX],
+      ["senderIsOwner is absent", { ...OWNER_EVENT }, CTX],
+      [
+        "a different sender than the binding",
+        { ...OWNER_EVENT, senderId: "U-intruder", senderIsOwner: true },
+        CTX,
+      ],
+      [
+        "another channel",
+        { ...OWNER_EVENT, senderIsOwner: true },
+        { ...CTX, channelId: "discord" },
+      ],
+      [
+        "no native group id",
+        { ...OWNER_EVENT, senderIsOwner: true },
+        { ...CTX, conversationId: undefined },
+      ],
+    ] as const;
+
+    for (const [label, event, ctx] of cases) {
+      const h = harness();
+      const result = await h.storyboardRouter.handleBeforeDispatch(
+        { ...event, messageId: `k-${label}` },
+        ctx,
+      );
+      expect(result, label).toBeUndefined();
+      expect((await h.storyboardVersions.entries()).length, label).toBe(0);
+      await expectNothingBillable(h);
+    }
+  });
+
+  it("still lets the bound owner through", async () => {
+    const h = harness();
+    const result = await h.storyboardRouter.handleBeforeDispatch(
+      { ...OWNER_EVENT, senderIsOwner: true, messageId: "k-owner" },
+      CTX,
+    );
+    expect(result?.handled).toBe(true);
+    expect((await h.storyboardVersions.entries()).length).toBe(1);
+  });
+});
