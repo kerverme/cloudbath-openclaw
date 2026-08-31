@@ -1356,21 +1356,38 @@ export class CloudbathUgcVideoWorkflow {
     let characterLocks: readonly UgcCharacterLock[];
     if (existingLock) {
       characterLocks = existingLock.characterLocks;
-      // Identity is the canonical code the lock was FROZEN from, never the
-      // name the owner typed. Both are resolved through the caller's own
-      // resolver -- the same one that produced the frozen codes -- so a
-      // canonicalising caller compares CHAR-6 against CHAR-6 rather than
-      // "twong" against CHAR-6, which rejected every later scene in a project.
+      // Identity is the Character Library PAGE the lock was frozen from, never
+      // the name the owner typed and never the lock's `code`.
       //
-      // Only identity is re-resolved. The frozen references below are still
-      // reused verbatim, so a Character Library edit cannot retarget an
-      // existing project; an unresolvable name fails closed in the resolver.
+      // `code` is caller-owned and deliberately differs between the two
+      // callers -- `cloudbath_ugc_video_prepare` freezes the typed code while
+      // previs canonicalises to CHAR-6 -- so comparing codes only ever works
+      // when the same caller created and continued the project. The page id is
+      // the one identity both resolve to, so a project stays continuable by
+      // either. Comparing the typed name instead is what rejected every later
+      // previs/storyboard scene with "already locked to CHAR-6, CHAR-7".
+      //
+      // Only identity is re-resolved. The frozen references below are reused
+      // verbatim, so a Character Library edit still cannot retarget an existing
+      // project; a name that no longer resolves fails closed in the resolver
+      // rather than silently matching a stale frozen string.
       if (params.characterNames.length > 0) {
-        // Always resolves: a project reached through an existing lock never
-        // populated `characterPages`, which is filled only when creating one.
         const resolved = await params.resolveCharacterPages();
-        const requested = resolved.map((entry) => entry.code.toLowerCase()).toSorted();
-        const locked = characterLocks.map((lock) => lock.code.toLowerCase()).toSorted();
+        const requested: string[] = [];
+        for (const entry of resolved) {
+          // An id-less page would compare equal to any other id-less one, so a
+          // malformed row must fail closed rather than pass the cast guard.
+          if (!entry.page.id) {
+            throw new Error(
+              `Character "${entry.code}" resolved to a Character Library row with no id`,
+            );
+          }
+          requested.push(entry.page.id);
+        }
+        requested.sort((a, b) => a.localeCompare(b));
+        const locked = characterLocks
+          .map((lock) => lock.pageId)
+          .toSorted((a, b) => a.localeCompare(b));
         if (requested.join("|") !== locked.join("|")) {
           throw new Error(
             `This project is already locked to ${characterLocks
@@ -1380,8 +1397,16 @@ export class CloudbathUgcVideoWorkflow {
         }
       }
     } else {
+      // A continuation reaches here only if the lock is missing (an evicted or
+      // never-written row). Freezing the empty `characterPages` of a
+      // continuation would store a zero-character lock and poison the project
+      // with "already locked to ;", so the cast is resolved and re-frozen.
+      const pagesToFreeze =
+        characterPages.length === 0 && params.characterNames.length > 0
+          ? await params.resolveCharacterPages()
+          : characterPages;
       characterLocks = Object.freeze(
-        characterPages.map((entry) =>
+        pagesToFreeze.map((entry) =>
           freezeCharacterLock({
             code: entry.code,
             page: entry.page,

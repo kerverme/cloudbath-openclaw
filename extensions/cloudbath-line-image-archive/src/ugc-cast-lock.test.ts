@@ -66,11 +66,13 @@ function characterPage(params: { name: string; number: number }): NotionPage {
 }
 
 /** Twong -> CHAR-6, Twong2 -> CHAR-7, Other -> CHAR-99. */
-const LIBRARY: Readonly<Record<string, NotionPage>> = {
-  Twong: characterPage({ name: "Twong", number: 6 }),
-  Twong2: characterPage({ name: "Twong2", number: 7 }),
-  Other: characterPage({ name: "Other", number: 99 }),
-};
+function freshLibrary(): Record<string, NotionPage> {
+  return {
+    Twong: characterPage({ name: "Twong", number: 6 }),
+    Twong2: characterPage({ name: "Twong2", number: 7 }),
+    Other: characterPage({ name: "Other", number: 99 }),
+  };
+}
 
 function memoryStore<T>(): PluginStateKeyedStore<T> {
   const values = new Map<string, T>();
@@ -107,12 +109,13 @@ function memoryStore<T>(): PluginStateKeyedStore<T> {
 
 function harness() {
   const projectLocks = memoryStore<UgcProjectCharacterLock>();
+  const library = freshLibrary();
   const notionCalls = { resolveNamedRecord: 0 };
   const projectPage = { id: "a".repeat(32) } as unknown as NotionPage;
   const notion = {
     resolveNamedRecord: async ({ name }: { name: string }) => {
       notionCalls.resolveNamedRecord += 1;
-      const page = LIBRARY[name];
+      const page = library[name];
       if (!page) {
         // Fail closed exactly like the production client: unknown and
         // ambiguous rows both throw rather than resolving to something.
@@ -185,7 +188,7 @@ function harness() {
     return entry?.value.characterLocks.map((lock) => lock.code) ?? [];
   };
 
-  return { canonicalising, verbatim, lockedCodes, notionCalls, projectLocks };
+  return { canonicalising, verbatim, lockedCodes, notionCalls, projectLocks, library };
 }
 
 describe("A. the first scene freezes the cast canonically", () => {
@@ -263,6 +266,25 @@ describe("E. an unresolvable character fails closed", () => {
   });
 });
 
+describe("E2. an id-less Character row fails closed", () => {
+  it("refuses to compare pages that carry no id", async () => {
+    const h = harness();
+    await h.canonicalising(["Twong", "Twong2"], 1);
+
+    // Two id-less rows would compare equal to each other and to any other
+    // id-less lock, so the guard must reject rather than pass.
+    h.library.Twong = {
+      ...(h.library.Twong as unknown as Record<string, unknown>),
+      id: undefined,
+    } as unknown as NotionPage;
+
+    await expect(h.canonicalising(["Twong", "Twong2"], 2)).rejects.toThrow(
+      /Character Library row with no id/u,
+    );
+    expect(await h.lockedCodes()).toEqual(["CHAR-6", "CHAR-7"]);
+  });
+});
+
 describe("F. cloudbath_ugc_video_prepare is unaffected", () => {
   it("keeps working when the caller freezes the typed code verbatim", async () => {
     const h = harness();
@@ -292,11 +314,80 @@ describe("H. a project takes many scenes without a false mismatch", () => {
     expect(await h.lockedCodes()).toEqual(["CHAR-6", "CHAR-7"]);
   });
 
-  it("reuses the frozen references rather than re-freezing them", async () => {
+  it("keeps the frozen references even after the library row changes", async () => {
     const h = harness();
     const first = await h.canonicalising(["Twong", "Twong2"], 1);
+    expect(first.characterLocks[0]!.identityReferences[0]!.locator).toBe(
+      "ugc/characters/Twong.png",
+    );
+
+    // Repoint the library row. Only identity is re-resolved on a continuation,
+    // so the frozen reference must NOT follow the edit.
+    h.library.Twong = {
+      ...(h.library.Twong as unknown as { properties: Record<string, unknown> }),
+      id: "page-char-6",
+      properties: {
+        ...(h.library.Twong as unknown as { properties: Record<string, unknown> }).properties,
+        "Identity Reference R2 Keys": {
+          type: "rich_text",
+          rich_text: [{ plain_text: "ugc/characters/REPOINTED.png" }],
+        },
+      },
+    } as unknown as NotionPage;
+
     const second = await h.canonicalising(["Twong", "Twong2"], 2);
-    // Same frozen objects: only identity was re-resolved, not the references.
+    expect(second.characterLocks[0]!.identityReferences[0]!.locator).toBe(
+      "ugc/characters/Twong.png",
+    );
     expect(second.characterLocks).toEqual(first.characterLocks);
+  });
+});
+
+describe("G. either caller can continue a project the other started", () => {
+  it("lets previs continue a project cloudbath_ugc_video_prepare created", async () => {
+    // The two callers freeze different `code` schemes on purpose, so identity
+    // has to be the Character page they both resolve to.
+    const h = harness();
+    const first = await h.verbatim(["Twong", "Twong2"], 1);
+    expect(first.characterLocks.map((lock) => lock.code)).toEqual(["Twong", "Twong2"]);
+
+    const second = await h.canonicalising(["Twong", "Twong2"], 2);
+    expect(second.sceneNumber).toBe(2);
+    // The lock is reused as frozen; continuing never rewrites its codes.
+    expect(await h.lockedCodes()).toEqual(["Twong", "Twong2"]);
+  });
+
+  it("lets cloudbath_ugc_video_prepare continue a project previs created", async () => {
+    const h = harness();
+    await h.canonicalising(["Twong", "Twong2"], 1);
+    const second = await h.verbatim(["Twong", "Twong2"], 2);
+    expect(second.sceneNumber).toBe(2);
+    expect(await h.lockedCodes()).toEqual(["CHAR-6", "CHAR-7"]);
+  });
+
+  it("still rejects a different cast across callers", async () => {
+    const h = harness();
+    await h.verbatim(["Twong", "Twong2"], 1);
+    await expect(h.canonicalising(["Twong", "Other"], 2)).rejects.toThrow(/already locked/u);
+  });
+});
+
+describe("I. a continuation whose lock is missing rebuilds it", () => {
+  it("re-freezes the named cast instead of storing an empty lock", async () => {
+    const h = harness();
+    await h.canonicalising(["Twong", "Twong2"], 1);
+
+    // Simulate an evicted lock row: the instance and active pointer survive.
+    for (const { key } of await h.projectLocks.entries()) {
+      await h.projectLocks.delete(key);
+    }
+
+    const second = await h.canonicalising(["Twong", "Twong2"], 2);
+    expect(second.characterLocks.map((lock) => lock.code)).toEqual(["CHAR-6", "CHAR-7"]);
+    // Not a zero-character lock, which would poison the project.
+    expect(await h.lockedCodes()).toEqual(["CHAR-6", "CHAR-7"]);
+
+    const third = await h.canonicalising(["Twong", "Twong2"], 3);
+    expect(third.sceneNumber).toBe(3);
   });
 });
