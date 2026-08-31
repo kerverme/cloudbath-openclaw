@@ -272,11 +272,11 @@ describe("P. provider capability comes from the live catalog", () => {
   });
 
   it("fails closed on an unsupported duration, resolution or aspect", async () => {
-    const cases = [
+    const cases: ReadonlyArray<readonly [Partial<OpenRouterVideoModel>, string]> = [
       [{ supportedDurationSeconds: [4, 5, 10] }, "unsupported_duration"],
       [{ supportedResolutions: ["480p"] }, "unsupported_resolution"],
       [{ supportedAspectRatios: ["16:9"] }, "unsupported_aspect_ratio"],
-    ] as const;
+    ];
     for (const [override, reason] of cases) {
       const h = harness({ maxEstimatedCostUsd: 5, models: [seedanceRow(override)] });
       const result = await prepareLineStoryboardVideoDraft(request(), h.deps);

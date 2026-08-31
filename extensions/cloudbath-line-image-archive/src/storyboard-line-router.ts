@@ -14,6 +14,7 @@
 
 import type { PrevisProjectResolver } from "./previs-line-router.js";
 import { compileStoryboardDocument } from "./storyboard-compiler.js";
+import { buildStoryboardDraftScope } from "./storyboard-draft-scope.js";
 import { formatFinalVideoDraftForLine, formatStoryboardForLine } from "./storyboard-format.js";
 import { parseStoryboardIntent, type StoryboardIntent } from "./storyboard-intent.js";
 import type { StoryboardPaidDraftRuntime } from "./storyboard-paid-draft-runtime.js";
@@ -40,7 +41,14 @@ import {
   prepareStoryboardFinalVideoDraft,
   type PrepareFinalVideoDraftParams,
 } from "./storyboard-video-plan.js";
-import type { AsyncKeyedStore, UgcCharacterLock } from "./types.js";
+import type {
+  AsyncKeyedStore,
+  FrozenUgcVideoScope,
+  NotionTarget,
+  UgcCapabilityId,
+  UgcCharacterLock,
+} from "./types.js";
+import { ugcDraftScopeKey } from "./ugc-workflow.js";
 
 /** A retried webhook arrives within seconds; an hour is far past any retry window. */
 const DEDUPE_TTL_MS = 60 * 60 * 1_000;
@@ -95,6 +103,12 @@ export type StoryboardLineRouterDeps = Readonly<{
    * the LINE plugin behaves.
    */
   paidDraftRuntime?: StoryboardPaidDraftRuntime | null;
+  /**
+   * Where the paid gate reads a confirmed draft's workspace scope. Absent, a
+   * storyboard draft is still prepared but cannot be confirmed in a UGC group.
+   */
+  draftScopes?: AsyncKeyedStore<FrozenUgcVideoScope>;
+  ugcCapabilities?: Readonly<Record<UgcCapabilityId, NotionTarget>>;
   logger?: { warn: (event: string, fields?: Record<string, unknown>) => void };
 }>;
 
@@ -424,10 +438,40 @@ export class CloudbathStoryboardLineRouter {
             : { runtime: this.deps.paidDraftRuntime }),
         },
       });
+      // A UGC-bound group's confirmation gate requires a frozen workspace scope
+      // for the draft it is about to submit; without one it refuses, which
+      // would make every storyboard code unconfirmable. Registered through the
+      // SAME store and key the existing tool path uses, so the gate's own
+      // validation runs over it unchanged.
+      if (draft.confirmation.kind === "ready") {
+        await this.freezeDraftScope(draft, claim, draft.confirmation.code);
+      }
       await this.touchActive(active);
       return formatFinalVideoDraftForLine(draft);
     } catch (error) {
       return this.failure("storyboard_draft_failed", error);
+    }
+  }
+
+  /** Freezes the scope the paid gate validates, in the store it already reads. */
+  private async freezeDraftScope(
+    draft: StoryboardFinalVideoDraft,
+    claim: StoryboardAccessClaim,
+    code: string,
+  ): Promise<void> {
+    const scopes = this.deps.draftScopes;
+    const capabilities = this.deps.ugcCapabilities;
+    if (!scopes || !capabilities) {
+      return;
+    }
+    const scope = buildStoryboardDraftScope({
+      draft,
+      claim,
+      capabilities,
+      createdAt: new Date(this.deps.now()).toISOString(),
+    });
+    if (scope) {
+      await scopes.register(ugcDraftScopeKey(code), scope);
     }
   }
 

@@ -27,7 +27,13 @@ import type {
   StoryboardHead,
   StoryboardVersion,
 } from "./storyboard-types.js";
-import type { AsyncKeyedStore, SafeLogger } from "./types.js";
+import type {
+  AsyncKeyedStore,
+  FrozenUgcVideoScope,
+  NotionTarget,
+  SafeLogger,
+  UgcCapabilityId,
+} from "./types.js";
 
 /** The subset of the plugin state API this wiring needs. */
 export type StoryboardStateApi = Readonly<{
@@ -45,6 +51,14 @@ export function createCloudbathStoryboardLineRouter(deps: {
   workspaceRegistry: LineGroupWorkspacePolicyRegistry;
   logger: SafeLogger;
   now?: () => number;
+  /**
+   * The SAME store the UGC tool path freezes a confirmed draft's scope in, so
+   * the LINE confirmation gate finds a storyboard draft's scope exactly where
+   * it already looks. Omitted, a storyboard draft is still prepared but cannot
+   * be confirmed in a UGC-bound group.
+   */
+  draftScopes?: AsyncKeyedStore<FrozenUgcVideoScope>;
+  ugcCapabilities?: Readonly<Record<UgcCapabilityId, NotionTarget>>;
 }): CloudbathStoryboardLineRouter {
   const now = deps.now ?? Date.now;
   return new CloudbathStoryboardLineRouter({
@@ -97,5 +111,7 @@ export function createCloudbathStoryboardLineRouter(deps: {
     },
     now,
     logger: deps.logger,
+    ...(deps.draftScopes ? { draftScopes: deps.draftScopes } : {}),
+    ...(deps.ugcCapabilities ? { ugcCapabilities: deps.ugcCapabilities } : {}),
   });
 }
