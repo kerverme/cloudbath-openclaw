@@ -1301,7 +1301,14 @@ export class CloudbathUgcVideoWorkflow {
       const frozen = sortedCharacterPageIds(
         activeInstance.characterPageIds.map((id) => ({ id, label: id })),
       );
-      if (requested.join("|") !== frozen.join("|")) {
+      // Only a cast that ADDS someone opens a new project. A request naming a
+      // strict SUBSET of the frozen cast is far more likely to be a name the
+      // classifier did not recognise -- a Character saved moments ago, a typo --
+      // than a deliberate recast, and acting on it would silently build the
+      // scene with a partial cast. That is worse than the refusal it replaces,
+      // so a subset still falls through to the lock guard and fails loudly.
+      const namesSomeoneNew = requested.some((id) => !frozen.includes(id));
+      if (requested.join("|") !== frozen.join("|") && namesSomeoneNew) {
         activeInstance = undefined;
       }
     }

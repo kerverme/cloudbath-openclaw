@@ -267,6 +267,41 @@ describe("a newly cast storyboard request opens a new project", () => {
     expect(await h.lockedCasts()).toEqual([["CHAR-6", "CHAR-7"]]);
   });
 
+  it("does not open a new project for a subset of the frozen cast", async () => {
+    const h = harness();
+    await h.send("ใช้ Twong กับ Twong2 ให้ Twong เดินผ่าน Twong2 15 วิ แนวตั้ง");
+
+    // Naming fewer people is not a recast. The lock guard still refuses it, so
+    // continuity cannot be lost by omission.
+    const subset = await h.send("ใช้ Twong ให้ Twong เดินคนเดียว 10 วิ แนวตั้ง");
+    expect(subset?.text).toContain("สร้าง Storyboard ไม่สำเร็จ");
+    expect(h.createdProjects.length).toBe(1);
+    expect(await h.lockedCasts()).toEqual([["CHAR-6", "CHAR-7"]]);
+  });
+
+  it("does not reopen a finalized project, and leaves its history intact", async () => {
+    const h = harness();
+    await h.send("ใช้ Twong กับ Twong2 ให้ Twong เดินผ่าน Twong2 15 วิ แนวตั้ง");
+    const [firstInstance] = (await h.projectInstances.entries()).map((entry) => entry.value);
+    await h.projectInstances.register(`ugc-project-instance:${firstInstance!.projectInstanceId}`, {
+      ...firstInstance!,
+      finalizedAt: "2026-08-31T00:00:00.000Z",
+    });
+
+    // A new cast opens NEW work rather than reopening the finished film.
+    h.saveCharacter("Manju", 12);
+    const result = await h.send(PRODUCTION_MESSAGE);
+    expect(result?.text).toContain("Storyboard v1");
+    expect(h.createdProjects.length).toBe(2);
+
+    // The finalized project keeps its cast and its finalized marker.
+    const finalized = await h.projectInstances.lookup(
+      `ugc-project-instance:${firstInstance!.projectInstanceId}`,
+    );
+    expect(finalized?.finalizedAt).toBe("2026-08-31T00:00:00.000Z");
+    expect(finalized?.characterPageIds).toEqual(["page-char-6", "page-char-7"]);
+  });
+
   it("still fails closed on a character the library does not hold", async () => {
     const h = harness();
     await h.send("ใช้ Twong กับ Twong2 ให้ Twong เดินผ่าน Twong2 15 วิ แนวตั้ง");
@@ -276,17 +311,23 @@ describe("a newly cast storyboard request opens a new project", () => {
     expect(h.createdProjects.length).toBe(1);
   });
 
-  it("sees a character saved seconds earlier, without waiting for the memo", async () => {
+  it("never builds a scene with a silently partial cast", async () => {
     const h = harness();
     await h.send("ใช้ Twong กับ Twong2 ให้ Twong เดินผ่าน Twong2 15 วิ แนวตั้ง");
 
     // Without the save-time invalidation the 30s name memo still serves the
-    // pre-Manju list, so Manju is silently dropped from the cast -- the scene
-    // is built with Twong alone, which is worse than failing.
+    // pre-Manju list, so Manju is dropped and the request reduces to {Twong} --
+    // a STRICT SUBSET of the frozen cast. That must NOT open a new project
+    // cast with Twong alone; it falls through to the lock guard and fails
+    // loudly, which is the safe outcome.
     h.saveCharacterWithoutInvalidation("Manju", 12);
-    await h.send(PRODUCTION_MESSAGE);
-    expect(await h.lockedCasts()).toContainEqual(["CHAR-6"]);
+    const partial = await h.send(PRODUCTION_MESSAGE);
+    expect(partial?.text).toContain("สร้าง Storyboard ไม่สำเร็จ");
+    expect(h.createdProjects.length).toBe(1);
+    expect(await h.lockedCasts()).toEqual([["CHAR-6", "CHAR-7"]]);
+  });
 
+  it("sees a character saved seconds earlier, without waiting for the memo", async () => {
     const fresh = harness();
     await fresh.send("ใช้ Twong กับ Twong2 ให้ Twong เดินผ่าน Twong2 15 วิ แนวตั้ง");
     fresh.saveCharacter("Manju", 12);
