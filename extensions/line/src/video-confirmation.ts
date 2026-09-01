@@ -16,6 +16,7 @@
 import fs from "node:fs/promises";
 import { resolveOpenClawAgentDir } from "openclaw/plugin-sdk/provider-auth";
 import { getRuntimeConfig } from "openclaw/plugin-sdk/runtime-config-snapshot";
+import { createSubsystemLogger } from "openclaw/plugin-sdk/runtime-env";
 import type { VideoGenerationSourceAsset } from "openclaw/plugin-sdk/video-generation";
 import { generateVideo } from "openclaw/plugin-sdk/video-generation-runtime";
 import { resolveLineAccount } from "./accounts.js";
@@ -61,6 +62,7 @@ import {
 } from "./video-workspace-runtime.js";
 
 const CONFIRMATION_PATTERN = /^ยืนยัน\s+VIDEO\s+(\d{4})$/iu;
+const log = createSubsystemLogger("line/video-confirmation");
 
 type LineBeforeDispatchEvent = {
   content: string;
@@ -183,7 +185,11 @@ async function executeConfirmedLineVideoJob(params: {
   try {
     const inputImages: VideoGenerationSourceAsset[] = [];
     if (params.ugcScope) {
-      inputImages.push(...(await materializeLineVideoUgcReferences(params.ugcScope)));
+      inputImages.push(
+        ...(await materializeLineVideoUgcReferences(params.ugcScope, {
+          correlationId: params.jobId,
+        })),
+      );
     }
     if (params.draft.sourceImagePath) {
       const asset = await loadSourceImageAsset(params.draft.sourceImagePath);
@@ -576,6 +582,13 @@ export function createLineVideoConfirmationGate(params: {
       conversationKey,
       jobId: job.jobId,
       now: params.now,
+    });
+    log.info("LINE video confirmation scheduled", {
+      correlationId: job.jobId,
+      jobId: job.jobId,
+      draftId: draft.draftId,
+      confirmationCode: draftId,
+      ugc: Boolean(ugcScope),
     });
 
     scheduleBackgroundWork(() =>
