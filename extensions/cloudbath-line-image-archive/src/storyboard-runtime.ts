@@ -11,6 +11,7 @@ import {
   CloudbathStoryboardLineRouter,
   type StoryboardProjectResolver,
 } from "./storyboard-line-router.js";
+import type { StoryboardLlmPlanner } from "./storyboard-planner.js";
 import {
   CLOUDBATH_STORYBOARD_ACTIVE_NAMESPACE,
   CLOUDBATH_STORYBOARD_ACTIVE_TTL_MS,
@@ -59,6 +60,7 @@ export function createCloudbathStoryboardLineRouter(deps: {
    */
   draftScopes?: AsyncKeyedStore<FrozenUgcVideoScope>;
   ugcCapabilities?: Readonly<Record<UgcCapabilityId, NotionTarget>>;
+  planner?: StoryboardLlmPlanner;
 }): CloudbathStoryboardLineRouter {
   const now = deps.now ?? Date.now;
   return new CloudbathStoryboardLineRouter({
@@ -111,6 +113,7 @@ export function createCloudbathStoryboardLineRouter(deps: {
     },
     now,
     logger: deps.logger,
+    ...(deps.planner ? { planner: deps.planner } : {}),
     ...(deps.draftScopes ? { draftScopes: deps.draftScopes } : {}),
     ...(deps.ugcCapabilities ? { ugcCapabilities: deps.ugcCapabilities } : {}),
   });

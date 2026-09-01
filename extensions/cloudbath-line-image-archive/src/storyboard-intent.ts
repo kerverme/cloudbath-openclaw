@@ -84,6 +84,17 @@ function findStoryboardUnknownCast(text: string, knownNames: readonly string[]):
   return unknown;
 }
 
+const NATURAL_SENTENCE_WORDS = new Set(["Then", "Next", "After", "Afterwards"]);
+
+function findNaturalUnknownCast(text: string, knownNames: readonly string[]): string[] {
+  return Array.from(text.matchAll(/\b[A-Z][A-Za-z0-9_-]{1,31}\b/gu), (match) => match[0]).filter(
+    (name, index, all) =>
+      !knownNames.includes(name) &&
+      !NATURAL_SENTENCE_WORDS.has(name) &&
+      all.indexOf(name) === index,
+  );
+}
+
 const NEW_SCENE_MARKER = /ใหม่|\bnew\s+(?:scenes?|shots?|storyboards?)\b/iu;
 
 // Same Latin-only `\b` rule as the action vocabulary: unbounded, "cut" matched
@@ -161,6 +172,7 @@ export type StoryboardIntent =
       unknownNames: readonly string[];
       action: string;
     }>
+  | Readonly<{ kind: "natural_edit"; request: string }>
   | Readonly<{ kind: "create_video" }>;
 
 /**
@@ -184,19 +196,20 @@ export function parseStoryboardIntent(params: {
 
   const matched = matchKnownNames(text, params.knownCharacterNames);
   const hasAction = parseStoryboardActions(text, params.knownCharacterNames).length > 0;
-  const unknownNames = findStoryboardUnknownCast(text, params.knownCharacterNames);
+  const explicitUnknownNames = findStoryboardUnknownCast(text, params.knownCharacterNames);
   const range = parseStoryboardTimeRange(text);
+  const allRanges = Array.from(text.matchAll(/(\d{1,3})\s*(?:-|–|—|ถึง|to)\s*(\d{1,3})/giu));
   // A new-scene request outranks an edit even when it names a range: both
   // "ทำฉากใหม่ 10-15 วิ ให้ Twong เดิน" and "ทำคลิป ให้ Twong เดิน 10-15 วิ"
   // ask for a scene of that length, not a rewrite of those seconds.
   const asksForNewScene = NEW_SCENE_MARKER.test(text) || (SCENE_NOUNS.test(text) && hasAction);
-  if (range && EDIT_MARKER.test(text) && !asksForNewScene) {
+  if (range && allRanges.length === 1 && EDIT_MARKER.test(text) && !asksForNewScene) {
     return {
       kind: "edit",
       fromSeconds: range.fromSeconds,
       toSeconds: range.toSeconds,
       characterNames: matched,
-      unknownNames,
+      unknownNames: explicitUnknownNames,
       action: stripTimeRangeSpan(text),
     };
   }
@@ -210,10 +223,29 @@ export function parseStoryboardIntent(params: {
   // reference is only talking ABOUT a scene -- "ฉากนี้ ให้ Twong ดูดีนะ",
   // "ดูคลิป Twong หน่อย" -- and a claimed create writes a real Notion project
   // and scene, so there is nothing to storyboard without a verb.
+  const naturalActionCount = Array.from(
+    text.matchAll(
+      /กระโดด|เข้าไป|หยิบ|ตี|พลาด|โดน|\b(?:jumps?|enters?|picks?\s+up|swings?|miss(?:es)?|hits?)\b/giu,
+    ),
+  ).length;
+  const naturalAction = naturalActionCount > 0;
+  const naturalSequence =
+    naturalActionCount > 1 ||
+    (/แล้ว|จากนั้น|ต่อมา|\b(?:then|afterwards?|next)\b/iu.test(text) && naturalAction);
+  const unknownNames = naturalSequence
+    ? [...explicitUnknownNames, ...findNaturalUnknownCast(text, params.knownCharacterNames)].filter(
+        (name, index, all) => all.indexOf(name) === index,
+      )
+    : explicitUnknownNames;
+  if (matched.length > 0 && !range && activeEditMarker(text) && !SCENE_NOUNS.test(text)) {
+    return { kind: "natural_edit", request: text };
+  }
   const looksLikeScene =
     durationSeconds !== undefined ||
     aspectRatio !== undefined ||
-    (hasAction && (SCENE_NOUNS.test(text) || casting));
+    (hasAction && (SCENE_NOUNS.test(text) || casting)) ||
+    naturalSequence ||
+    (allRanges.length > 1 && naturalAction);
   if (matched.length === 0 || !looksLikeScene) {
     return undefined;
   }
@@ -224,13 +256,25 @@ export function parseStoryboardIntent(params: {
     // A second storyboard needs an explicit cast list, OR a self-contained
     // request: an action plus a dimension the owner actually named.
     explicitCasting:
-      casting || (hasAction && (durationSeconds !== undefined || aspectRatio !== undefined)),
-    ...(durationSeconds === undefined ? {} : { durationSeconds }),
+      casting ||
+      naturalSequence ||
+      (hasAction && (durationSeconds !== undefined || aspectRatio !== undefined)),
+    ...(durationSeconds === undefined
+      ? allRanges.length > 1
+        ? { durationSeconds: Math.max(...allRanges.map((entry) => Number(entry[2]))) }
+        : {}
+      : { durationSeconds }),
     ...(aspectRatio === undefined ? {} : { aspectRatio }),
     ...(resolution === undefined ? {} : { resolution }),
     environment: readStoryboardEnvironment(text),
     scenePrompt: text,
   };
+}
+
+function activeEditMarker(text: string): boolean {
+  return /เปลี่ยน(?:ตอน|ฉาก|ช็อต)|แก้(?:ช่วง|ฉาก|ช็อต)|ปรับ(?:ช่วง|ฉาก|ช็อต)|เอา.+เป็น\s*(?:close-up|wide|medium)|\b(?:change|replace)\s+(?:the\s+)?(?:part|beat|shot|scene)\b/iu.test(
+    text,
+  );
 }
 
 /** True for a message the storyboard flow must leave to the previs router. */

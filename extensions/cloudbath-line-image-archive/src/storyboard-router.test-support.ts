@@ -15,6 +15,7 @@ import {
   type StoryboardProjectResolver,
 } from "./storyboard-line-router.js";
 import type { StoryboardPaidDraftRuntime } from "./storyboard-paid-draft-runtime.js";
+import type { StoryboardLlmPlanner } from "./storyboard-planner.js";
 import { StoryboardStore } from "./storyboard-store.js";
 import type {
   ActiveStoryboardContext,
@@ -122,6 +123,7 @@ export function harness(
     /** Enables the workspace-scope freeze the LINE confirmation gate reads. */
     draftScopes?: AsyncKeyedStore<FrozenUgcVideoScope>;
     ugcCapabilities?: Readonly<Record<UgcCapabilityId, NotionTarget>>;
+    planner?: StoryboardLlmPlanner;
   } = {},
 ) {
   const shared = options.resolver ?? resolver();
@@ -189,6 +191,7 @@ export function harness(
     now: () => Date.parse("2026-08-30T10:00:00.000Z"),
     randomId: () => `draft-${(nextDraft += 1)}`,
     paidDraftRuntime: options.paidDraftRuntime ?? null,
+    ...(options.planner ? { planner: options.planner } : {}),
     ...(options.draftScopes ? { draftScopes: options.draftScopes } : {}),
     ...(options.ugcCapabilities ? { ugcCapabilities: options.ugcCapabilities } : {}),
     ...(options.logger ? { logger: options.logger } : {}),

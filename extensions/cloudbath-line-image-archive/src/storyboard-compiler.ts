@@ -197,10 +197,25 @@ export type CompileStoryboardParams = Readonly<{
   aspectRatio: StoryboardAspectRatio;
   resolution: StoryboardResolution;
   environment: string;
+  /** Already schema-validated and canonically mapped by StoryboardLlmPlanner. */
+  plannedBeats?: readonly StoryboardBeat[];
 }>;
 
 /** Compiles one immutable storyboard document. Deterministic for a given input. */
 export function compileStoryboardDocument(params: CompileStoryboardParams): StoryboardDocument {
+  if (params.plannedBeats) {
+    validatePlannedTimeline(params.plannedBeats, params.durationSeconds);
+    return Object.freeze({
+      version: 1,
+      scenePrompt: params.scenePrompt,
+      durationSeconds: params.durationSeconds,
+      aspectRatio: params.aspectRatio,
+      resolution: params.resolution,
+      environment: params.environment,
+      cast: Object.freeze([...params.cast]),
+      beats: Object.freeze([...params.plannedBeats]),
+    });
+  }
   const actions = parseStoryboardActions(
     params.scenePrompt,
     params.cast.map((member) => member.displayName),
@@ -237,6 +252,23 @@ export function compileStoryboardDocument(params: CompileStoryboardParams): Stor
     cast: Object.freeze([...params.cast]),
     beats: Object.freeze(beats),
   });
+}
+
+function validatePlannedTimeline(beats: readonly StoryboardBeat[], durationSeconds: number): void {
+  if (beats.length === 0 || beats[0]?.startSeconds !== 0) {
+    throw new Error("Planned storyboard must start at zero");
+  }
+  for (const [index, beat] of beats.entries()) {
+    if (
+      beat.endSeconds <= beat.startSeconds ||
+      beat.startSeconds !== (index === 0 ? 0 : beats[index - 1]!.endSeconds)
+    ) {
+      throw new Error("Planned storyboard beats must be positive and contiguous");
+    }
+  }
+  if (beats.at(-1)?.endSeconds !== durationSeconds) {
+    throw new Error("Planned storyboard must end at its duration");
+  }
 }
 
 export type StoryboardTimeRangeEdit = Readonly<{
