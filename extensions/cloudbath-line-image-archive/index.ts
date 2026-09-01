@@ -310,6 +310,13 @@ export default definePluginEntry({
             },
             logger,
             config.publicAssetBaseUrl,
+            undefined,
+            undefined,
+            // Late-bound: the resolver is built just below, and this only ever
+            // runs on a later inbound turn. Saving a Character is exactly when
+            // its name memo is stale, and the owner names the new character in
+            // their very next message.
+            () => storyboardResolver.invalidateCharacterNames(),
           );
           // Storyboard is the DEFAULT natural-language video flow and needs no
           // engine, bucket or public URL, so it is wired before the previs block

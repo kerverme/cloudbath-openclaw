@@ -189,6 +189,8 @@ export class UgcCharacterImageWorkflow {
     private readonly publicAssetBaseUrl?: string,
     private readonly now: () => number = Date.now,
     pendingMedia?: UgcCharacterPendingMediaStore,
+    /** Notified after a successful save so name caches can drop stale lists. */
+    private readonly onCharacterSaved?: () => void,
   ) {
     this.pendingMedia =
       pendingMedia ?? new UgcCharacterPendingMediaStore(this.stateDir, this.imageMaxBytes);
@@ -430,6 +432,7 @@ export class UgcCharacterImageWorkflow {
         publicAssetBaseUrl: this.publicAssetBaseUrl,
       });
       this.logger.info("ugc_character_saved", { mode: command.mode });
+      this.onCharacterSaved?.();
       return {
         handled: true,
         text: [

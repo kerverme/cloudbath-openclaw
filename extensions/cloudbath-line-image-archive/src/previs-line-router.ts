@@ -74,6 +74,12 @@ export type PrevisProjectResolver = Readonly<{
     claim: PrevisAccessClaim;
     characterNames: readonly string[];
     scenePrompt: string;
+    /**
+     * Set by the storyboard flow: an explicitly cast request that names a
+     * different cast opens a new project instead of being refused. Previs does
+     * not set it, so its behaviour is unchanged.
+     */
+    startNewProjectOnCastChange?: boolean;
   }): Promise<{
     projectInstanceId: string;
     /** Real UGC_PROJECTS page, so the next phase can follow the linkage. */
