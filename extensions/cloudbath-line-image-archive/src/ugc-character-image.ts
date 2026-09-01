@@ -11,8 +11,15 @@ import {
 
 const LATEST_IMAGE_TTL_MS = 24 * 60 * 60 * 1_000;
 const LINE_IMAGE_ACKNOWLEDGEMENT = "เห็นรูปแล้ว ต้องการให้ช่วยอะไร?";
-const CHARACTER_COMMAND =
-  /^(?:(?:เก็บ|บันทึก)\s*(?:รูปนี้|รูปล่าสุด)\s*เป็น\s*ตัวละคร\s*ชื่อ|ใช้\s*รูปล่าสุด\s*สร้าง\s*ตัวละคร\s*ชื่อ)\s+(.+?)\s*(?:ครับ|ค่ะ|คะ|หน่อย)?[.!。]?$/iu;
+const CHARACTER_COMMANDS = [
+  /^(?:(?:เก็บ|บันทึก)\s*(?:รูปนี้|รูปล่าสุด)\s*เป็น\s*ตัวละคร\s*ชื่อ|ใช้\s*รูปล่าสุด\s*สร้าง\s*ตัวละคร\s*ชื่อ)\s+(.+?)\s*(?:ครับ|ค่ะ|คะ|หน่อย)?[.!。]?$/iu,
+  /^บันทึก\s*ตัวละคร\s+(.+?)\s+พร้อม\s*(?:รูปนี้|รูปล่าสุด)\s*(?:ครับ|ค่ะ|คะ|หน่อย)?[.!。]?$/iu,
+  /^เซฟ\s*(?:รูปนี้|รูปล่าสุด)\s*เป็น\s*ตัวละคร(?:\s*ชื่อ)?\s+(.+?)\s*(?:ครับ|ค่ะ|คะ|หน่อย)?[.!。]?$/iu,
+  /^เก็บ\s*(?:รูปนี้|รูปล่าสุด)\s*ไว้\s*เป็น\s+(.+?)\s*(?:ครับ|ค่ะ|คะ|หน่อย)?[.!。]?$/iu,
+  /^ตัวนี้\s*ชื่อ\s+(.+?)\s+บันทึก\s*ไว้\s*เป็น\s*ตัวละคร\s*(?:ครับ|ค่ะ|คะ|หน่อย)?[.!。]?$/iu,
+  /^เพิ่ม\s*ตัวละคร\s*ชื่อ\s+(.+?)\s+ใช้\s*(?:รูปนี้|รูปล่าสุด)\s*เป็น\s*ภาพอ้างอิง\s*(?:ครับ|ค่ะ|คะ|หน่อย)?[.!。]?$/iu,
+  /^จ(?:ำ|ํา)\s*(?:รูปนี้|รูปล่าสุด)\s*เป็น\s*ตัวละคร\s*ชื่อ\s+(.+?)\s*(?:ครับ|ค่ะ|คะ|หน่อย)?[.!。]?$/iu,
+] as const;
 const CHARACTER_UPDATE_COMMAND =
   /^(?:อัปเดต\s*ตัวละคร\s+(.+?)\s+ด้วย\s*รูปล่าสุด|เปลี่ยน\s*รูป\s*ตัวละคร\s+(.+?)\s+เป็น\s*รูปล่าสุด)\s*(?:ครับ|ค่ะ|คะ|หน่อย)?[.!。]?$/iu;
 const CHARACTER_VIEW_MIGRATION_COMMAND =
@@ -118,13 +125,22 @@ function normalizeCharacterName(value: string): string | undefined {
 
 export function parseUgcCharacterImageCommand(content: string): CharacterCommand | null {
   const normalized = content.normalize("NFKC").trim().replace(/\s+/gu, " ");
-  const create = normalized.match(CHARACTER_COMMAND);
+  const create = CHARACTER_COMMANDS.map((pattern) => normalized.match(pattern)).find(Boolean);
   const update = normalized.match(CHARACTER_UPDATE_COMMAND);
   const name = normalizeCharacterName(create?.[1] ?? update?.[1] ?? update?.[2] ?? "");
   if (!name) {
     return null;
   }
   return { mode: create ? "upsert" : "update", name };
+}
+
+function hasCharacterMutationIntent(content: string): boolean {
+  const normalized = content.normalize("NFKC").trim().replace(/\s+/gu, " ");
+  const thaiMutation = /(?:เก็บ|บันทึก|เซฟ|เพิ่ม|จ(?:ำ|ํา)|สร้าง|ลงทะเบียน)/u.test(normalized);
+  const thaiTarget = /(?:ตัวละคร|รูปนี้|รูปล่าสุด|ภาพอ้างอิง)/u.test(normalized);
+  const englishMutation = /\b(?:save|add|create|register|remember)\b/iu.test(normalized);
+  const englishTarget = /\bcharacter\b/iu.test(normalized);
+  return (thaiMutation && thaiTarget) || (englishMutation && englishTarget);
 }
 
 export function parseUgcCharacterViewMigrationCommand(content: string): string | null {
@@ -343,7 +359,8 @@ export class UgcCharacterImageWorkflow {
     }
     const command = parseUgcCharacterImageCommand(event.content);
     const migrationCharacterId = parseUgcCharacterViewMigrationCommand(event.content);
-    if (!command && !migrationCharacterId) {
+    const incompleteCharacterMutation = !command && hasCharacterMutationIntent(event.content);
+    if (!command && !migrationCharacterId && !incompleteCharacterMutation) {
       return undefined;
     }
     const groupId = event.isGroup ? nativeGroupId(context.conversationId) : undefined;
@@ -384,7 +401,10 @@ export class UgcCharacterImageWorkflow {
       }
     }
     if (!command) {
-      return undefined;
+      return {
+        handled: true,
+        text: "กรุณาระบุชื่อตัวละครและขอให้บันทึกรูปนี้เป็นตัวละครให้ชัดเจน",
+      };
     }
     if (
       !this.r2Config.endpoint ||
