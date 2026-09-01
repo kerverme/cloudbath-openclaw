@@ -66,6 +66,7 @@ describe("A. natural video request creates a storyboard", () => {
     const h = harness();
     expect((await h.dispatch("สวัสดีครับ วันนี้เป็นยังไงบ้าง")).source).toBe("model");
     expect((await h.dispatch("Twong น่ารักดีนะ")).source).toBe("model");
+    expect((await h.dispatch("Twong ว่างช่วง 1-3 และ 4-6 ไหม")).source).not.toBe("storyboard");
   });
 });
 

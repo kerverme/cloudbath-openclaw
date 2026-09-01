@@ -245,6 +245,31 @@ describe("LINE Cloudbath UGC scope", () => {
       guardedFetch: guardedFetch as never,
     });
     expect(assets).toHaveLength(2);
+    expect(assets.map((asset) => asset.mimeType)).toEqual(["image/png", "image/png"]);
+    expect(assets.map((asset) => asset.role)).toEqual(["reference_image", "reference_image"]);
     expect(callOrder).toEqual(["identity", "style"]);
+  });
+
+  it("preserves the detected MIME type when materializing a non-PNG reference", async () => {
+    const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0x00]);
+    const assets = await materializeLineVideoUgcReferences(
+      { ...SCOPE, referenceAssets: [SCOPE.referenceAssets[1]!] },
+      {
+        env: {
+          R2_ACCOUNT_ID: "account",
+          R2_ACCESS_KEY_ID: "test-access",
+          R2_SECRET_ACCESS_KEY: "test-secret",
+          R2_BUCKET_NAME: "existing-bucket",
+        },
+        s3Client: {
+          send: vi.fn(async () => ({
+            ContentLength: jpeg.byteLength,
+            Body: { transformToByteArray: async () => jpeg },
+          })),
+        },
+      },
+    );
+
+    expect(assets).toEqual([{ buffer: jpeg, mimeType: "image/jpeg", role: "reference_image" }]);
   });
 });

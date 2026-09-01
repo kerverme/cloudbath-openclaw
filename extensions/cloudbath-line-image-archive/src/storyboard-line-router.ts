@@ -18,6 +18,7 @@ import { buildStoryboardDraftScope } from "./storyboard-draft-scope.js";
 import { formatFinalVideoDraftForLine, formatStoryboardForLine } from "./storyboard-format.js";
 import { parseStoryboardIntent, type StoryboardIntent } from "./storyboard-intent.js";
 import type { StoryboardPaidDraftRuntime } from "./storyboard-paid-draft-runtime.js";
+import type { StoryboardLlmPlanner } from "./storyboard-planner.js";
 import {
   isDurationTooLong,
   STORYBOARD_DEFAULT_ASPECT_RATIO,
@@ -103,6 +104,7 @@ export type StoryboardLineRouterDeps = Readonly<{
    * the LINE plugin behaves.
    */
   paidDraftRuntime?: StoryboardPaidDraftRuntime | null;
+  planner?: StoryboardLlmPlanner;
   /**
    * Where the paid gate reads a confirmed draft's workspace scope. Absent, a
    * storyboard draft is still prepared but cannot be confirmed in a UGC group.
@@ -281,6 +283,9 @@ export class CloudbathStoryboardLineRouter {
     if (intent.kind === "edit") {
       return await this.edit(intent, claim, active!);
     }
+    if (intent.kind === "natural_edit") {
+      return await this.naturalEdit(intent, claim, active!);
+    }
     return await this.prepareDraft(claim, active!);
   }
 
@@ -306,13 +311,23 @@ export class CloudbathStoryboardLineRouter {
         // the storyboard flow has no other way to open a project.
         ...(intent.explicitCasting ? { startNewProjectOnCastChange: true } : {}),
       });
+      const cast = buildCast(resolved.characterLocks, resolved.displayNames);
+      const durationSeconds = intent.durationSeconds ?? STORYBOARD_DEFAULT_DURATION_SECONDS;
+      const planned = this.deps.planner
+        ? await this.deps.planner.planCreate({
+            request: intent.scenePrompt,
+            durationSeconds,
+            cast,
+          })
+        : undefined;
       const document = compileStoryboardDocument({
         scenePrompt: intent.scenePrompt,
-        cast: buildCast(resolved.characterLocks, resolved.displayNames),
-        durationSeconds: intent.durationSeconds ?? STORYBOARD_DEFAULT_DURATION_SECONDS,
+        cast,
+        durationSeconds,
         aspectRatio: toAspectRatio(intent.aspectRatio),
         resolution: toResolution(intent.resolution),
         environment: intent.environment,
+        ...(planned ? { plannedBeats: planned.beats } : {}),
       });
       const created = await this.deps.store.createStoryboard({
         document,
@@ -338,6 +353,40 @@ export class CloudbathStoryboardLineRouter {
       });
     } catch (error) {
       return this.failure("storyboard_create_failed", error);
+    }
+  }
+
+  private async naturalEdit(
+    intent: Extract<StoryboardIntent, { kind: "natural_edit" }>,
+    claim: StoryboardAccessClaim,
+    active: ActiveStoryboardContext,
+  ): Promise<string> {
+    if (!this.deps.planner) {
+      return REPLY.emptyAction;
+    }
+    const latest = await this.deps.store
+      .readLatest({ storyboardId: active.storyboardId, claim })
+      .catch(() => undefined);
+    if (!latest) {
+      return REPLY.missingVersion;
+    }
+    try {
+      const edit = await this.deps.planner.planEdit({
+        request: intent.request,
+        document: latest.document,
+      });
+      const version = await this.deps.store.appendEdit({
+        storyboardId: active.storyboardId,
+        claim,
+        edit,
+      });
+      await this.touchActive(active);
+      return formatStoryboardForLine({
+        versionNumber: version.versionNumber,
+        document: version.document,
+      });
+    } catch (error) {
+      return this.failure("storyboard_natural_edit_failed", error);
     }
   }
 

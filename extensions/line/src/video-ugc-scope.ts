@@ -224,7 +224,7 @@ function resolveR2Config(env: NodeJS.ProcessEnv) {
   };
 }
 
-function assertImageBytes(bytes: Buffer): Buffer {
+function readImageAsset(bytes: Buffer): VideoGenerationSourceAsset {
   const png = bytes
     .subarray(0, 8)
     .equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
@@ -238,7 +238,11 @@ function assertImageBytes(bytes: Buffer): Buffer {
   if (bytes.byteLength === 0 || bytes.byteLength > MAX_REFERENCE_BYTES) {
     throw new Error("UGC reference asset size is invalid");
   }
-  return bytes;
+  return {
+    buffer: bytes,
+    mimeType: png ? "image/png" : jpeg ? "image/jpeg" : "image/webp",
+    role: "reference_image",
+  };
 }
 
 type R2Body = {
@@ -254,7 +258,7 @@ export type LineVideoUgcReferenceDependencies = {
 async function readR2Reference(
   objectKey: string,
   dependencies: LineVideoUgcReferenceDependencies,
-): Promise<Buffer> {
+): Promise<VideoGenerationSourceAsset> {
   const config = resolveR2Config(dependencies.env ?? process.env);
   const client =
     dependencies.s3Client ??
@@ -276,13 +280,13 @@ async function readR2Reference(
   if (!bytes) {
     throw new Error("UGC reference asset is unavailable");
   }
-  return assertImageBytes(Buffer.from(bytes));
+  return readImageAsset(Buffer.from(bytes));
 }
 
 async function readHttpsReference(
   url: string,
   guardedFetch: typeof fetchWithSsrFGuard,
-): Promise<Buffer> {
+): Promise<VideoGenerationSourceAsset> {
   const guarded = await guardedFetch({
     url,
     requireHttps: true,
@@ -299,7 +303,7 @@ async function readHttpsReference(
     if (Number.isFinite(declared) && declared > MAX_REFERENCE_BYTES) {
       throw new Error("UGC reference asset size is invalid");
     }
-    return assertImageBytes(Buffer.from(await guarded.response.arrayBuffer()));
+    return readImageAsset(Buffer.from(await guarded.response.arrayBuffer()));
   } finally {
     await guarded.release();
   }
@@ -385,14 +389,14 @@ export async function materializeLineVideoUgcReferences(
   const ordered = orderLineVideoUgcReferences(scope);
   const assets: VideoGenerationSourceAsset[] = [];
   for (const reference of ordered) {
-    const buffer =
+    const asset =
       reference.source === "r2"
         ? await readR2Reference(reference.locator, dependencies)
         : await readHttpsReference(
             reference.locator,
             dependencies.guardedFetch ?? fetchWithSsrFGuard,
           );
-    assets.push({ buffer });
+    assets.push(asset);
   }
   return assets;
 }

@@ -54,6 +54,7 @@ import { resolveSchemaForAgent } from "./src/profiles.js";
 import { R2ArchiveClient } from "./src/r2.js";
 import { isExplicitPrevisRequest } from "./src/storyboard-intent.js";
 import type { CloudbathStoryboardLineRouter } from "./src/storyboard-line-router.js";
+import { StoryboardLlmPlanner } from "./src/storyboard-planner.js";
 import { createCloudbathStoryboardLineRouter } from "./src/storyboard-runtime.js";
 import type {
   AgentProfile,
@@ -332,6 +333,13 @@ export default definePluginEntry({
             resolver: storyboardResolver,
             workspaceRegistry,
             logger,
+            planner: new StoryboardLlmPlanner(
+              async (request) =>
+                await api.runtime.llm.complete({
+                  ...request,
+                  messages: [...request.messages],
+                }),
+            ),
             // The confirmation gate reads a draft's scope from this store; the
             // storyboard path writes into the same one the UGC tool path uses,
             // so there is one scope contract rather than two.
