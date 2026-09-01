@@ -16,6 +16,8 @@ const {
   assertOkOrThrowHttpErrorMock,
   fetchWithTimeoutGuardedMock,
   postJsonRequestMock,
+  providerErrorLogMock,
+  providerInfoLogMock,
   resolveApiKeyForProviderMock,
   resolveProviderHttpRequestConfigMock,
   waitProviderOperationPollIntervalMock,
@@ -23,6 +25,8 @@ const {
   assertOkOrThrowHttpErrorMock: vi.fn(async () => {}),
   fetchWithTimeoutGuardedMock: vi.fn(),
   postJsonRequestMock: vi.fn(),
+  providerErrorLogMock: vi.fn(),
+  providerInfoLogMock: vi.fn(),
   resolveApiKeyForProviderMock: vi.fn(async () => ({ apiKey: "openrouter-key" })),
   resolveProviderHttpRequestConfigMock: vi.fn((params: Record<string, unknown>) => {
     const request = params.request as
@@ -59,6 +63,13 @@ const {
     };
   }),
   waitProviderOperationPollIntervalMock: vi.fn(async () => {}),
+}));
+
+vi.mock("openclaw/plugin-sdk/runtime-env", () => ({
+  createSubsystemLogger: () => ({
+    info: providerInfoLogMock,
+    error: providerErrorLogMock,
+  }),
 }));
 
 vi.mock("openclaw/plugin-sdk/provider-auth-runtime", () => ({
@@ -225,6 +236,8 @@ describe("openrouter video generation provider", () => {
     assertOkOrThrowHttpErrorMock.mockClear();
     fetchWithTimeoutGuardedMock.mockReset();
     postJsonRequestMock.mockReset();
+    providerErrorLogMock.mockClear();
+    providerInfoLogMock.mockClear();
     resolveApiKeyForProviderMock.mockClear();
     resolveProviderHttpRequestConfigMock.mockClear();
     waitProviderOperationPollIntervalMock.mockClear();
@@ -1053,5 +1066,102 @@ describe("openrouter video generation provider", () => {
         cfg: {} as never,
       }),
     ).rejects.toThrow("does not support video reference inputs");
+  });
+
+  it("logs a safe input-reference routing summary without image data", async () => {
+    postJsonRequestMock.mockResolvedValue(
+      releasedJson({ id: "job-123", polling_url: "/videos/job-123", status: "completed" }),
+    );
+    fetchWithTimeoutGuardedMock.mockResolvedValueOnce(
+      releasedVideo({ contentType: "video/mp4", bytes: "video" }),
+    );
+    const provider = buildOpenRouterVideoGenerationProvider();
+    await provider.generateVideo({
+      provider: "openrouter",
+      model: "bytedance/seedance-1.0-pro",
+      prompt: "private prompt must not be logged",
+      durationSeconds: 6,
+      resolution: "720P",
+      aspectRatio: "9:16",
+      inputImages: [
+        {
+          buffer: Buffer.from("twong-image-bytes"),
+          mimeType: "image/png",
+          role: "reference_image",
+          metadata: { correlationId: "video-job-5231", characterCode: "CHAR-6" },
+        },
+        {
+          buffer: Buffer.from("manju-image-bytes"),
+          mimeType: "image/jpeg",
+          role: "reference_image",
+          metadata: { correlationId: "video-job-5231", characterCode: "CHAR-8" },
+        },
+      ],
+      cfg: {} as never,
+    });
+
+    const summary = requireRecord(providerInfoLogMock.mock.calls[0]?.[1], "payload summary");
+    expect(summary).toMatchObject({
+      correlationId: "video-job-5231",
+      inputReferencesCount: 2,
+      firstFramePresent: false,
+      lastFramePresent: false,
+      frameImagesCount: 0,
+      characterIdentityInputReferencesCount: 2,
+      characterIdentityFrameImagesCount: 0,
+    });
+    expect(summary.inputReferences).toEqual([
+      expect.objectContaining({ index: 0, role: "reference_image", mimeType: "image/png" }),
+      expect.objectContaining({ index: 1, role: "reference_image", mimeType: "image/jpeg" }),
+    ]);
+    const serializedLog = JSON.stringify(providerInfoLogMock.mock.calls);
+    expect(serializedLog).not.toContain("private prompt");
+    expect(serializedLog).not.toContain("image-bytes");
+    expect(serializedLog).not.toContain("data:image");
+    expect(serializedLog).not.toContain("base64");
+  });
+
+  it("logs provider content indexes without assigning them to Characters", async () => {
+    const response = new Response(
+      JSON.stringify({
+        error: {
+          metadata: {
+            raw: JSON.stringify({
+              error: {
+                code: "InputImageSensitiveContentDetected.PrivacyInformation",
+                message: "privacy information detected in content[1]",
+              },
+            }),
+          },
+        },
+      }),
+      { status: 400, headers: { "content-type": "application/json" } },
+    );
+    postJsonRequestMock.mockResolvedValue({ response, release: vi.fn(async () => {}) });
+    assertOkOrThrowHttpErrorMock.mockRejectedValueOnce(new Error("HTTP 400"));
+    const provider = buildOpenRouterVideoGenerationProvider();
+
+    await expect(
+      provider.generateVideo({
+        provider: "openrouter",
+        model: "bytedance/seedance-1.0-pro",
+        prompt: "prompt",
+        inputImages: [
+          {
+            buffer: Buffer.from("image"),
+            mimeType: "image/png",
+            role: "reference_image",
+            metadata: { correlationId: "video-job-5231", characterCode: "CHAR-6" },
+          },
+        ],
+        cfg: {} as never,
+      }),
+    ).rejects.toThrow("HTTP 400");
+
+    const diagnostic = JSON.stringify(providerErrorLogMock.mock.calls);
+    expect(diagnostic).toContain("content[1]");
+    expect(diagnostic).toContain("InputImageSensitiveContentDetected.PrivacyInformation");
+    expect(diagnostic).not.toContain("CHAR-8");
+    expect(diagnostic).not.toContain("Manju");
   });
 });

@@ -1,5 +1,6 @@
 import { GetObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
+import { createSubsystemLogger } from "openclaw/plugin-sdk/runtime-env";
 import { fetchWithSsrFGuard, type SsrFPolicy } from "openclaw/plugin-sdk/ssrf-runtime";
 import type { VideoGenerationSourceAsset } from "openclaw/plugin-sdk/video-generation";
 
@@ -10,6 +11,7 @@ const MAX_REFERENCE_ASSETS = 8;
 const KIND_PRIORITY = { identity: 0, product: 1, style: 2 } as const;
 const REFERENCE_FETCH_TIMEOUT_MS = 30_000;
 const REFERENCE_FETCH_POLICY: SsrFPolicy = { allowPrivateNetwork: false };
+const log = createSubsystemLogger("line/video-ugc");
 
 export type LineVideoUgcCapabilityId =
   | "PRODUCT_LIBRARY"
@@ -224,7 +226,9 @@ function resolveR2Config(env: NodeJS.ProcessEnv) {
   };
 }
 
-function assertImageBytes(bytes: Buffer): Buffer {
+type MaterializedImage = Pick<VideoGenerationSourceAsset, "buffer" | "mimeType">;
+
+function assertImageBytes(bytes: Buffer): MaterializedImage {
   const png = bytes
     .subarray(0, 8)
     .equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
@@ -238,7 +242,8 @@ function assertImageBytes(bytes: Buffer): Buffer {
   if (bytes.byteLength === 0 || bytes.byteLength > MAX_REFERENCE_BYTES) {
     throw new Error("UGC reference asset size is invalid");
   }
-  return bytes;
+  const mimeType = png ? "image/png" : jpeg ? "image/jpeg" : "image/webp";
+  return { buffer: bytes, mimeType };
 }
 
 type R2Body = {
@@ -249,12 +254,43 @@ export type LineVideoUgcReferenceDependencies = {
   env?: NodeJS.ProcessEnv;
   s3Client?: { send(command: GetObjectCommand): Promise<unknown> };
   guardedFetch?: typeof fetchWithSsrFGuard;
+  correlationId?: string;
+  logger?: Pick<typeof log, "info">;
 };
+
+type SafeReferenceDiagnostic = {
+  index: number;
+  kind: LineVideoUgcReference["kind"];
+  source: LineVideoUgcReference["source"];
+  characterCode?: string;
+  characterPageId?: string;
+};
+
+function buildSafeReferencePlan(
+  scope: LineVideoUgcScope,
+  ordered: readonly LineVideoUgcReference[],
+): SafeReferenceDiagnostic[] {
+  return ordered.map((reference, index) => {
+    const lock = scope.characterLocks.find((candidate) =>
+      [...candidate.identityReferences, ...candidate.styleReferences].some(
+        (candidateReference) =>
+          candidateReference.source === reference.source &&
+          candidateReference.locator === reference.locator,
+      ),
+    );
+    return {
+      index,
+      kind: reference.kind,
+      source: reference.source,
+      ...(lock ? { characterCode: lock.code, characterPageId: lock.pageId } : {}),
+    };
+  });
+}
 
 async function readR2Reference(
   objectKey: string,
   dependencies: LineVideoUgcReferenceDependencies,
-): Promise<Buffer> {
+): Promise<MaterializedImage> {
   const config = resolveR2Config(dependencies.env ?? process.env);
   const client =
     dependencies.s3Client ??
@@ -282,7 +318,7 @@ async function readR2Reference(
 async function readHttpsReference(
   url: string,
   guardedFetch: typeof fetchWithSsrFGuard,
-): Promise<Buffer> {
+): Promise<MaterializedImage> {
   const guarded = await guardedFetch({
     url,
     requireHttps: true,
@@ -383,16 +419,40 @@ export async function materializeLineVideoUgcReferences(
   dependencies: LineVideoUgcReferenceDependencies = {},
 ): Promise<VideoGenerationSourceAsset[]> {
   const ordered = orderLineVideoUgcReferences(scope);
+  const logger = dependencies.logger ?? log;
+  const referencePlan = buildSafeReferencePlan(scope, ordered);
+  logger.info("UGC video reference plan", {
+    correlationId: dependencies.correlationId,
+    references: referencePlan,
+  });
   const assets: VideoGenerationSourceAsset[] = [];
-  for (const reference of ordered) {
-    const buffer =
+  for (const [index, reference] of ordered.entries()) {
+    const asset =
       reference.source === "r2"
         ? await readR2Reference(reference.locator, dependencies)
         : await readHttpsReference(
             reference.locator,
             dependencies.guardedFetch ?? fetchWithSsrFGuard,
           );
-    assets.push({ buffer });
+    assets.push({
+      ...asset,
+      ...(reference.kind === "identity" ? { role: "reference_image" } : {}),
+      metadata: {
+        correlationId: dependencies.correlationId,
+        ...referencePlan[index],
+      },
+    });
   }
+  logger.info("UGC video references materialized", {
+    correlationId: dependencies.correlationId,
+    assets: assets.map((asset, index) => ({
+      index,
+      role: asset.role,
+      mimeType: asset.mimeType,
+      byteLength: asset.buffer?.byteLength,
+      characterCode: asset.metadata?.characterCode,
+      characterPageId: asset.metadata?.characterPageId,
+    })),
+  });
   return assets;
 }
