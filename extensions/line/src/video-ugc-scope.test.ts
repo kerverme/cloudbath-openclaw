@@ -312,4 +312,64 @@ describe("LINE Cloudbath UGC scope", () => {
 
     expect(orderLineVideoUgcReferences(scope)).toEqual([twong, manju]);
   });
+
+  it("logs safe ordered Character metadata before and after materialization", async () => {
+    const twong = { kind: "identity" as const, source: "r2" as const, locator: "private/twong" };
+    const manju = { kind: "identity" as const, source: "r2" as const, locator: "private/manju" };
+    const scope: LineVideoUgcScope = {
+      ...SCOPE,
+      characterLocks: [
+        {
+          ...SCOPE.characterLocks[0]!,
+          code: "CHAR-6",
+          pageId: "twong-page",
+          identityReferences: [twong],
+        },
+        {
+          ...SCOPE.characterLocks[0]!,
+          code: "CHAR-8",
+          pageId: "manju-page",
+          identityReferences: [manju],
+        },
+      ],
+      referenceAssets: [manju, twong],
+    };
+    const info = vi.fn();
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    await materializeLineVideoUgcReferences(scope, {
+      correlationId: "video-job-5231",
+      logger: { info },
+      env: {
+        R2_ACCOUNT_ID: "account",
+        R2_ACCESS_KEY_ID: "unused-access",
+        R2_SECRET_ACCESS_KEY: "unused-key",
+        R2_BUCKET_NAME: "unused-bucket",
+      },
+      s3Client: {
+        send: vi.fn(async () => ({
+          ContentLength: png.byteLength,
+          Body: { transformToByteArray: async () => png },
+        })),
+      },
+    });
+
+    expect(info.mock.calls[0]?.[1]).toMatchObject({
+      correlationId: "video-job-5231",
+      references: [
+        { index: 0, characterCode: "CHAR-6", kind: "identity", source: "r2" },
+        { index: 1, characterCode: "CHAR-8", kind: "identity", source: "r2" },
+      ],
+    });
+    expect(info.mock.calls[1]?.[1]).toMatchObject({
+      assets: [
+        { index: 0, characterCode: "CHAR-6", role: "reference_image", mimeType: "image/png" },
+        { index: 1, characterCode: "CHAR-8", role: "reference_image", mimeType: "image/png" },
+      ],
+    });
+    const serializedLog = JSON.stringify(info.mock.calls);
+    expect(serializedLog).not.toContain("private/twong");
+    expect(serializedLog).not.toContain("private/manju");
+    expect(serializedLog).not.toContain(png.toString("base64"));
+    expect(serializedLog).not.toContain("data:image");
+  });
 });

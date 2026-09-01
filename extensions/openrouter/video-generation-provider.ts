@@ -14,6 +14,7 @@ import {
   waitProviderOperationPollInterval,
 } from "openclaw/plugin-sdk/provider-http";
 import { readResponseWithLimit } from "openclaw/plugin-sdk/response-limit-runtime";
+import { createSubsystemLogger } from "openclaw/plugin-sdk/runtime-env";
 import { isRecord, normalizeOptionalString } from "openclaw/plugin-sdk/string-coerce-runtime";
 import type {
   GeneratedVideoAsset,
@@ -43,6 +44,7 @@ const SUPPORTED_DURATION_SECONDS = [4, 6, 8] as const;
 // Runtime sets this after normalizing against live model capabilities.
 const SUPPORTED_DURATIONS_HINT = Symbol.for("openclaw.videoGeneration.supportedDurations");
 const SUPPORTED_RESOLUTIONS = ["720P", "1080P"] as const;
+const log = createSubsystemLogger("openrouter/video");
 
 type OpenRouterVideoResponse = {
   id?: string;
@@ -137,12 +139,22 @@ function toImagePart(asset: VideoGenerationSourceAsset): OpenRouterImagePart {
   };
 }
 
-function buildImageInputs(inputImages: VideoGenerationSourceAsset[] | undefined): {
+type OpenRouterImageInputs = {
   frameImages: OpenRouterFrameImagePart[];
   inputReferences: OpenRouterImagePart[];
-} {
+  // Assets are carried alongside the serialized parts so the diagnostic summary
+  // can report roles/MIME without re-encoding every image into a data URL.
+  frameAssets: VideoGenerationSourceAsset[];
+  referenceAssets: VideoGenerationSourceAsset[];
+};
+
+function buildImageInputs(
+  inputImages: VideoGenerationSourceAsset[] | undefined,
+): OpenRouterImageInputs {
   const frameImages: OpenRouterFrameImagePart[] = [];
   const inputReferences: OpenRouterImagePart[] = [];
+  const frameAssets: VideoGenerationSourceAsset[] = [];
+  const referenceAssets: VideoGenerationSourceAsset[] = [];
   let hasFirstFrame = false;
   let hasLastFrame = false;
 
@@ -150,6 +162,7 @@ function buildImageInputs(inputImages: VideoGenerationSourceAsset[] | undefined)
     const role = normalizeOptionalString(image.role);
     if (role === "reference_image") {
       inputReferences.push(toImagePart(image));
+      referenceAssets.push(image);
       continue;
     }
 
@@ -164,18 +177,102 @@ function buildImageInputs(inputImages: VideoGenerationSourceAsset[] | undefined)
 
     if (frameType === "first_frame" && !hasFirstFrame) {
       frameImages.push({ ...toImagePart(image), frame_type: "first_frame" });
+      frameAssets.push(image);
       hasFirstFrame = true;
       continue;
     }
     if (frameType === "last_frame" && !hasLastFrame) {
       frameImages.push({ ...toImagePart(image), frame_type: "last_frame" });
+      frameAssets.push(image);
       hasLastFrame = true;
       continue;
     }
     inputReferences.push(toImagePart(image));
+    referenceAssets.push(image);
   }
 
-  return { frameImages, inputReferences };
+  return { frameImages, inputReferences, frameAssets, referenceAssets };
+}
+
+function readCorrelationId(inputImages: VideoGenerationSourceAsset[] | undefined): string {
+  for (const image of inputImages ?? []) {
+    const value = normalizeOptionalString(image.metadata?.correlationId);
+    if (value) {
+      return value;
+    }
+  }
+  return "unavailable";
+}
+
+function buildSafePayloadSummary(
+  req: VideoGenerationRequest,
+  model: string,
+  body: Record<string, unknown>,
+  imageInputs: OpenRouterImageInputs,
+) {
+  const { frameImages, frameAssets, referenceAssets } = imageInputs;
+  const identityReferences = referenceAssets.filter(
+    (asset) => normalizeOptionalString(asset.role) === "reference_image",
+  );
+  // Routing tripwire: identity assets must reach `input_references`, never
+  // `frame_images`, so this count staying 0 is the signal the split still holds.
+  const identityFrames = frameAssets.filter(
+    (asset) => normalizeOptionalString(asset.role) === "reference_image",
+  );
+  return {
+    correlationId: readCorrelationId(req.inputImages),
+    model,
+    duration: body.duration,
+    resolution: body.resolution,
+    aspectRatio: body.aspect_ratio,
+    inputReferencesCount: referenceAssets.length,
+    inputReferences: referenceAssets.map((asset, index) => ({
+      index,
+      mimeType: asset.mimeType,
+      role: asset.role,
+      source:
+        normalizeOptionalString(asset.metadata?.source) ??
+        (asset.buffer ? "buffer" : asset.url ? "url" : "unknown"),
+      characterCode: asset.metadata?.characterCode,
+      characterPageId: asset.metadata?.characterPageId,
+    })),
+    firstFramePresent: frameImages.some((image) => image.frame_type === "first_frame"),
+    lastFramePresent: frameImages.some((image) => image.frame_type === "last_frame"),
+    frameImagesCount: frameImages.length,
+    characterIdentityInputReferencesCount: identityReferences.length,
+    characterIdentityFrameImagesCount: identityFrames.length,
+  };
+}
+
+type ProviderErrorDiagnostic = { code?: string; message?: string };
+
+function readProviderErrorDiagnostic(payload: unknown): ProviderErrorDiagnostic {
+  if (!isRecord(payload)) {
+    return {};
+  }
+  const error = isRecord(payload.error) ? payload.error : payload;
+  const metadata = isRecord(error.metadata) ? error.metadata : undefined;
+  const raw = normalizeOptionalString(metadata?.raw);
+  if (raw) {
+    try {
+      const nested = readProviderErrorDiagnostic(JSON.parse(raw));
+      if (nested.code || nested.message) {
+        return nested;
+      }
+    } catch {
+      // The provider-owned raw field is optional diagnostic data, not the response contract.
+    }
+  }
+  const code =
+    normalizeOptionalString(error.code) ??
+    (typeof error.code === "number" && Number.isFinite(error.code)
+      ? String(error.code)
+      : undefined);
+  const message = normalizeOptionalString(error.message);
+  return {
+    ...(code ? { code } : {}),
+    ...(message ? { message: message.slice(0, 1_000) } : {}),
+  };
 }
 
 function resolveDurationSeconds(
@@ -269,8 +366,12 @@ function resolveSeed(seed: unknown): number | undefined {
   return seed;
 }
 
-function buildRequestBody(req: VideoGenerationRequest, model: string): Record<string, unknown> {
-  const { frameImages, inputReferences } = buildImageInputs(req.inputImages);
+function buildRequestBody(
+  req: VideoGenerationRequest,
+  model: string,
+  imageInputs: OpenRouterImageInputs,
+): Record<string, unknown> {
+  const { frameImages, inputReferences } = imageInputs;
   const supportedDurations =
     (req as VideoGenerationRequest & { [SUPPORTED_DURATIONS_HINT]?: readonly number[] })[
       SUPPORTED_DURATIONS_HINT
@@ -550,10 +651,14 @@ export function buildOpenRouterVideoGenerationProvider(): VideoGenerationProvide
         timeoutMs: req.timeoutMs,
         label: "OpenRouter video generation",
       });
+      const imageInputs = buildImageInputs(req.inputImages);
+      const body = buildRequestBody(req, model, imageInputs);
+      const payloadSummary = buildSafePayloadSummary(req, model, body, imageInputs);
+      log.info("OpenRouter video request serialization", payloadSummary);
       const { response, release } = await postJsonRequest({
         url: `${baseUrl}/videos`,
         headers,
-        body: buildRequestBody(req, model),
+        body,
         timeoutMs: resolveProviderOperationTimeoutMs({
           deadline,
           defaultTimeoutMs: DEFAULT_HTTP_TIMEOUT_MS,
@@ -565,6 +670,21 @@ export function buildOpenRouterVideoGenerationProvider(): VideoGenerationProvide
       });
 
       try {
+        if (!response.ok) {
+          const providerError = await readProviderJsonResponse<unknown>(
+            response.clone(),
+            "OpenRouter video failure diagnostic",
+          )
+            .then(readProviderErrorDiagnostic)
+            .catch((): ProviderErrorDiagnostic => ({}));
+          log.error("OpenRouter video request failed", {
+            correlationId: payloadSummary.correlationId,
+            httpStatus: response.status,
+            providerErrorCode: providerError.code,
+            providerErrorMessage: providerError.message,
+            payloadSummary,
+          });
+        }
         await assertOkOrThrowHttpError(response, "OpenRouter video generation failed");
         const submitted = readOpenRouterVideoResponse(await readOpenRouterVideoJson(response));
         const jobId = normalizeOptionalString(submitted.id);
