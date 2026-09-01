@@ -316,13 +316,12 @@ describe("a newly cast storyboard request opens a new project", () => {
     await h.send("ใช้ Twong กับ Twong2 ให้ Twong เดินผ่าน Twong2 15 วิ แนวตั้ง");
 
     // Without the save-time invalidation the 30s name memo still serves the
-    // pre-Manju list, so Manju is dropped and the request reduces to {Twong} --
-    // a STRICT SUBSET of the frozen cast. That must NOT open a new project
-    // cast with Twong alone; it falls through to the lock guard and fails
-    // loudly, which is the safe outcome.
+    // pre-Manju list. The natural-story path must identify Manju as unresolved
+    // before project resolution rather than silently reducing the cast to the
+    // strict subset {Twong} and opening new work with it.
     h.saveCharacterWithoutInvalidation("Manju", 12);
     const partial = await h.send(PRODUCTION_MESSAGE);
-    expect(partial?.text).toContain("สร้าง Storyboard ไม่สำเร็จ");
+    expect(partial?.text).toContain('ไม่พบตัวละคร "Manju"');
     expect(h.createdProjects.length).toBe(1);
     expect(await h.lockedCasts()).toEqual([["CHAR-6", "CHAR-7"]]);
   });

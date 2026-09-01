@@ -226,6 +226,16 @@ function codes(sequence: readonly number[]): () => number {
 }
 
 describe("G/H. the cost guard decides, and it fails closed", () => {
+  it("allows the flagship quote under an account-scoped $10 ceiling", async () => {
+    const h = harness({ maxEstimatedCostUsd: 10 });
+    const result = await prepareLineStoryboardVideoDraft(request(), h.deps);
+    expect(result).toMatchObject({
+      kind: "created",
+      modelId: "bytedance/seedance-2.5",
+      maxAllowedUsd: 10,
+    });
+  });
+
   it("refuses the flagship job under the global $2 default", async () => {
     const h = harness();
     const result = await prepareLineStoryboardVideoDraft(request(), h.deps);
