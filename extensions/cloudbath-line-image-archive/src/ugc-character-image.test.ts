@@ -117,6 +117,7 @@ describe("UGC latest-image character workflow", () => {
       error: vi.fn(),
     } satisfies SafeLogger;
     const latestImages = memoryStore<LatestCharacterImage>();
+    const onCharacterSaved = vi.fn();
     const workflow = new UgcCharacterImageWorkflow(
       registry as never,
       latestImages,
@@ -134,8 +135,10 @@ describe("UGC latest-image character workflow", () => {
       logger,
       "https://cloudbath.example",
       () => Date.UTC(2026, 7, 26),
+      undefined,
+      onCharacterSaved,
     );
-    return { workflow, r2, notion, ensureObjectInputs, latestImages, logger };
+    return { workflow, r2, notion, ensureObjectInputs, latestImages, logger, onCharacterSaved };
   }
 
   function job(groupId = "C-ugc", userId = "U-owner"): InboundImageJob {
@@ -160,6 +163,17 @@ describe("UGC latest-image character workflow", () => {
     ["เปลี่ยนรูปตัวละคร Kerver เป็นรูปล่าสุด", "update"],
   ] as const)("parses %s", (content, mode) => {
     expect(parseUgcCharacterImageCommand(content)).toEqual({ mode, name: "Kerver" });
+  });
+
+  it.each([
+    "บันทึกตัวละคร Manju พร้อมรูปนี้",
+    "เซฟรูปนี้เป็นตัวละคร Manju",
+    "เก็บรูปนี้ไว้เป็น Manju",
+    "ตัวนี้ชื่อ Manju บันทึกไว้เป็นตัวละคร",
+    "เพิ่มตัวละครชื่อ Manju ใช้รูปนี้เป็นภาพอ้างอิง",
+    "จำรูปนี้เป็นตัวละครชื่อ Manju",
+  ])("parses natural Character-save request %s", (content) => {
+    expect(parseUgcCharacterImageCommand(content)).toEqual({ mode: "upsert", name: "Manju" });
   });
 
   it.each(["สร้างลิงก์ถาวรให้ตัวละคร CHAR-6", "create permanent link for character CHAR-6"])(
@@ -308,6 +322,100 @@ describe("UGC latest-image character workflow", () => {
     expect(save?.text).toContain("บันทึกตัวละครเรียบร้อย");
     expect(r2.ensureObject).toHaveBeenCalledOnce();
   });
+
+  it("saves a remembered production-shaped image from a natural request", async () => {
+    const { workflow, notion, r2, onCharacterSaved } = harness();
+    await workflow.rememberImage(job());
+
+    const result = await workflow.handleBeforeDispatch(
+      {
+        content: "บันทึกตัวละคร Manju พร้อมรูปนี้",
+        senderId: "U-owner",
+        senderIsOwner: true,
+        isGroup: true,
+      },
+      { channelId: "line", accountId: "primary", conversationId: "line:group:C-ugc" },
+    );
+
+    expect(result).toMatchObject({ handled: true });
+    expect(result?.text).toContain("Name: Manju");
+    expect(result?.text).toContain("Character ID: CHAR-5");
+    expect(r2.ensureObject).toHaveBeenCalledOnce();
+    expect(notion.saveCharacterAsset).toHaveBeenCalledWith(
+      expect.objectContaining({ nameOrCode: "Manju", mode: "upsert" }),
+    );
+    await expect(notion.saveCharacterAsset.mock.results[0]?.value).resolves.toMatchObject({
+      characterId: "CHAR-5",
+      pageId: "character-page",
+    });
+    expect(onCharacterSaved).toHaveBeenCalledOnce();
+  });
+
+  it("asks for an image instead of letting a natural mutation reach general chat", async () => {
+    const { workflow, notion, r2 } = harness();
+    const result = await workflow.handleBeforeDispatch(
+      {
+        content: "บันทึกตัวละคร Manju พร้อมรูปนี้",
+        senderId: "U-owner",
+        senderIsOwner: true,
+        isGroup: true,
+      },
+      { channelId: "line", accountId: "primary", conversationId: "line:group:C-ugc" },
+    );
+    expect(result).toMatchObject({ handled: true });
+    expect(result?.text).toContain("กรุณาส่งรูปก่อน");
+    expect(notion.saveCharacterAsset).not.toHaveBeenCalled();
+    expect(r2.ensureObject).not.toHaveBeenCalled();
+  });
+
+  it("never confirms success when the Character Library write fails", async () => {
+    const { workflow, notion, onCharacterSaved } = harness();
+    await workflow.rememberImage(job());
+    notion.saveCharacterAsset.mockRejectedValueOnce(new Error("Notion unavailable"));
+    const result = await workflow.handleBeforeDispatch(
+      {
+        content: "บันทึกตัวละคร Manju พร้อมรูปนี้",
+        senderId: "U-owner",
+        senderIsOwner: true,
+        isGroup: true,
+      },
+      { channelId: "line", accountId: "primary", conversationId: "line:group:C-ugc" },
+    );
+    expect(result).toMatchObject({ handled: true });
+    expect(result?.text).toContain("บันทึกตัวละครไม่สำเร็จ");
+    expect(result?.text).not.toContain("เรียบร้อย");
+    expect(onCharacterSaved).not.toHaveBeenCalled();
+  });
+
+  it.each(["บันทึกรูปนี้เป็นตัวละคร", "เพิ่มตัวละคร ใช้รูปนี้เป็นภาพอ้างอิง"])(
+    "fails closed for an incomplete Character mutation: %s",
+    async (content) => {
+      const { workflow, notion, r2 } = harness();
+      await workflow.rememberImage(job());
+      const result = await workflow.handleBeforeDispatch(
+        { content, senderId: "U-owner", senderIsOwner: true, isGroup: true },
+        { channelId: "line", accountId: "primary", conversationId: "line:group:C-ugc" },
+      );
+      expect(result).toMatchObject({ handled: true });
+      expect(result?.text).toContain("ชื่อตัวละคร");
+      expect(notion.saveCharacterAsset).not.toHaveBeenCalled();
+      expect(r2.ensureObject).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["Manju เป็นตัวละครที่น่ารัก", "ช่วยอธิบายรูปนี้ของ Manju"])(
+    "does not treat ordinary discussion as a Character save: %s",
+    async (content) => {
+      const { workflow, notion, r2 } = harness();
+      const result = await workflow.handleBeforeDispatch(
+        { content, senderId: "U-owner", senderIsOwner: true, isGroup: true },
+        { channelId: "line", accountId: "primary", conversationId: "line:group:C-ugc" },
+      );
+      expect(result).toBeUndefined();
+      expect(notion.saveCharacterAsset).not.toHaveBeenCalled();
+      expect(r2.ensureObject).not.toHaveBeenCalled();
+    },
+  );
 
   it("acknowledges another participant's image without replacing the owner's latest image", async () => {
     const { workflow, latestImages } = harness();
