@@ -6,6 +6,7 @@ import {
 import { ugcDraftScopeKey } from "../../cloudbath-line-image-archive/src/ugc-workflow.js";
 import {
   materializeLineVideoUgcReferences,
+  orderLineVideoUgcReferences,
   resolveCloudbathUgcCapabilities,
   validateLineVideoUgcScope,
   type LineGroupPolicyBinding,
@@ -246,5 +247,69 @@ describe("LINE Cloudbath UGC scope", () => {
     });
     expect(assets).toHaveLength(2);
     expect(callOrder).toEqual(["identity", "style"]);
+    expect(assets[0]).toMatchObject({ role: "reference_image", mimeType: "image/png" });
+  });
+
+  it.each([
+    ["JPEG", Buffer.from([0xff, 0xd8, 0xff, 0x00]), "image/jpeg"],
+    [
+      "WebP",
+      Buffer.from([0x52, 0x49, 0x46, 0x46, 0x00, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50]),
+      "image/webp",
+    ],
+  ])("preserves %s MIME metadata on identity references", async (_label, bytes, mimeType) => {
+    const assets = await materializeLineVideoUgcReferences(SCOPE, {
+      env: {
+        R2_ACCOUNT_ID: "account",
+        R2_ACCESS_KEY_ID: "test-access",
+        R2_SECRET_ACCESS_KEY: "test-secret",
+        R2_BUCKET_NAME: "existing-bucket",
+      },
+      s3Client: {
+        send: vi.fn(async () => ({
+          ContentLength: bytes.byteLength,
+          Body: { transformToByteArray: async () => bytes },
+        })),
+      },
+      guardedFetch: vi.fn(async () => ({
+        response: new Response(bytes, { status: 200 }),
+        release: vi.fn(async () => {}),
+      })) as never,
+    });
+
+    expect(assets[0]).toMatchObject({ role: "reference_image", mimeType });
+  });
+
+  it("preserves the frozen Character reference order", () => {
+    const twong = {
+      kind: "identity" as const,
+      source: "r2" as const,
+      locator: "characters/CHAR-6/twong.png",
+    };
+    const manju = {
+      kind: "identity" as const,
+      source: "r2" as const,
+      locator: "characters/CHAR-8/manju.png",
+    };
+    const scope: LineVideoUgcScope = {
+      ...SCOPE,
+      characterLocks: [
+        {
+          ...SCOPE.characterLocks[0]!,
+          code: "CHAR-6",
+          pageId: "twong",
+          identityReferences: [twong],
+        },
+        {
+          ...SCOPE.characterLocks[0]!,
+          code: "CHAR-8",
+          pageId: "manju",
+          identityReferences: [manju],
+        },
+      ],
+      referenceAssets: [manju, twong],
+    };
+
+    expect(orderLineVideoUgcReferences(scope)).toEqual([twong, manju]);
   });
 });
