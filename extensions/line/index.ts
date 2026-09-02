@@ -269,6 +269,10 @@ export default defineBundledChannelEntry({
             cfg: getRuntimeConfig(),
             accountId: request.accountId,
           }).config,
+          // The SAME store the video-model picker writes, so a storyboard
+          // quote binds the model the owner actually chose for this
+          // conversation rather than the built-in default.
+          preferenceStore: videoModelPreferenceStore,
         });
       },
     });

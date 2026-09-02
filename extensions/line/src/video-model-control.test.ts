@@ -392,3 +392,98 @@ describe("resolveLineVideoModelPreference reused by the router", () => {
     );
   });
 });
+
+/**
+ * Live-catalog picker: fuzzy candidates, refinement while the picker is open,
+ * and the isolation guarantees that keep this disjoint from chat-model switching.
+ */
+describe("createLineVideoModelControlRouter — live fuzzy picker", () => {
+  const MINIMAX = [
+    seedanceModel({ id: "minimax/hailuo-h3", name: "MiniMax: Hailuo H3" }),
+    seedanceModel({ id: "minimax/hailuo-h3-fast", name: "MiniMax: Hailuo H3 Fast" }),
+    seedanceModel({ id: "minimax/hailuo-02", name: "MiniMax: Hailuo 02" }),
+    seedanceModel(),
+    seedanceModel({ id: "kuaishou/kling-2.1", name: "Kling 2.1" }),
+  ];
+
+  async function openPicker() {
+    const fixture = createRouterFixture({ models: MINIMAX });
+    const reply = await fixture.router(
+      baseEvent({ content: "เปลี่ยน video model เป็น minimax h3" }),
+      CTX,
+    );
+    return { ...fixture, reply };
+  }
+
+  it("A: offers only MiniMax candidates and applies nothing yet", async () => {
+    const { reply, preferenceStore } = await openPicker();
+
+    expect(reply?.handled).toBe(true);
+    expect(reply?.text).toContain("minimax h3");
+    expect(reply?.text).toContain("MiniMax: Hailuo H3");
+    expect(reply?.text).not.toContain("Kling");
+    expect(reply?.text).not.toContain("Seedance");
+    // Ambiguous never auto-applies onto the paid path.
+    expect(await preferenceStore.lookup("acct-1|grp-a")).toBeUndefined();
+  });
+
+  it("D: textual refinement while the picker is open stays inside the picker", async () => {
+    const { router, preferenceStore } = await openPicker();
+
+    // No "video model" wording at all — this used to fall through to chat.
+    const refined = await router(baseEvent({ content: "MiniMax: Hailuo H3" }), CTX);
+
+    expect(refined?.handled).toBe(true);
+    expect(refined?.text).toContain("MiniMax: Hailuo H3");
+    expect((await preferenceStore.lookup("acct-1|grp-a"))?.model).toBe("minimax/hailuo-h3");
+  });
+
+  it("E: a numeric reply persists the real OpenRouter id", async () => {
+    const { router, preferenceStore, pendingStore } = await openPicker();
+    const pending = (await pendingStore.entries())[0]?.value;
+    const expected = pending?.candidates[1]?.id;
+
+    const chosen = await router(baseEvent({ content: "2" }), CTX);
+
+    expect(chosen?.handled).toBe(true);
+    expect(expected).toMatch(/^minimax\//u);
+    expect((await preferenceStore.lookup("acct-1|grp-a"))?.model).toBe(expected);
+  });
+
+  it("K: another owner or group never sees this picker", async () => {
+    const { router, preferenceStore } = await openPicker();
+
+    const otherGroup = await router(baseEvent({ content: "MiniMax: Hailuo H3" }), {
+      accountId: "acct-1",
+      conversationId: "grp-b",
+    });
+    const nonOwner = await router(
+      baseEvent({ content: "MiniMax: Hailuo H3", senderIsOwner: false }),
+      CTX,
+    );
+
+    expect(otherGroup).toBeUndefined();
+    expect(nonOwner).toBeUndefined();
+    expect(await preferenceStore.lookup("acct-1|grp-b")).toBeUndefined();
+  });
+
+  it("L: ordinary chat is untouched, with and without a picker open", async () => {
+    const fresh = createRouterFixture({ models: MINIMAX });
+    expect(await fresh.router(baseEvent({ content: "สวัสดีครับ" }), CTX)).toBeUndefined();
+    expect(await fresh.router(baseEvent({ content: "เปลี่ยนเป็น gemini หน่อย" }), CTX)).toBeUndefined();
+
+    const { router } = await openPicker();
+    // A picker being open must not turn unrelated chat into a model answer.
+    expect(await router(baseEvent({ content: "วันนี้อากาศดีนะ" }), CTX)).toBeUndefined();
+    expect(await router(baseEvent({ content: "เปลี่ยนเป็น gemini หน่อย" }), CTX)).toBeUndefined();
+  });
+
+  it("applies a confident exact request without asking", async () => {
+    const { router, preferenceStore } = createRouterFixture({ models: MINIMAX });
+
+    const reply = await router(baseEvent({ content: "video model Seedance 2.5" }), CTX);
+
+    expect(reply?.text).toContain("Seedance 2.5");
+    expect((await preferenceStore.lookup("acct-1|grp-a"))?.model).toBe("bytedance/seedance-2.5");
+  });
+});
