@@ -407,7 +407,12 @@ export function createLineVideoConfirmationGate(params: {
       return { handled: true, text: "ไม่พบ video draft นี้ หรือถูกใช้ไปแล้ว" };
     }
     const confirmationTime = (params.now ?? Date.now)();
-    if (draft.expiresAt <= confirmationTime || draft.status !== "pending") {
+    // A superseded tombstone is handled after authorization below; every other
+    // non-pending status is spent or expired and stops here.
+    if (
+      draft.expiresAt <= confirmationTime ||
+      (draft.status !== "pending" && draft.status !== "superseded")
+    ) {
       return { handled: true, text: "video draft นี้หมดอายุแล้ว กรุณาสร้างใหม่" };
     }
 
@@ -424,6 +429,19 @@ export function createLineVideoConfirmationGate(params: {
       draft.ownerSenderId !== senderId
     ) {
       return { handled: true, text: "video draft นี้ไม่ตรงกับบทสนทนานี้" };
+    }
+
+    // Placed AFTER the binding check on purpose: the replacement is a LIVE
+    // code, so only the owner this one belongs to may be handed it. Read only,
+    // never consumed, so a repeated confirmation keeps pointing at the new
+    // code and the exactly-once consume below is untouched.
+    if (draft.status === "superseded") {
+      return {
+        handled: true,
+        text: draft.supersededByDraftId
+          ? `draft นี้ถูกแทนที่แล้ว กรุณายืนยันด้วยรหัสล่าสุด:\nยืนยัน VIDEO ${draft.supersededByDraftId}`
+          : "draft นี้ถูกแทนที่แล้ว กรุณาใช้รหัส VIDEO ล่าสุด",
+      };
     }
 
     const cfg = getRuntimeConfig();

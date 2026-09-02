@@ -3,6 +3,10 @@ import {
   applyStoryboardTimeRangeEdit,
   type StoryboardTimeRangeEdit,
 } from "./storyboard-compiler.js";
+import {
+  applyStoryboardDocumentRevision,
+  type StoryboardDocumentRevision,
+} from "./storyboard-revision.js";
 import type {
   StoryboardAccessClaim,
   StoryboardDocument,
@@ -121,15 +125,28 @@ export class StoryboardStore {
     edit: StoryboardTimeRangeEdit;
     baseVersionNumber?: number;
   }): Promise<StoryboardVersion> {
-    const head = await this.requireHead(params.storyboardId, params.claim);
-    const baseNumber = params.baseVersionNumber ?? head.latestVersionNumber;
-    const base = await this.deps.versions.lookup(
-      storyboardVersionKey(params.storyboardId, baseNumber),
+    return await this.appendDocument(
+      params.storyboardId,
+      params.claim,
+      params.baseVersionNumber,
+      (document) => applyStoryboardTimeRangeEdit(document, params.edit),
     );
+  }
+
+  /** Shared append: read the base version, transform it, claim the next slot. */
+  private async appendDocument(
+    storyboardId: string,
+    claim: StoryboardAccessClaim,
+    baseVersionNumber: number | undefined,
+    transform: (document: StoryboardDocument) => StoryboardDocument,
+  ): Promise<StoryboardVersion> {
+    const head = await this.requireHead(storyboardId, claim);
+    const baseNumber = baseVersionNumber ?? head.latestVersionNumber;
+    const base = await this.deps.versions.lookup(storyboardVersionKey(storyboardId, baseNumber));
     if (!base) {
       throw new Error("Storyboard base version does not exist");
     }
-    const document = applyStoryboardTimeRangeEdit(base.document, params.edit);
+    const document = transform(base.document);
     const versionNumber = head.latestVersionNumber + 1;
     const updatedAt = new Date(this.deps.now()).toISOString();
     const version: StoryboardVersion = Object.freeze({
@@ -143,17 +160,37 @@ export class StoryboardStore {
     // without this the second would overwrite the first and lose an edit the
     // owner believes was saved.
     const claimed = await this.deps.versions.registerIfAbsent(
-      storyboardVersionKey(params.storyboardId, versionNumber),
+      storyboardVersionKey(storyboardId, versionNumber),
       version,
     );
     if (!claimed) {
       throw new Error("Storyboard version was written concurrently; retry the edit");
     }
     await this.deps.heads.register(
-      storyboardHeadKey(params.storyboardId),
+      storyboardHeadKey(storyboardId),
       Object.freeze({ ...head, latestVersionNumber: versionNumber, updatedAt }),
     );
     return version;
+  }
+
+  /**
+   * Appends a document-level revision as a new version.
+   *
+   * Shares `appendEdit`'s slot claim so two concurrent revisions cannot
+   * overwrite one another; only the transform differs.
+   */
+  async appendRevision(params: {
+    storyboardId: string;
+    claim: StoryboardAccessClaim;
+    revision: StoryboardDocumentRevision;
+    baseVersionNumber?: number;
+  }): Promise<StoryboardVersion> {
+    return await this.appendDocument(
+      params.storyboardId,
+      params.claim,
+      params.baseVersionNumber,
+      (document) => applyStoryboardDocumentRevision(document, params.revision),
+    );
   }
 
   /** Owner-scoped read of the latest version. */

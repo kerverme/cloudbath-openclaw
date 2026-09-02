@@ -5,6 +5,7 @@ import {
   createLineVideoDraft,
   generateLineVideoDraftId,
   LINE_VIDEO_DRAFT_TTL_MS,
+  supersedeLineVideoDraftsForStoryboard,
   type LineVideoDraft,
 } from "./video-draft-store.js";
 
@@ -149,5 +150,83 @@ describe("createLineVideoDraft / consumeLineVideoDraft", () => {
     const store = createMemoryStore();
     const result = await consumeLineVideoDraft({ store, draftId: "0000" });
     expect(result).toEqual({ kind: "not_found" });
+  });
+});
+
+describe("supersedeLineVideoDraftsForStoryboard", () => {
+  const NOW = Date.parse("2026-09-02T10:00:00.000Z");
+
+  /** Four drafts across two owners/groups, two of them on the same storyboard. */
+  async function seeded() {
+    const store = createMemoryStore();
+    const make = async (code: number, over: Partial<Parameters<typeof createLineVideoDraft>[0]>) =>
+      await createLineVideoDraft({
+        ...draftParams({ store, now: () => NOW, randomDraftCode: () => code, ...over }),
+        store,
+      });
+    await make(1111, { storyboardId: "SB-1" });
+    await make(2222, { storyboardId: "SB-2" });
+    await make(3333, { storyboardId: "SB-1", ownerSenderId: "U-other" });
+    await make(4444, { storyboardId: "SB-1", conversationKey: "acct-1|grp-b" });
+    return store;
+  }
+
+  it("retires only the same storyboard in the same owner scope", async () => {
+    const store = await seeded();
+
+    const superseded = await supersedeLineVideoDraftsForStoryboard({
+      store,
+      accountId: "acct-1",
+      conversationKey: "acct-1|grp-a",
+      ownerSenderId: "U-owner",
+      storyboardId: "SB-1",
+      supersededByDraftId: "9000",
+      now: () => NOW,
+    });
+
+    expect(superseded).toEqual(["1111"]);
+    expect(await store.lookup("1111")).toMatchObject({
+      status: "superseded",
+      supersededByDraftId: "9000",
+    });
+    // A different storyboard, a different owner and a different group are all
+    // untouched: new work never invalidates someone else's pending code.
+    for (const code of ["2222", "3333", "4444"]) {
+      expect(await store.lookup(code), code).toMatchObject({ status: "pending" });
+    }
+  });
+
+  it("never retires the replacement itself", async () => {
+    const store = await seeded();
+
+    const superseded = await supersedeLineVideoDraftsForStoryboard({
+      store,
+      accountId: "acct-1",
+      conversationKey: "acct-1|grp-a",
+      ownerSenderId: "U-owner",
+      storyboardId: "SB-1",
+      supersededByDraftId: "1111",
+      now: () => NOW,
+    });
+
+    expect(superseded).toEqual([]);
+    expect(await store.lookup("1111")).toMatchObject({ status: "pending" });
+  });
+
+  it("leaves an already-expired code alone rather than resurrecting its row", async () => {
+    const store = await seeded();
+
+    const superseded = await supersedeLineVideoDraftsForStoryboard({
+      store,
+      accountId: "acct-1",
+      conversationKey: "acct-1|grp-a",
+      ownerSenderId: "U-owner",
+      storyboardId: "SB-1",
+      supersededByDraftId: "9000",
+      now: () => NOW + LINE_VIDEO_DRAFT_TTL_MS + 1,
+    });
+
+    expect(superseded).toEqual([]);
+    expect(await store.lookup("1111")).toMatchObject({ status: "pending" });
   });
 });

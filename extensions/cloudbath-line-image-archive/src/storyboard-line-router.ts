@@ -14,6 +14,18 @@
 
 import type { PrevisProjectResolver } from "./previs-line-router.js";
 import { compileStoryboardDocument } from "./storyboard-compiler.js";
+import {
+  applyDirectorAnswer,
+  closeDirectorSession,
+  DIRECTOR_QUESTION,
+  directorScenePrompt,
+  nextDirectorSlot,
+  openDirectorSession,
+  ownsDirectorSession,
+  parseDirectorAnswer,
+  storyboardDirectorKey,
+  type StoryboardDirectorSession,
+} from "./storyboard-director.js";
 import { buildStoryboardDraftScope } from "./storyboard-draft-scope.js";
 import { formatFinalVideoDraftForLine, formatStoryboardForLine } from "./storyboard-format.js";
 import { parseStoryboardIntent, type StoryboardIntent } from "./storyboard-intent.js";
@@ -26,6 +38,7 @@ import {
   STORYBOARD_DEFAULT_RESOLUTION,
   STORYBOARD_MAX_DURATION_SECONDS,
 } from "./storyboard-request.js";
+import type { StoryboardCastAddition, StoryboardDocumentRevision } from "./storyboard-revision.js";
 import { activeStoryboardKey, StoryboardStore } from "./storyboard-store.js";
 import {
   STORYBOARD_ASPECT_RATIOS,
@@ -106,6 +119,12 @@ export type StoryboardLineRouterDeps = Readonly<{
   paidDraftRuntime?: StoryboardPaidDraftRuntime | null;
   planner?: StoryboardLlmPlanner;
   /**
+   * Where an in-progress natural request waits for its missing answers.
+   * Absent, the flow keeps its shipped behaviour: a request that names no
+   * dimensions is simply not claimed.
+   */
+  director?: AsyncKeyedStore<StoryboardDirectorSession>;
+  /**
    * Where the paid gate reads a confirmed draft's workspace scope. Absent, a
    * storyboard draft is still prepared but cannot be confirmed in a UGC group.
    */
@@ -119,7 +138,20 @@ const REPLY = {
   emptyAction: "กรุณาระบุสิ่งที่ต้องการให้เกิดขึ้นในช่วงเวลานั้น",
   conflict: "มีการแก้ Storyboard พร้อมกัน กรุณาลองอีกครั้ง",
   missingVersion: "ไม่พบ Storyboard ล่าสุด กรุณาสร้างใหม่",
+  directorCancelled: "ยกเลิกคำขอวิดีโอแล้ว",
+  directorUnavailable: "ยังไม่สามารถรับคำขอแบบสนทนาได้ กรุณาระบุความยาว เช่น 10 วิ",
 } as const;
+
+/** Only the newest code is confirmable; an older one describes a stale plan. */
+const SUPERSEDED_NOTE = "หมายเหตุ: ใช้รหัส VIDEO ล่าสุดนี้เท่านั้น รหัสก่อนหน้าถือว่ายกเลิก";
+
+function castAddedReply(names: readonly string[]): string {
+  return `"${names.join(", ")}" ยังไม่อยู่ในโปรเจกต์นี้ จึงเริ่มงานใหม่ให้แทน (โปรเจกต์เดิมยังอยู่)`;
+}
+
+function durationTooLongAnswerReply(seconds: number): string {
+  return `${durationTooLongReply(seconds)} กรุณาระบุใหม่`;
+}
 
 function unknownCharacterReply(name: string): string {
   return `ไม่พบตัวละคร "${name}" ใน Character Library`;
@@ -218,6 +250,18 @@ export class CloudbathStoryboardLineRouter {
       return undefined;
     }
 
+    // A pending question is answered before anything is classified, because the
+    // answer ("10 วิ", "ไม่มี") is deliberately too weak to be an intent on its
+    // own. An unrelated message still parses normally: only a reply that
+    // actually answers the OPEN slot is claimed here.
+    const openRequest = await this.readDirector(claim);
+    if (openRequest) {
+      const answered = await this.answerDirector(event, claim, openRequest);
+      if (answered) {
+        return { handled: true, text: answered };
+      }
+    }
+
     const knownCharacterNames = await this.deps.resolver
       .listCharacterNames(claim)
       .catch(() => [] as readonly string[]);
@@ -225,10 +269,16 @@ export class CloudbathStoryboardLineRouter {
     if (!intent) {
       return undefined;
     }
-    // An edit or a draft request without an active storyboard is not ours: it
-    // must fall through so the existing previs routing keeps working.
+    // An edit, revision or draft request without an active storyboard is not
+    // ours: it must fall through so the existing previs routing keeps working.
     const active = await this.readActive(claim);
-    if (intent.kind !== "create" && !active) {
+    if (intent.kind !== "create" && intent.kind !== "director_open" && !active) {
+      return undefined;
+    }
+    // While a storyboard is active a bare natural request is ambiguous between
+    // a tweak and new work, so it keeps its shipped behaviour of not being
+    // claimed. The owner revises the active one, or names a cast to start new.
+    if (intent.kind === "director_open" && (active || !this.deps.director)) {
       return undefined;
     }
     // With a storyboard already active, only an EXPLICIT casting instruction
@@ -285,6 +335,12 @@ export class CloudbathStoryboardLineRouter {
     }
     if (intent.kind === "natural_edit") {
       return await this.naturalEdit(intent, claim, active!);
+    }
+    if (intent.kind === "director_open") {
+      return await this.openDirector(intent, claim);
+    }
+    if (intent.kind === "revision") {
+      return await this.revise(intent.revision, claim, active!);
     }
     return await this.prepareDraft(claim, active!);
   }
@@ -354,6 +410,186 @@ export class CloudbathStoryboardLineRouter {
     } catch (error) {
       return this.failure("storyboard_create_failed", error);
     }
+  }
+
+  /** Opens a session and asks the first missing question. Writes no Notion work. */
+  private async openDirector(
+    intent: Extract<StoryboardIntent, { kind: "director_open" }>,
+    claim: StoryboardAccessClaim,
+  ): Promise<string> {
+    if (intent.unknownNames[0]) {
+      return unknownCharacterReply(intent.unknownNames[0]);
+    }
+    const store = this.deps.director;
+    if (!store) {
+      return REPLY.directorUnavailable;
+    }
+    const session = openDirectorSession({
+      claim,
+      scenePrompt: intent.scenePrompt,
+      characterNames: intent.characterNames,
+      environment: intent.environment,
+      updatedAt: new Date(this.deps.now()).toISOString(),
+    });
+    const slot = nextDirectorSlot(session);
+    if (!slot) {
+      return await this.completeDirector(session, claim);
+    }
+    await store.register(storyboardDirectorKey(claim), session);
+    return DIRECTOR_QUESTION[slot];
+  }
+
+  /**
+   * Applies one reply to the open slot.
+   *
+   * Returns undefined when the message does not answer the open question, so
+   * the turn continues to ordinary classification rather than being swallowed.
+   */
+  private async answerDirector(
+    event: StoryboardDispatchEvent,
+    claim: StoryboardAccessClaim,
+    session: StoryboardDirectorSession,
+  ): Promise<string | undefined> {
+    const slot = nextDirectorSlot(session);
+    if (!slot) {
+      return undefined;
+    }
+    const answer = parseDirectorAnswer({ content: event.content ?? "", slot });
+    if (!answer) {
+      return undefined;
+    }
+    if (answer.kind === "cancel") {
+      await this.closeDirector(claim, session);
+      return REPLY.directorCancelled;
+    }
+    if (answer.kind === "duration_too_long") {
+      return durationTooLongAnswerReply(answer.durationSeconds);
+    }
+    const updated = applyDirectorAnswer(session, answer, new Date(this.deps.now()).toISOString());
+    const next = nextDirectorSlot(updated);
+    if (!next) {
+      await this.closeDirector(claim, updated);
+      return await this.completeDirector(updated, claim);
+    }
+    await this.deps.director?.register(storyboardDirectorKey(claim), updated);
+    return DIRECTOR_QUESTION[next];
+  }
+
+  /**
+   * Turns a complete session into a storyboard AND its Final Video Draft.
+   *
+   * Both in one reply because the owner asked for a video, not a storyboard:
+   * the draft is where the quote and the confirmable code live. The draft is
+   * prepared through the SAME path `สร้างวิดีโอ` uses, so the paid gate sees
+   * nothing new.
+   */
+  private async completeDirector(
+    session: StoryboardDirectorSession,
+    claim: StoryboardAccessClaim,
+  ): Promise<string> {
+    const created = await this.create(
+      {
+        kind: "create",
+        characterNames: session.characterNames,
+        unknownNames: [],
+        explicitCasting: true,
+        environment: session.environment,
+        scenePrompt: directorScenePrompt(session),
+        ...(session.durationSeconds === undefined
+          ? {}
+          : { durationSeconds: session.durationSeconds }),
+        ...(session.aspectRatio === undefined ? {} : { aspectRatio: session.aspectRatio }),
+        ...(session.resolution === undefined ? {} : { resolution: session.resolution }),
+      },
+      claim,
+    );
+    const active = await this.readActive(claim);
+    if (!active) {
+      return created;
+    }
+    return `${created}\n\n${await this.prepareDraft(claim, active)}`;
+  }
+
+  /**
+   * Applies a natural revision to the active storyboard.
+   *
+   * A cast ADDITION is not a revision: the shared lifecycle opens new work for
+   * a cast the project never froze, and rewriting the frozen cast in place
+   * would reverse that rule. The owner is told the new draft replaced nothing.
+   */
+  private async revise(
+    revision: StoryboardDocumentRevision | StoryboardCastAddition,
+    claim: StoryboardAccessClaim,
+    active: ActiveStoryboardContext,
+  ): Promise<string> {
+    if (revision.kind === "cast_add") {
+      const latest = await this.deps.store
+        .readLatest({ storyboardId: active.storyboardId, claim })
+        .catch(() => undefined);
+      if (!latest) {
+        return REPLY.missingVersion;
+      }
+      const existing = latest.document.cast.map((member) => member.displayName);
+      const names = [...existing, ...revision.names.filter((name) => !existing.includes(name))];
+      const created = await this.create(
+        {
+          kind: "create",
+          characterNames: names,
+          unknownNames: [],
+          explicitCasting: true,
+          environment: latest.document.environment,
+          scenePrompt: latest.document.scenePrompt,
+          durationSeconds: latest.document.durationSeconds,
+          aspectRatio: latest.document.aspectRatio,
+          resolution: latest.document.resolution,
+        },
+        claim,
+      );
+      return `${castAddedReply(revision.names)}\n\n${created}`;
+    }
+    if (revision.kind === "duration" && isDurationTooLong(revision.durationSeconds)) {
+      return durationTooLongReply(revision.durationSeconds);
+    }
+    try {
+      const version = await this.deps.store.appendRevision({
+        storyboardId: active.storyboardId,
+        claim,
+        revision,
+      });
+      await this.touchActive(active);
+      const storyboard = formatStoryboardForLine({
+        versionNumber: version.versionNumber,
+        document: version.document,
+      });
+      // Re-quoted here: a revision changes length, audio or framing, so the
+      // previous draft's price and code no longer describe this plan.
+      const draft = await this.prepareDraft(claim, active);
+      return `${storyboard}\n\n${draft}\n${SUPERSEDED_NOTE}`;
+    } catch (error) {
+      if (error instanceof Error && error.message.includes("concurrently")) {
+        return REPLY.conflict;
+      }
+      return this.failure("storyboard_revision_failed", error);
+    }
+  }
+
+  /** Retires the session in place; the shared store offers no delete. */
+  private async closeDirector(
+    claim: StoryboardAccessClaim,
+    session: StoryboardDirectorSession,
+  ): Promise<void> {
+    await this.deps.director?.register(
+      storyboardDirectorKey(claim),
+      closeDirectorSession(session, new Date(this.deps.now()).toISOString()),
+    );
+  }
+
+  /** Owner-scoped read of the pending natural request, when one exists. */
+  private async readDirector(
+    claim: StoryboardAccessClaim,
+  ): Promise<StoryboardDirectorSession | undefined> {
+    const session = await this.deps.director?.lookup(storyboardDirectorKey(claim));
+    return ownsDirectorSession(session, claim) ? session : undefined;
   }
 
   private async naturalEdit(

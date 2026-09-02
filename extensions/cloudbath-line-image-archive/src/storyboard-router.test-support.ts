@@ -8,6 +8,7 @@ import {
 import { CloudbathPrevisService } from "./previs-service.js";
 import { PrevisStore, type PrevisArtifactSink, type PrevisEngine } from "./previs-store.js";
 import type { PrevisProjectHead, PrevisVersion } from "./previs-types.js";
+import type { StoryboardDirectorSession } from "./storyboard-director.js";
 import { isExplicitPrevisRequest } from "./storyboard-intent.js";
 import {
   CloudbathStoryboardLineRouter,
@@ -131,6 +132,7 @@ export function harness(
   const storyboardHeads = mem<StoryboardHead>();
   const drafts = mem<StoryboardFinalVideoDraft>();
   const active = mem<ActiveStoryboardContext>();
+  const director = mem<StoryboardDirectorSession>();
   const store = new StoryboardStore({
     heads: storyboardHeads,
     versions: storyboardVersions,
@@ -186,6 +188,7 @@ export function harness(
     resolver: shared,
     active,
     drafts,
+    director,
     dedupe,
     registry: { lookup: async () => ({ policyId: "UGC", boundByOwnerId: OWNER }) },
     now: () => Date.parse("2026-08-30T10:00:00.000Z"),
@@ -253,6 +256,7 @@ export function harness(
     versionAt,
     store,
     active,
+    director,
     drafts,
     storyboardRouter,
     previsEngineCalls,
