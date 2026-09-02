@@ -45,6 +45,12 @@ import {
   LINE_VIDEO_MODEL_PREFERENCE_NAMESPACE,
   type LineVideoModelPreferenceState,
 } from "./src/video-model-preference.js";
+import {
+  LINE_VIDEO_REQUOTE_PENDING_MAX_ENTRIES,
+  LINE_VIDEO_REQUOTE_PENDING_NAMESPACE,
+  LINE_VIDEO_REQUOTE_PENDING_TTL_MS,
+  type LinePendingRequoteState,
+} from "./src/video-model-requote.js";
 import { installLineStoryboardVideoRuntime } from "./src/video-storyboard-runtime.js";
 
 type RegisteredLineCardCommand = OpenClawPluginCommandDefinition;
@@ -79,10 +85,23 @@ function createLineModelSwitchIntentRouterLoader(
 function createLineVideoModelControlRouterLoader(deps: {
   preferenceStore: PluginStateKeyedStore<LineVideoModelPreferenceState>;
   pendingStore: PluginStateKeyedStore<LinePendingVideoModelSelection>;
+  requotePendingStore: PluginStateKeyedStore<LinePendingRequoteState>;
 }) {
   return createLazyRuntimeModule<LineVideoModelControlRouter>(async () => {
-    const { createLineVideoModelControlRouter } = await import("./src/video-model-control.js");
-    return createLineVideoModelControlRouter(deps);
+    const [{ createLineVideoModelControlRouter }, { tryGetLineVideoWorkspaceRuntime }] =
+      await Promise.all([
+        import("./src/video-model-control.js"),
+        import("./src/video-workspace-runtime.js"),
+      ]);
+    return createLineVideoModelControlRouter({
+      ...deps,
+      // The Cloudbath archive owns the storyboard; resolved per call so a
+      // build without that plugin simply never re-quotes.
+      requoteActiveDraft: async (request) =>
+        (await tryGetLineVideoWorkspaceRuntime()?.requoteActiveStoryboardDraft(request)) ?? {
+          kind: "no_active_storyboard",
+        },
+    });
   });
 }
 
@@ -167,6 +186,11 @@ export default defineBundledChannelEntry({
         namespace: LINE_VIDEO_MODEL_SELECTION_NAMESPACE,
         maxEntries: LINE_VIDEO_MODEL_SELECTION_MAX_ENTRIES,
       });
+    const videoRequotePendingStore = api.runtime.state.openKeyedStore<LinePendingRequoteState>({
+      namespace: LINE_VIDEO_REQUOTE_PENDING_NAMESPACE,
+      maxEntries: LINE_VIDEO_REQUOTE_PENDING_MAX_ENTRIES,
+      defaultTtlMs: LINE_VIDEO_REQUOTE_PENDING_TTL_MS,
+    });
     const videoDraftStore = api.runtime.state.openKeyedStore<LineVideoDraft>({
       namespace: LINE_VIDEO_DRAFT_NAMESPACE,
       maxEntries: LINE_VIDEO_DRAFT_MAX_ENTRIES,
@@ -296,6 +320,7 @@ export default defineBundledChannelEntry({
     const loadVideoModelControlRouter = createLineVideoModelControlRouterLoader({
       preferenceStore: videoModelPreferenceStore,
       pendingStore: videoModelSelectionStore,
+      requotePendingStore: videoRequotePendingStore,
     });
     api.on("before_dispatch", async (event, ctx) => {
       const router = await loadVideoModelControlRouter();

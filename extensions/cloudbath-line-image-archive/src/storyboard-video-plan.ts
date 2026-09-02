@@ -154,6 +154,18 @@ export type PrepareFinalVideoDraftParams = Readonly<{
     /** Defaults to the installed LINE runtime; injected in tests. */
     runtime?: StoryboardPaidDraftRuntime | null;
   }>;
+  /**
+   * Owner-approved adjustments for a re-quote, applied to the paid request
+   * only. The storyboard document itself is untouched: these exist because a
+   * newly chosen model could not satisfy a field, and the owner said what to
+   * use instead, so nothing is changed without their word.
+   */
+  overrides?: Readonly<{
+    durationSeconds?: number;
+    resolution?: string;
+    aspectRatio?: string;
+    audio?: boolean;
+  }>;
 }>;
 
 /**
@@ -215,6 +227,20 @@ function paidReferenceAssets(
 export async function prepareStoryboardFinalVideoDraft(
   params: PrepareFinalVideoDraftParams,
 ): Promise<StoryboardFinalVideoDraft> {
+  return (await prepareStoryboardFinalVideoDraftWithOutcome(params)).draft;
+}
+
+/**
+ * The same preparation, with the paid side's own answer kept.
+ *
+ * `prepareStoryboardFinalVideoDraft` deliberately collapses a refusal into an
+ * unbillable draft, which is right for the owner-facing flow. A re-quote needs
+ * the reason itself — "this model does not do 15 seconds" is the whole message
+ * — so this variant returns it rather than a second preparation path existing.
+ */
+export async function prepareStoryboardFinalVideoDraftWithOutcome(
+  params: PrepareFinalVideoDraftParams,
+): Promise<{ draft: StoryboardFinalVideoDraft; paid?: StoryboardPaidDraftResult }> {
   const { version } = params;
   const plan = compileStoryboardVideoPlan(version);
   const paid = await requestPaidDraft(params, plan);
@@ -276,7 +302,7 @@ export async function prepareStoryboardFinalVideoDraft(
   if (!claimed) {
     throw new Error("Storyboard draft id was taken concurrently; retry");
   }
-  return draft;
+  return { draft, ...(paid ? { paid } : {}) };
 }
 
 /**
@@ -308,14 +334,14 @@ async function requestPaidDraft(
       ownerSenderId: version.ownerSenderId,
       ...(paid.deliveryTo ? { deliveryTo: paid.deliveryTo } : {}),
       prompt: compileStoryboardProviderPrompt(plan),
-      durationSeconds: plan.durationSeconds,
-      aspectRatio: plan.aspectRatio,
-      resolution: plan.resolution,
+      durationSeconds: params.overrides?.durationSeconds ?? plan.durationSeconds,
+      aspectRatio: params.overrides?.aspectRatio ?? plan.aspectRatio,
+      resolution: params.overrides?.resolution ?? plan.resolution,
       // Asking is not granting: the LINE side only honours this when the live
       // catalog reports audio support for the bound model. A scene with no
       // spoken line asks for none, so dropping dialogue actually re-quotes
       // against the cheaper silent SKU instead of paying for unused audio.
-      audio: storyboardHasDialogue(version.document),
+      audio: params.overrides?.audio ?? storyboardHasDialogue(version.document),
       storyboardId: version.storyboardId,
       storyboardVersionNumber: version.versionNumber,
       characterLocks: version.characterLocks.map((lock) =>

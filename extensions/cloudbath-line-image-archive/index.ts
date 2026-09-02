@@ -497,6 +497,12 @@ export default definePluginEntry({
           installCloudbathLineVideoWorkspaceRuntime(runtimeOwner, {
             lookupBinding: async (accountId, groupId) => await registry.lookup(accountId, groupId),
             ...(ugcDraftScopes ? { ugcScopeStore: ugcDraftScopes } : {}),
+            // Read through the router so the seam always sees the CURRENT one;
+            // capturing it here would pin a stale router across a restart.
+            requoteActiveStoryboardDraft: async (request) =>
+              (await tryGetCloudbathWorkspacePolicyRuntime()?.storyboardLineRouter?.requoteActiveDraft(
+                request,
+              )) ?? { kind: "no_active_storyboard" },
           });
         };
 

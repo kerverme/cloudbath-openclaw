@@ -26,6 +26,16 @@ import {
   type LineVideoModelPreferenceStore,
 } from "./video-model-preference.js";
 import {
+  formatIncompatibilityQuestion,
+  formatRequotedDraft,
+  parseRequoteAnswer,
+  requotePendingKey,
+  type LinePendingRequoteStore,
+  type LineRequoteOverrides,
+  type LineRequoteResult,
+  LINE_VIDEO_REQUOTE_PENDING_TTL_MS,
+} from "./video-model-requote.js";
+import {
   formatVideoModelCapabilities,
   searchVideoModels,
   type RankedVideoModel,
@@ -190,6 +200,14 @@ function refinementAware(
   return isRefinement ? undefined : result;
 }
 
+/**
+ * The exact paid confirmation, mirrored here only to REFUSE it.
+ *
+ * A pending picker or capability question must never swallow "ยืนยัน VIDEO
+ * ####": that turn belongs to the confirmation gate and nothing else.
+ */
+const PAID_CONFIRMATION_PATTERN = /^ยืนยัน\s+VIDEO\s+\d{4}$/iu;
+
 function toCandidate(entry: RankedVideoModel): { id: string; name: string; capabilities?: string } {
   const capabilities = formatVideoModelCapabilities(entry.model);
   return {
@@ -210,6 +228,21 @@ type FetchLike = typeof fetch;
 export function createLineVideoModelControlRouter(params: {
   preferenceStore: LineVideoModelPreferenceStore;
   pendingStore: LinePendingVideoModelSelectionStore;
+  /**
+   * Holds the ONE open capability question while the owner answers it. Absent,
+   * a model change simply never re-quotes, which is the pre-seam behaviour.
+   */
+  requotePendingStore?: LinePendingRequoteStore;
+  /**
+   * The archive seam. Absent (or with no storyboard flow installed) a model
+   * change is a preference change only.
+   */
+  requoteActiveDraft?: (request: {
+    accountId: string;
+    conversationId: string;
+    ownerSenderId: string;
+    overrides?: LineRequoteOverrides;
+  }) => Promise<LineRequoteResult>;
   resolveApiKey?: () => Promise<string | undefined>;
   fetchImpl?: FetchLike;
   now?: () => number;
@@ -254,6 +287,101 @@ export function createLineVideoModelControlRouter(params: {
       return undefined;
     }
     const pendingKey = resolvePendingKey(scopeKey);
+    const requoteKey = requotePendingKey(scopeKey);
+
+    /**
+     * Saves the chosen model, then tries to re-quote the active storyboard.
+     *
+     * Order matters: the preference is persisted FIRST, so it holds even when
+     * there is nothing to re-quote or the re-quote is refused. Nothing here
+     * retires the previous code — only a successfully allocated replacement
+     * does, inside the allocator.
+     */
+    const applySelectedModel = async (
+      selected: { id: string; name: string },
+      overrides?: LineRequoteOverrides,
+    ): Promise<string> => {
+      await setLineVideoModelPreference({
+        store: params.preferenceStore,
+        key: scopeKey,
+        model: selected.id,
+        now,
+      });
+      await params.pendingStore.delete(pendingKey);
+      const changed = `เปลี่ยน Video Model เป็น ${selected.name} แล้ว`;
+      if (!params.requoteActiveDraft) {
+        return changed;
+      }
+      const result = await params
+        .requoteActiveDraft({
+          accountId,
+          conversationId,
+          ownerSenderId: event.senderId?.trim() ?? "",
+          ...(overrides ? { overrides } : {}),
+        })
+        .catch((): LineRequoteResult => ({ kind: "unavailable", reason: "seam_unavailable" }));
+
+      if (result.kind === "created") {
+        await params.requotePendingStore?.delete(requoteKey);
+        return `${changed}\n\n${formatRequotedDraft({
+          modelName: selected.name,
+          result,
+          overrides: overrides ?? {},
+        })}`;
+      }
+      if (result.kind === "incompatible") {
+        // The previous code stays valid: nothing was allocated and nothing was
+        // superseded. Only the one unusable field is put to the owner.
+        await params.requotePendingStore?.register(requoteKey, {
+          version: 1,
+          modelId: selected.id,
+          modelName: selected.name,
+          field: result.incompatibility.kind,
+          supported: result.incompatibility.supported,
+          overrides: overrides ?? {},
+          createdAt: now(),
+        });
+        return `${changed}\n\n${formatIncompatibilityQuestion({
+          modelName: selected.name,
+          incompatibility: result.incompatibility,
+        })}`;
+      }
+      if (result.kind === "no_active_storyboard") {
+        return changed;
+      }
+      return `${changed}\n(ยังคำนวณราคาสำหรับ Storyboard ปัจจุบันไม่ได้ รหัส VIDEO เดิมยังใช้ได้อยู่)`;
+    };
+
+    // An open capability question is the most recent thing asked, so it is
+    // answered before the picker. The exact paid confirmation is never taken.
+    const requotePending = PAID_CONFIRMATION_PATTERN.test(rawText)
+      ? undefined
+      : await params.requotePendingStore?.lookup(requoteKey);
+    if (requotePending) {
+      if (requotePending.createdAt + LINE_VIDEO_REQUOTE_PENDING_TTL_MS <= now()) {
+        await params.requotePendingStore?.delete(requoteKey);
+      } else {
+        const answer = parseRequoteAnswer({
+          field: requotePending.field,
+          supported: requotePending.supported,
+          text: rawText,
+        });
+        if (answer) {
+          return {
+            handled: true,
+            text: await applySelectedModel(
+              { id: requotePending.modelId, name: requotePending.modelName },
+              { ...requotePending.overrides, ...answer },
+            ),
+          };
+        }
+        // Not an answer: leave the question open and let the turn fall through
+        // to ordinary chat rather than swallowing it.
+        if (intent.kind === "none") {
+          return undefined;
+        }
+      }
+    }
 
     if (intent.kind === "status") {
       // Read-only: never mutates the preference store, never touches
@@ -298,14 +426,7 @@ export function createLineVideoModelControlRouter(params: {
           text: `หมายเลขนี้ไม่อยู่ในตัวเลือก:\n${formatCandidateList(pending.candidates)}\nต้องการใช้รุ่นไหน?`,
         };
       }
-      await setLineVideoModelPreference({
-        store: params.preferenceStore,
-        key: scopeKey,
-        model: selected.id,
-        now,
-      });
-      await params.pendingStore.delete(pendingKey);
-      return { handled: true, text: `เปลี่ยน video model เป็น ${selected.name} แล้ว` };
+      return { handled: true, text: await applySelectedModel(selected) };
     }
 
     // A refinement only means something while THIS conversation has a picker
@@ -329,14 +450,10 @@ export function createLineVideoModelControlRouter(params: {
           normalizeSearchText(candidate.id) === normalizeSearchText(rawText),
       );
       if (named) {
-        await setLineVideoModelPreference({
-          store: params.preferenceStore,
-          key: scopeKey,
-          model: named.id,
-          now,
-        });
-        await params.pendingStore.delete(pendingKey);
-        return { handled: true, text: `เปลี่ยน Video Model เป็น ${named.name} แล้ว` };
+        return {
+          handled: true,
+          text: await applySelectedModel({ id: named.id, name: named.name }),
+        };
       }
     }
 
@@ -380,14 +497,7 @@ export function createLineVideoModelControlRouter(params: {
 
     if (result.autoApply) {
       const selected = result.autoApply.model;
-      await setLineVideoModelPreference({
-        store: params.preferenceStore,
-        key: scopeKey,
-        model: selected.id,
-        now,
-      });
-      await params.pendingStore.delete(pendingKey);
-      return { handled: true, text: `เปลี่ยน Video Model เป็น ${selected.name} แล้ว` };
+      return { handled: true, text: await applySelectedModel(selected) };
     }
 
     // Ambiguous: never auto-apply a guess onto a paid path. Show the numbered

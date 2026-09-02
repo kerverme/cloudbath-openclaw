@@ -38,6 +38,11 @@ import {
   STORYBOARD_DEFAULT_RESOLUTION,
   STORYBOARD_MAX_DURATION_SECONDS,
 } from "./storyboard-request.js";
+import {
+  requoteActiveStoryboardDraft,
+  type StoryboardRequoteOverrides,
+  type StoryboardRequoteResult,
+} from "./storyboard-requote.js";
 import type { StoryboardCastAddition, StoryboardDocumentRevision } from "./storyboard-revision.js";
 import { activeStoryboardKey, StoryboardStore } from "./storyboard-store.js";
 import {
@@ -582,6 +587,44 @@ export class CloudbathStoryboardLineRouter {
       storyboardDirectorKey(claim),
       closeDirectorSession(session, new Date(this.deps.now()).toISOString()),
     );
+  }
+
+  /**
+   * Re-quotes this owner's active storyboard against the currently selected
+   * video model, for the LINE-side model picker.
+   *
+   * Lives on the router because the router already owns the storyboard store,
+   * the active pointer, the draft store and the paid seam — a second wiring of
+   * those would be a second source of truth for what "active" means.
+   */
+  async requoteActiveDraft(request: {
+    accountId: string;
+    conversationId: string;
+    ownerSenderId: string;
+    overrides?: StoryboardRequoteOverrides;
+  }): Promise<StoryboardRequoteResult> {
+    const lineGroupId = nativeGroupId(request.conversationId);
+    const accountId = request.accountId.trim();
+    const ownerSenderId = request.ownerSenderId.trim();
+    if (!lineGroupId || !accountId || !ownerSenderId) {
+      return { kind: "no_active_storyboard" };
+    }
+    return await requoteActiveStoryboardDraft({
+      claim: { accountId, lineGroupId, ownerSenderId },
+      ...(request.overrides ? { overrides: request.overrides } : {}),
+      deps: {
+        store: this.deps.store,
+        active: this.deps.active,
+        drafts: this.deps.drafts,
+        now: this.deps.now,
+        ...(this.deps.randomId ? { randomId: this.deps.randomId } : {}),
+        ...(this.deps.paidDraftRuntime === undefined
+          ? {}
+          : { paidDraftRuntime: this.deps.paidDraftRuntime }),
+        ...(this.deps.draftScopes ? { draftScopes: this.deps.draftScopes } : {}),
+        ...(this.deps.ugcCapabilities ? { ugcCapabilities: this.deps.ugcCapabilities } : {}),
+      },
+    });
   }
 
   /** Owner-scoped read of the pending natural request, when one exists. */

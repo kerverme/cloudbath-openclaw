@@ -1,5 +1,6 @@
 import type { PluginStateKeyedStore } from "openclaw/plugin-sdk/plugin-state-runtime";
 import { createPluginRuntimeStore } from "openclaw/plugin-sdk/runtime-store";
+import type { StoryboardRequoteOverrides, StoryboardRequoteResult } from "./storyboard-requote.js";
 import type { FrozenUgcVideoScope, LineGroupPolicyBinding } from "./types.js";
 import { ugcDraftScopeKey } from "./ugc-workflow.js";
 
@@ -10,6 +11,21 @@ export type CloudbathLineVideoWorkspaceRuntime = {
   lookupBinding(accountId: string, groupId: string): Promise<LineGroupPolicyBinding | undefined>;
   lookupUgcDraftScope(draftId: string): Promise<FrozenUgcVideoScope | undefined>;
   consumeUgcDraftScope(draftId: string): Promise<FrozenUgcVideoScope | undefined>;
+  /**
+   * Re-prepares the owner's ACTIVE storyboard against whatever video model the
+   * LINE side has now selected, or says why it cannot.
+   *
+   * The only crossing the model picker needs. It mints nothing itself: the
+   * draft goes through the same preparation `สร้างวิดีโอ` uses, so the LINE
+   * allocator stays the sole owner of the code space and of superseding — and
+   * a refusal here leaves the previous code untouched and still payable.
+   */
+  requoteActiveStoryboardDraft(params: {
+    accountId: string;
+    conversationId: string;
+    ownerSenderId: string;
+    overrides?: StoryboardRequoteOverrides;
+  }): Promise<StoryboardRequoteResult>;
 };
 
 const runtimeStore = createPluginRuntimeStore<CloudbathLineVideoWorkspaceRuntime>({
@@ -29,6 +45,12 @@ export function installCloudbathLineVideoWorkspaceRuntime(
       groupId: string,
     ) => Promise<LineGroupPolicyBinding | null | undefined>;
     ugcScopeStore?: PluginStateKeyedStore<FrozenUgcVideoScope>;
+    requoteActiveStoryboardDraft?: (params: {
+      accountId: string;
+      conversationId: string;
+      ownerSenderId: string;
+      overrides?: StoryboardRequoteOverrides;
+    }) => Promise<StoryboardRequoteResult>;
   },
 ): void {
   runtimeStore.setRuntime({
@@ -40,6 +62,13 @@ export function installCloudbathLineVideoWorkspaceRuntime(
     },
     async consumeUgcDraftScope(draftId) {
       return await params.ugcScopeStore?.consume(ugcDraftScopeKey(draftId));
+    },
+    async requoteActiveStoryboardDraft(request) {
+      // Absent, a build without the storyboard flow simply has nothing to
+      // re-quote, which is the same answer as having no active storyboard.
+      return (
+        (await params.requoteActiveStoryboardDraft?.(request)) ?? { kind: "no_active_storyboard" }
+      );
     },
   });
   ownerStore.setRuntime(owner);

@@ -1,4 +1,5 @@
 import { createPluginRuntimeStore } from "openclaw/plugin-sdk/runtime-store";
+import type { LineRequoteOverrides, LineRequoteResult } from "./video-model-requote.js";
 import type { LineGroupPolicyBinding, LineVideoUgcScope } from "./video-ugc-scope.js";
 
 const LINE_VIDEO_WORKSPACE_RUNTIME_KEY = "cloudbath.line-video-workspace-runtime.v1";
@@ -7,6 +8,22 @@ export type LineVideoWorkspaceRuntime = {
   lookupBinding(accountId: string, groupId: string): Promise<LineGroupPolicyBinding | undefined>;
   lookupUgcDraftScope(draftId: string): Promise<LineVideoUgcScope | undefined>;
   consumeUgcDraftScope(draftId: string): Promise<LineVideoUgcScope | undefined>;
+  /**
+   * Re-prepares the owner's active storyboard against the video model this
+   * plugin has just selected.
+   *
+   * Declared structurally rather than imported from the archive plugin, like
+   * every other member here: the registry key is the contract, and a drift on
+   * either side shows up as a compile error. It allocates through THIS
+   * plugin's draft store, so the single code space and its supersede are
+   * unaffected.
+   */
+  requoteActiveStoryboardDraft(params: {
+    accountId: string;
+    conversationId: string;
+    ownerSenderId: string;
+    overrides?: LineRequoteOverrides;
+  }): Promise<LineRequoteResult>;
 };
 
 const runtimeStore = createPluginRuntimeStore<LineVideoWorkspaceRuntime>({
