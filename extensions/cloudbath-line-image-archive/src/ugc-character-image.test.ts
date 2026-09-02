@@ -79,7 +79,7 @@ describe("UGC latest-image character workflow", () => {
     await fsp.rm(stateDir, { recursive: true, force: true });
   });
 
-  function harness(imageMaxBytes = 10 * 1024 * 1024) {
+  function harness(imageMaxBytes = 10 * 1024 * 1024, now = () => Date.UTC(2026, 7, 26)) {
     const binding = (groupId: string): LineGroupPolicyBinding => ({
       accountId: "primary",
       groupId,
@@ -134,7 +134,7 @@ describe("UGC latest-image character workflow", () => {
       },
       logger,
       "https://cloudbath.example",
-      () => Date.UTC(2026, 7, 26),
+      now,
       undefined,
       onCharacterSaved,
     );
@@ -740,5 +740,190 @@ describe("UGC latest-image character workflow", () => {
 
     expect(await fsp.stat(expiredPath).catch(() => undefined)).toBeUndefined();
     expect((await fsp.stat(activePath)).isFile()).toBe(true);
+  });
+  const OWNER_TURN = { senderId: "U-owner", senderIsOwner: true, isGroup: true } as const;
+  const UGC_CONTEXT = {
+    channelId: "line",
+    accountId: "primary",
+    conversationId: "line:group:C-ugc",
+  } as const;
+
+  it("saves the just-named image when the owner follows up with Character Library", async () => {
+    const { workflow, notion, r2, ensureObjectInputs } = harness();
+    await workflow.rememberImage(job());
+
+    const naming = await workflow.handleBeforeDispatch(
+      { content: "เก็บรูปชื่อ Twong99", ...OWNER_TURN },
+      UGC_CONTEXT,
+    );
+    const followUp = await workflow.handleBeforeDispatch(
+      { content: "เก็บใน Character Library", ...OWNER_TURN },
+      UGC_CONTEXT,
+    );
+
+    // The naming turn still belongs to the archive flow.
+    expect(naming).toBeUndefined();
+    expect(followUp?.text).toContain("บันทึกตัวละครเรียบร้อย");
+    expect(followUp?.text).toContain("Name: Twong99");
+    expect(notion.saveCharacterAsset).toHaveBeenCalledOnce();
+    expect(notion.saveCharacterAsset).toHaveBeenCalledWith(
+      expect.objectContaining({ nameOrCode: "Twong99", mode: "upsert" }),
+    );
+    expect(r2.ensureObject).toHaveBeenCalledOnce();
+    expect(ensureObjectInputs[0]?.objectKey).toMatch(/^ugc\/characters\/twong99\//u);
+  });
+
+  it.each([
+    "เก็บใน Character Library",
+    "เอาเข้า Character Library",
+    "เก็บเข้าคลังตัวละคร",
+    "เอารูปเมื่อกี้ไปเป็น character",
+    "เก็บอันนี้เป็นตัวละคร",
+    "ใส่รูปนี้ใน Character Library",
+    "ย้ายเข้าคลังตัวละคร",
+    "save into Character Library",
+    "upload this to the character library",
+  ])("resolves the remembered name from mixed Thai/English intent: %s", async (content) => {
+    const { workflow, notion } = harness();
+    await workflow.rememberImage(job());
+    await workflow.handleBeforeDispatch({ content: "เก็บรูปชื่อ Twong99", ...OWNER_TURN }, UGC_CONTEXT);
+
+    const result = await workflow.handleBeforeDispatch({ content, ...OWNER_TURN }, UGC_CONTEXT);
+
+    expect(result?.text).toContain("Name: Twong99");
+    expect(notion.saveCharacterAsset).toHaveBeenCalledWith(
+      expect.objectContaining({ nameOrCode: "Twong99" }),
+    );
+  });
+
+  it.each([
+    "เก็บรูปชื่อ Twong99",
+    "เก็บรูปนี้ชื่อ Twong99",
+    "ตั้งชื่อรูปนี้ว่า Twong99",
+    "save this image as Twong99",
+  ])("records a name without claiming the turn or writing a Character: %s", async (content) => {
+    const { workflow, notion, r2 } = harness();
+    await workflow.rememberImage(job());
+
+    const result = await workflow.handleBeforeDispatch({ content, ...OWNER_TURN }, UGC_CONTEXT);
+
+    expect(result).toBeUndefined();
+    expect(notion.saveCharacterAsset).not.toHaveBeenCalled();
+    expect(r2.ensureObject).not.toHaveBeenCalled();
+    await expect(
+      workflow.handleBeforeDispatch(
+        { content: "เก็บใน Character Library", ...OWNER_TURN },
+        UGC_CONTEXT,
+      ),
+    ).resolves.toMatchObject({ text: expect.stringContaining("Name: Twong99") });
+  });
+
+  it("asks for the Character name instead of reaching general chat when none is remembered", async () => {
+    const { workflow, notion, r2 } = harness();
+    await workflow.rememberImage(job());
+
+    const result = await workflow.handleBeforeDispatch(
+      { content: "เก็บใน Character Library", ...OWNER_TURN },
+      UGC_CONTEXT,
+    );
+
+    expect(result).toMatchObject({ handled: true });
+    expect(result?.text).toContain("ชื่อตัวละคร");
+    expect(notion.saveCharacterAsset).not.toHaveBeenCalled();
+    expect(r2.ensureObject).not.toHaveBeenCalled();
+  });
+
+  it("asks again once the remembered name has expired", async () => {
+    let clock = Date.UTC(2026, 7, 26);
+    const { workflow, notion } = harness(10 * 1024 * 1024, () => clock);
+    await workflow.rememberImage(job());
+    await workflow.handleBeforeDispatch({ content: "เก็บรูปชื่อ Twong99", ...OWNER_TURN }, UGC_CONTEXT);
+    clock += 16 * 60 * 1_000;
+
+    const result = await workflow.handleBeforeDispatch(
+      { content: "เก็บใน Character Library", ...OWNER_TURN },
+      UGC_CONTEXT,
+    );
+
+    expect(result?.text).toContain("ชื่อตัวละคร");
+    expect(notion.saveCharacterAsset).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "วันนี้อากาศดีนะ",
+    "Character Library มีกี่ตัวแล้ว",
+    "เอารูปนี้มาดูหน่อย",
+    "เอาตัวละคร Twong99 ทำวิดีโอ",
+  ])("does not turn unrelated conversation into a Character mutation: %s", async (content) => {
+    const { workflow, notion, r2 } = harness();
+    await workflow.rememberImage(job());
+    await workflow.handleBeforeDispatch({ content: "เก็บรูปชื่อ Twong99", ...OWNER_TURN }, UGC_CONTEXT);
+
+    const result = await workflow.handleBeforeDispatch({ content, ...OWNER_TURN }, UGC_CONTEXT);
+
+    expect(result).toBeUndefined();
+    expect(notion.saveCharacterAsset).not.toHaveBeenCalled();
+    expect(r2.ensureObject).not.toHaveBeenCalled();
+  });
+
+  it("never reports success for a context-resolved save when Notion fails", async () => {
+    const { workflow, notion, onCharacterSaved } = harness();
+    await workflow.rememberImage(job());
+    await workflow.handleBeforeDispatch({ content: "เก็บรูปชื่อ Twong99", ...OWNER_TURN }, UGC_CONTEXT);
+    notion.saveCharacterAsset.mockRejectedValueOnce(new Error("Notion unavailable"));
+
+    const result = await workflow.handleBeforeDispatch(
+      { content: "เก็บใน Character Library", ...OWNER_TURN },
+      UGC_CONTEXT,
+    );
+
+    expect(result?.text).toContain("บันทึกตัวละครไม่สำเร็จ");
+    expect(result?.text).not.toContain("เรียบร้อย");
+    expect(result?.text).not.toContain("Twong99");
+    expect(onCharacterSaved).not.toHaveBeenCalled();
+  });
+
+  it("does not write a second Character when the confirmation is repeated", async () => {
+    const { workflow, notion } = harness();
+    await workflow.rememberImage(job());
+    await workflow.handleBeforeDispatch({ content: "เก็บรูปชื่อ Twong99", ...OWNER_TURN }, UGC_CONTEXT);
+    await workflow.handleBeforeDispatch(
+      { content: "เก็บใน Character Library", ...OWNER_TURN },
+      UGC_CONTEXT,
+    );
+
+    const repeat = await workflow.handleBeforeDispatch(
+      { content: "เก็บใน Character Library", ...OWNER_TURN },
+      UGC_CONTEXT,
+    );
+
+    expect(notion.saveCharacterAsset).toHaveBeenCalledOnce();
+    expect(repeat?.text).toContain("ชื่อตัวละคร");
+  });
+
+  it("does not leak the remembered name to another group or another sender", async () => {
+    const { workflow, notion } = harness();
+    await workflow.rememberImage(job());
+    await workflow.rememberImage(job("C-other"));
+    await workflow.handleBeforeDispatch({ content: "เก็บรูปชื่อ Twong99", ...OWNER_TURN }, UGC_CONTEXT);
+
+    const otherGroup = await workflow.handleBeforeDispatch(
+      { content: "เก็บใน Character Library", ...OWNER_TURN },
+      { ...UGC_CONTEXT, conversationId: "line:group:C-other" },
+    );
+    const otherSender = await workflow.handleBeforeDispatch(
+      {
+        content: "เก็บใน Character Library",
+        senderId: "U-other",
+        senderIsOwner: false,
+        isGroup: true,
+      },
+      UGC_CONTEXT,
+    );
+
+    expect(otherGroup?.text).toContain("ชื่อตัวละคร");
+    expect(otherGroup?.text).not.toContain("Twong99");
+    expect(otherSender).toEqual({ handled: true });
+    expect(notion.saveCharacterAsset).not.toHaveBeenCalled();
   });
 });
