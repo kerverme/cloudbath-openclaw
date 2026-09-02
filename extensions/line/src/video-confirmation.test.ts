@@ -213,6 +213,13 @@ function createWorkspaceRuntime(params: {
     async consumeUgcDraftScope(draftId) {
       return await params.scopeStore?.consume(draftId);
     },
+    // Confirming is the PAID step; re-quoting is free draft preparation. The
+    // gate must never do the latter, so this fails loudly rather than quietly
+    // returning nothing — a call here would mean the gate had grown a second
+    // responsibility that no test would otherwise catch.
+    async requoteActiveStoryboardDraft() {
+      throw new Error("confirmation gate must never re-quote a storyboard draft");
+    },
   };
 }
 
