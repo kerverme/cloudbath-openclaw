@@ -8,6 +8,11 @@
 
 import type { LineGroupWorkspacePolicyRegistry } from "./group-workspace-policy.js";
 import {
+  CLOUDBATH_STORYBOARD_DIRECTOR_NAMESPACE,
+  CLOUDBATH_STORYBOARD_DIRECTOR_TTL_MS,
+  type StoryboardDirectorSession,
+} from "./storyboard-director.js";
+import {
   CloudbathStoryboardLineRouter,
   type StoryboardProjectResolver,
 } from "./storyboard-line-router.js";
@@ -102,6 +107,15 @@ export function createCloudbathStoryboardLineRouter(deps: {
       namespace: CLOUDBATH_STORYBOARD_DRAFT_NAMESPACE,
       maxEntries: CLOUDBATH_STORYBOARD_MAX_ENTRIES,
       overflowPolicy: "evict-oldest",
+    }),
+    // An unanswered request is a conversation, not a record: it must age out
+    // quickly so a stale question cannot claim a reply the owner meant for
+    // something else, and it must never refuse new rows and wedge the flow.
+    director: deps.state.openKeyedStore<StoryboardDirectorSession>({
+      namespace: CLOUDBATH_STORYBOARD_DIRECTOR_NAMESPACE,
+      maxEntries: CLOUDBATH_STORYBOARD_MAX_ENTRIES,
+      overflowPolicy: "evict-oldest",
+      defaultTtlMs: CLOUDBATH_STORYBOARD_DIRECTOR_TTL_MS,
     }),
     dedupe: deps.state.openKeyedStore<{ reply: string }>({
       namespace: CLOUDBATH_STORYBOARD_DEDUPE_NAMESPACE,

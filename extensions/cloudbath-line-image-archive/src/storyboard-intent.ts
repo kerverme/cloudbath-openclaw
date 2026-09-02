@@ -20,6 +20,11 @@ import {
   readStoryboardEnvironment,
   readStoryboardResolution,
 } from "./storyboard-request.js";
+import {
+  parseStoryboardRevision,
+  type StoryboardCastAddition,
+  type StoryboardDocumentRevision,
+} from "./storyboard-revision.js";
 
 /**
  * The exact paid gate, mirrored here only to REFUSE it.
@@ -97,6 +102,18 @@ function findNaturalUnknownCast(text: string, knownNames: readonly string[]): st
 
 const NEW_SCENE_MARKER = /ใหม่|\bnew\s+(?:scenes?|shots?|storyboards?)\b/iu;
 
+/**
+ * The owner ASKING for something to happen, as opposed to narrating.
+ *
+ * A cast name beside an action verb is far too weak on its own: "that was
+ * obscene, Twong walks away" and "send me the snapshot where Twong walks past
+ * Twong2" both contain one, and claiming them would answer ordinary chat with
+ * a storyboard question. A directive marker is what makes "เอา F1 ไปเดินในสวน"
+ * a request. Latin is deliberately absent: the English narration above is
+ * exactly the shape that has to keep falling through.
+ */
+const DIRECTOR_REQUEST_MARKER = /(?:^|\s)(?:เอา|พา|ขอ|อยาก(?:ได้|ให้)?|ช่วย|ทำให้)\s*\S/u;
+
 // Same Latin-only `\b` rule as the action vocabulary: unbounded, "cut" matched
 // inside "haircut", "change" inside "exchange", and "set\b" inside "asset".
 const EDIT_MARKER =
@@ -173,6 +190,21 @@ export type StoryboardIntent =
       action: string;
     }>
   | Readonly<{ kind: "natural_edit"; request: string }>
+  /**
+   * A natural request that names a cast member and an action but none of the
+   * dimensions a storyboard needs. Emitted ONLY where this parser previously
+   * returned undefined, so every already-recognised request keeps its shipped
+   * immediate-create behaviour; the router gathers the rest conversationally.
+   */
+  | Readonly<{
+      kind: "director_open";
+      characterNames: readonly string[];
+      unknownNames: readonly string[];
+      environment: string;
+      scenePrompt: string;
+    }>
+  /** A document-level change to the storyboard already being iterated on. */
+  | Readonly<{ kind: "revision"; revision: StoryboardDocumentRevision | StoryboardCastAddition }>
   | Readonly<{ kind: "create_video" }>;
 
 /**
@@ -247,6 +279,26 @@ export function parseStoryboardIntent(params: {
     naturalSequence ||
     (allRanges.length > 1 && naturalAction);
   if (matched.length === 0 || !looksLikeScene) {
+    // Everything below here previously ended the parse. A revision is only
+    // acted on when a storyboard is already active (the router enforces that),
+    // and a director request writes nothing until the owner answers, so
+    // neither can create Notion work straight off an unrecognised message.
+    const revision = parseStoryboardRevision({
+      content: params.content,
+      knownCharacterNames: params.knownCharacterNames,
+    });
+    if (revision) {
+      return { kind: "revision", revision };
+    }
+    if (matched.length > 0 && hasAction && DIRECTOR_REQUEST_MARKER.test(text)) {
+      return {
+        kind: "director_open",
+        characterNames: matched,
+        unknownNames: explicitUnknownNames,
+        environment: readStoryboardEnvironment(text),
+        scenePrompt: text,
+      };
+    }
     return undefined;
   }
   return {

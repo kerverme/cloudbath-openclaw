@@ -15,6 +15,7 @@ import {
   type StoryboardPaidDraftResult,
   type StoryboardPaidDraftRuntime,
 } from "./storyboard-paid-draft-runtime.js";
+import { storyboardHasDialogue } from "./storyboard-revision.js";
 import type {
   StoryboardCostEstimate,
   StoryboardDraftConfirmation,
@@ -311,8 +312,10 @@ async function requestPaidDraft(
       aspectRatio: plan.aspectRatio,
       resolution: plan.resolution,
       // Asking is not granting: the LINE side only honours this when the live
-      // catalog reports audio support for the bound model.
-      audio: true,
+      // catalog reports audio support for the bound model. A scene with no
+      // spoken line asks for none, so dropping dialogue actually re-quotes
+      // against the cheaper silent SKU instead of paying for unused audio.
+      audio: storyboardHasDialogue(version.document),
       storyboardId: version.storyboardId,
       storyboardVersionNumber: version.versionNumber,
       characterLocks: version.characterLocks.map((lock) =>
