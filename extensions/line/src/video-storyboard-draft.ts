@@ -23,7 +23,11 @@ import {
   resolveLineVideoMaxEstimatedCostUsd,
   resolveLineVideoOutputSize,
 } from "./video-cost-guard.js";
-import { createLineVideoDraft, type LineVideoDraftStore } from "./video-draft-store.js";
+import {
+  createLineVideoDraft,
+  supersedeLineVideoDraftsForStoryboard,
+  type LineVideoDraftStore,
+} from "./video-draft-store.js";
 import { loadOpenRouterVideoModels, type OpenRouterVideoModel } from "./video-model-catalog.js";
 import {
   buildLineVideoConversationKey,
@@ -132,6 +136,8 @@ export type LineStoryboardVideoDraftResult =
        */
       pricingSource: string;
       outputSize?: string;
+      /** Codes this allocation retired, so the caller can say which are dead. */
+      supersededDraftIds?: readonly string[];
     }>
   | Readonly<LineStoryboardVideoDraftRejection>;
 
@@ -274,13 +280,28 @@ export async function prepareLineStoryboardVideoDraft(
     resolution: request.resolution,
     audio,
     estimatedCostUsd: costGuard.estimatedCostUsd,
+    storyboardId: request.storyboardId,
     ...(request.deliveryTo ? { deliveryTo: request.deliveryTo } : {}),
     ...(deps.now ? { now: deps.now } : {}),
     ...(deps.randomDraftCode ? { randomDraftCode: deps.randomDraftCode } : {}),
   });
 
+  // Retire the previous code for THIS storyboard only, and only now that its
+  // replacement exists. New work (a cast addition opens a new project, hence a
+  // new storyboard id) never matches, so its code survives untouched.
+  const superseded = await supersedeLineVideoDraftsForStoryboard({
+    store: deps.draftStore,
+    accountId: request.accountId,
+    conversationKey,
+    ownerSenderId: request.ownerSenderId,
+    storyboardId: request.storyboardId,
+    supersededByDraftId: draft.draftId,
+    ...(deps.now ? { now: deps.now } : {}),
+  });
+
   return {
     kind: "created",
+    ...(superseded.length > 0 ? { supersededDraftIds: superseded } : {}),
     draftId: draft.draftId,
     modelId: model.id,
     modelName: model.name,

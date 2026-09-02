@@ -180,7 +180,10 @@ function notionLibraryStub() {
 }
 
 /** Wires both plugins together the way the two plugin entrypoints do. */
-function harness(options: { maxEstimatedCostUsd?: number } = {}) {
+function harness(options: { maxEstimatedCostUsd?: number; draftCodes?: readonly number[] } = {}) {
+  // Deterministic codes so a supersede assertion can name the exact code that
+  // died, rather than matching whatever the allocator happened to pick.
+  const codes = [...(options.draftCodes ?? [])];
   const draftStore = mem<never>();
   const jobStore = mem<never>();
   const activeJobLockStore = mem<never>();
@@ -211,6 +214,7 @@ function harness(options: { maxEstimatedCostUsd?: number } = {}) {
         },
         now: () => NOW,
         fetchImpl: catalogFetch as never,
+        ...(options.draftCodes ? { randomDraftCode: () => codes.shift() ?? 9999 } : {}),
       }),
   };
 
@@ -530,5 +534,107 @@ describe("unknown-after-send never becomes a second paid request", () => {
     await h.drainBackground();
     expect(confirmed?.text).toContain("เริ่มสร้างวิดีโอแล้ว");
     expect(generateVideoMock).toHaveBeenCalledTimes(2);
+  });
+});
+
+/**
+ * A re-quote of the SAME storyboard retires the code it replaces.
+ *
+ * Everything below runs through the real allocator and the real shipped gate,
+ * so "rejected" means the production confirmation path rejected it, and the
+ * provider spy is the only way money could be spent.
+ */
+describe("superseded VIDEO codes", () => {
+  /** Single-cast storyboard, so a later cast addition is a genuine addition. */
+  const SOLO_CREATE = "ใช้ Twong ให้ Twong เดินเข้ามา 15 วิ ในสวน";
+
+  async function revisedHarness() {
+    const h = harness({ draftCodes: [1111, 2222] });
+    await h.storyboard(SOLO_CREATE, "m1");
+    const first = await h.storyboard("สร้างวิดีโอ", "m2");
+    expect(first?.text).toContain("ยืนยัน VIDEO 1111");
+
+    // Same storyboard, revised: the re-quote allocates 2222 and retires 1111.
+    const revised = await h.storyboard("ขอ 20 วิแทน", "m3");
+    expect(revised?.text).toContain("ยืนยัน VIDEO 2222");
+    return h;
+  }
+
+  it("retires the old code and keeps the new one pending", async () => {
+    const h = await revisedHarness();
+
+    expect(await h.draftStore.lookup("1111")).toMatchObject({
+      status: "superseded",
+      supersededByDraftId: "2222",
+    });
+    expect(await h.draftStore.lookup("2222")).toMatchObject({ status: "pending" });
+  });
+
+  it("rejects the superseded code, names its replacement, and bills nothing", async () => {
+    const h = await revisedHarness();
+
+    const stale = await h.confirm("ยืนยัน VIDEO 1111");
+    await h.drainBackground();
+
+    expect(stale?.handled).toBe(true);
+    expect(stale?.text).toContain("ถูกแทนที่แล้ว");
+    expect(stale?.text).toContain("ยืนยัน VIDEO 2222");
+    expect(generateVideoMock).not.toHaveBeenCalled();
+    // Read, never consumed: a second attempt still points at the new code.
+    const again = await h.confirm("ยืนยัน VIDEO 1111");
+    expect(again?.text).toContain("ยืนยัน VIDEO 2222");
+    expect(generateVideoMock).not.toHaveBeenCalled();
+  });
+
+  it("submits exactly once for the newest code, and never twice", async () => {
+    const h = await revisedHarness();
+
+    const confirmed = await h.confirm("ยืนยัน VIDEO 2222");
+    await h.drainBackground();
+    expect(confirmed?.text).toContain("เริ่มสร้างวิดีโอแล้ว");
+    expect(generateVideoMock).toHaveBeenCalledTimes(1);
+    // The revision is what got submitted, not the length it replaced.
+    expect(generateVideoMock.mock.calls[0]![0].durationSeconds).toBe(20);
+
+    const replay = await h.confirm("ยืนยัน VIDEO 2222");
+    await h.drainBackground();
+    expect(replay?.text).toContain("ไม่พบ video draft");
+    expect(generateVideoMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("never reveals the replacement code to anyone but the code's own owner", async () => {
+    const h = await revisedHarness();
+
+    const nonOwner = await h.confirm("ยืนยัน VIDEO 1111", { senderIsOwner: false });
+    // Another AUTHORIZED owner: passes the owner flag, fails the binding check.
+    const otherOwner = await h.confirm("ยืนยัน VIDEO 1111", { senderId: "U-someone-else" });
+
+    expect(nonOwner?.text).toBe("ไม่มีสิทธิ์ยืนยันการสร้างวิดีโอ");
+    expect(otherOwner?.text).toBe("video draft นี้ไม่ตรงกับบทสนทนานี้");
+    for (const reply of [nonOwner, otherOwner]) {
+      expect(reply?.text).not.toContain("2222");
+    }
+    expect(generateVideoMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps the previous project's code alive when a cast addition opens new work", async () => {
+    const h = harness({ draftCodes: [1111, 3333] });
+    await h.storyboard(SOLO_CREATE, "m1");
+    expect((await h.storyboard("สร้างวิดีโอ", "m2"))?.text).toContain("ยืนยัน VIDEO 1111");
+
+    // PR #50: adding someone the project never froze starts a NEW project, so
+    // a new storyboard id -- which must NOT retire the old project's code.
+    const added = await h.storyboard("เพิ่ม Twong2 เข้ามาด้วย", "m3");
+    expect(added?.text).toContain("เริ่มงานใหม่");
+    expect((await h.storyboard("สร้างวิดีโอ", "m4"))?.text).toContain("ยืนยัน VIDEO 3333");
+
+    expect(await h.draftStore.lookup("1111")).toMatchObject({ status: "pending" });
+    expect(await h.draftStore.lookup("3333")).toMatchObject({ status: "pending" });
+
+    // And the old project's code still really works.
+    await h.confirm("ยืนยัน VIDEO 1111");
+    await h.drainBackground();
+    expect(generateVideoMock).toHaveBeenCalledTimes(1);
+    expect(generateVideoMock.mock.calls[0]![0].durationSeconds).toBe(15);
   });
 });

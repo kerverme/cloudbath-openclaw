@@ -16,7 +16,15 @@ const DRAFT_CODE_MIN = 1000;
 const DRAFT_CODE_MAX = 9999;
 const MAX_DRAFT_ID_ATTEMPTS = 20;
 
-export type LineVideoDraftStatus = "pending" | "confirmed" | "expired";
+/**
+ * `superseded` is a TOMBSTONE, not a draft.
+ *
+ * A re-quote of the same logical storyboard leaves the old code in the store
+ * pointing at its replacement, so confirming it answers with the new code
+ * instead of the generic "not found" a delete would produce -- and so the code
+ * cannot be reissued to a different job while the owner still has it on screen.
+ */
+export type LineVideoDraftStatus = "pending" | "confirmed" | "expired" | "superseded";
 
 export type LineVideoDraft = {
   version: 1;
@@ -35,6 +43,17 @@ export type LineVideoDraft = {
   createdAt: number;
   expiresAt: number;
   status: LineVideoDraftStatus;
+  /**
+   * The storyboard this draft quotes, when it came from the storyboard flow.
+   *
+   * This is what makes "the same logical draft" decidable: a re-quote of the
+   * same storyboard supersedes its earlier codes, while new work (a cast
+   * addition opens a new project, and so a new storyboard) has a different id
+   * and leaves the previous project's code untouched.
+   */
+  storyboardId?: string;
+  /** On a `superseded` tombstone, the code that replaced this one. */
+  supersededByDraftId?: string;
   /**
    * LINE-native `to` address (line:group:<id> / line:room:<id> / line:<userId>)
    * captured from the draft tool's trusted DeliveryContext, so the async
@@ -75,6 +94,7 @@ export async function createLineVideoDraft(params: {
   audio: boolean;
   estimatedCostUsd: number;
   deliveryTo?: string;
+  storyboardId?: string;
   now?: () => number;
   randomDraftCode?: () => number;
 }): Promise<LineVideoDraft> {
@@ -99,10 +119,56 @@ export async function createLineVideoDraft(params: {
     createdAt: now,
     expiresAt: now + LINE_VIDEO_DRAFT_TTL_MS,
     status: "pending",
+    ...(params.storyboardId ? { storyboardId: params.storyboardId } : {}),
     ...(params.deliveryTo ? { deliveryTo: params.deliveryTo } : {}),
   };
   await params.store.register(draftId, draft, { ttlMs: LINE_VIDEO_DRAFT_TTL_MS });
   return draft;
+}
+
+/**
+ * Retires every earlier pending code for one storyboard, in this owner's scope.
+ *
+ * Called AFTER the replacement draft exists, so a failure here leaves the old
+ * code valid rather than leaving the owner with no confirmable code at all.
+ * The scope comparison is the whole trusted triple plus the storyboard id: a
+ * different owner, conversation or account never matches, so no one can
+ * invalidate a code that is not theirs.
+ */
+export async function supersedeLineVideoDraftsForStoryboard(params: {
+  store: LineVideoDraftStore;
+  accountId: string;
+  conversationKey: string;
+  ownerSenderId: string;
+  storyboardId: string;
+  supersededByDraftId: string;
+  now?: () => number;
+}): Promise<readonly string[]> {
+  const now = (params.now ?? Date.now)();
+  const superseded: string[] = [];
+  for (const entry of await params.store.entries()) {
+    const draft = entry.value;
+    if (
+      draft.status !== "pending" ||
+      draft.draftId === params.supersededByDraftId ||
+      draft.storyboardId !== params.storyboardId ||
+      draft.accountId !== params.accountId ||
+      draft.conversationKey !== params.conversationKey ||
+      draft.ownerSenderId !== params.ownerSenderId ||
+      draft.expiresAt <= now
+    ) {
+      continue;
+    }
+    // Keeps the original expiry: a tombstone is only useful while the owner
+    // could still be looking at the code it replaced.
+    await params.store.register(
+      draft.draftId,
+      { ...draft, status: "superseded", supersededByDraftId: params.supersededByDraftId },
+      { ttlMs: Math.max(1, draft.expiresAt - now) },
+    );
+    superseded.push(draft.draftId);
+  }
+  return Object.freeze(superseded);
 }
 
 export type LineVideoDraftConsumeResult =

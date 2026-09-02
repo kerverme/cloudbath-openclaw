@@ -53,6 +53,8 @@ export type StoryboardPaidDraftResult =
       /** Opaque provenance string from the owning plugin; never parsed here. */
       pricingSource: string;
       outputSize?: string;
+      /** Codes this allocation retired; the owner is told these are dead. */
+      supersededDraftIds?: readonly string[];
     }>
   | Readonly<{ kind: "rejected"; reason: string; [key: string]: unknown }>;
 
