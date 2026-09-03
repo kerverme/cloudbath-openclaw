@@ -36,7 +36,10 @@ const SEEDANCE = "bytedance/seedance-2.0/reference-to-video";
 type FalTestConfig = {
   videoGeneration: {
     maxEstimatedCostUsd?: number;
-    falModels?: Record<string, { durationSeconds?: number[]; audio?: "always_on" }>;
+    falModels?: Record<
+      string,
+      { durationSeconds?: number[]; audio?: "always_on"; enabled?: boolean }
+    >;
     falPricing?: { models: Record<string, { usdPerSecond?: number; source?: string }> };
   };
 };

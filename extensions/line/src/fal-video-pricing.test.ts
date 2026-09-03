@@ -236,14 +236,10 @@ describe("per-model fal pricing", () => {
     });
 
     it("L: each reference image past the fifth adds $0.08", () => {
-      expect(h3Quote("2K", 6).kind === "available" && h3Quote("2K", 6).amountUsd).toBeCloseTo(
-        2.03,
-        6,
-      );
-      expect(h3Quote("2K", 9).kind === "available" && h3Quote("2K", 9).amountUsd).toBeCloseTo(
-        1.95 + 4 * 0.08,
-        6,
-      );
+      const six = h3Quote("2K", 6);
+      expect(six.kind === "available" && six.amountUsd).toBeCloseTo(2.03, 6);
+      const nine = h3Quote("2K", 9);
+      expect(nine.kind === "available" && nine.amountUsd).toBeCloseTo(1.95 + 4 * 0.08, 6);
     });
 
     it("is payable with no operator rate, and an operator rate still wins", () => {

@@ -102,6 +102,7 @@ const { createLineVideoConfirmationGate } = await import("./video-confirmation.j
 const { prepareLineStoryboardVideoDraft } = await import("./video-storyboard-draft.js");
 const { listFalStoryboardModels, matchFalStoryboardQuery, offerFalStoryboardDefault } =
   await import("./fal-storyboard-seam.js");
+import type { FalStoryboardConfig } from "./fal-storyboard-seam.js";
 import type { LineVideoDraft } from "./video-draft-store.js";
 import type { LineVideoActiveJobLock, LineVideoJob } from "./video-job-store.js";
 
@@ -118,8 +119,18 @@ const DIALOGUE_TEXT_QUESTION = "ให้พูดว่าอะไร?";
  * Deliberately declares NO rates: H3 and Seedance 2.5 both carry fal's own
  * published price for their exact endpoint, so this is the shape a real
  * operator ships with, and the quotes below are the ones production computes.
+ *
+ * Typed as the fal seam's own config PLUS `maxEstimatedCostUsd`, which is a
+ * separate LINE-owned budget field production merges into the same
+ * `videoGeneration` object (see types.ts's `LineVideoGenerationConfig`).
+ * Declaring the wider type here, not just this concrete value, is what keeps
+ * it assignable everywhere production passes it: a value with zero property
+ * overlap with a fully-optional target type fails TypeScript's weak-type
+ * check even though every field is optional.
  */
-function falVideoGeneration() {
+function falVideoGeneration(): FalStoryboardConfig["videoGeneration"] & {
+  maxEstimatedCostUsd?: number;
+} {
   return { maxEstimatedCostUsd: 50 };
 }
 
@@ -193,20 +204,27 @@ function buildFlow() {
     },
   };
 
+  // Bound once and reused as a variable, not a fresh literal, at each call
+  // site: `falVideoGeneration()` carries `maxEstimatedCostUsd` for the LINE
+  // cost guard below, which is real production shape (one merged
+  // `videoGeneration` config object) rather than something the narrower fal-
+  // only types declare.
+  const falCfg = { videoGeneration: falVideoGeneration() };
+
   // The REAL LINE-owned paid runtime and the REAL fal registry seams, injected
   // rather than installed into the process-global slot so suites do not leak.
   const paidDraftRuntime = {
     offerDefaultVideoModel: async (_accountId: string, requirements: never) =>
-      offerFalStoryboardDefault({ videoGeneration: falVideoGeneration() }, requirements),
+      offerFalStoryboardDefault(falCfg, requirements),
     listCompatibleVideoModels: async (_accountId: string, requirements: never) =>
-      listFalStoryboardModels({ videoGeneration: falVideoGeneration() }, requirements),
+      listFalStoryboardModels(falCfg, requirements),
     matchVideoModelQuery: async (_accountId: string, requirements: never, text: string) =>
-      matchFalStoryboardQuery({ videoGeneration: falVideoGeneration() }, requirements, text),
+      matchFalStoryboardQuery(falCfg, requirements, text),
     prepareStoryboardVideoDraft: async (request: never) =>
       await prepareLineStoryboardVideoDraft(request, {
         draftStore: draftStore as never,
         resolveFalAuth: async () => true,
-        cfg: { videoGeneration: falVideoGeneration() },
+        cfg: falCfg,
         now: () => NOW,
       }),
   };

@@ -16,9 +16,13 @@ const SEEDANCE_25 = "bytedance/seedance-2.5/reference-to-video";
 /**
  * No operator rates at all: H3 and Seedance 2.5 both carry fal's own published
  * price, so the ordinary production setup needs nothing declared.
+ *
+ * `maxEstimatedCostUsd` is a separate LINE-owned budget gate applied after
+ * this offer, not a field this seam's own type declares or reads, so it has
+ * no place in a `FalStoryboardConfig` fixture.
  */
 function cfg(overrides: FalStoryboardConfig["videoGeneration"] = {}): FalStoryboardConfig {
-  return { videoGeneration: { maxEstimatedCostUsd: 50, ...overrides } };
+  return { videoGeneration: { ...overrides } };
 }
 
 /** The ordinary Character Library scene: one identity reference, sound wanted. */
