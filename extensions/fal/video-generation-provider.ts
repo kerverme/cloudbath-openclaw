@@ -37,26 +37,64 @@ const SEEDANCE_2_TEXT_IMAGE_VIDEO_MODELS = [
 ] as const;
 const SEEDANCE_2_REFERENCE_VIDEO_MODELS = [
   "bytedance/seedance-2.0/fast/reference-to-video",
+  "bytedance/seedance-2.0/mini/reference-to-video",
   "bytedance/seedance-2.0/reference-to-video",
+  "bytedance/seedance-2.5/reference-to-video",
 ] as const;
+
+/**
+ * MiniMax H3 reference-to-video, and H3 Max.
+ *
+ * These take `reference_image_urls` / `reference_video_urls` /
+ * `reference_audio_urls` — a DIFFERENT contract from Seedance's `image_urls`,
+ * and a different one again from the single `image_url` first-frame branch.
+ * Routing an H3 reference job through the first-frame branch would silently
+ * turn a Character identity reference into "start the video on this picture",
+ * which is a different request than the one the owner confirmed.
+ */
+const MINIMAX_H3_REFERENCE_VIDEO_MODELS = [
+  "minimax/h3/reference-to-video",
+  "minimax/h3-max/reference-to-video",
+] as const;
+/** Per fal's current model pages: 9 images, 3 videos, 3 audio, 12 files total. */
+const MINIMAX_H3_MAX_IMAGES = 9;
+const MINIMAX_H3_MAX_VIDEOS = 3;
+const MINIMAX_H3_MAX_AUDIOS = 3;
+const MINIMAX_H3_MAX_FILES = 12;
+const MINIMAX_H3_DURATION_SECONDS = [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15] as const;
 const SEEDANCE_2_VIDEO_MODELS = [
   ...SEEDANCE_2_TEXT_IMAGE_VIDEO_MODELS,
   ...SEEDANCE_2_REFERENCE_VIDEO_MODELS,
 ] as const;
 const SEEDANCE_2_DURATION_SECONDS = [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15] as const;
+/** Seedance 2.5 reaches 30s, per fal's current API reference for that endpoint. */
+const SEEDANCE_2_5_MODEL = "bytedance/seedance-2.5/reference-to-video";
+const SEEDANCE_2_5_DURATION_SECONDS = Array.from(
+  { length: 27 },
+  (_unused, index) => index + 4,
+) as readonly number[];
+/**
+ * Seedance 2.5 accepts up to 50 multimodal reference inputs in total, where
+ * 2.0 caps at 9 images and 12 files.
+ */
+const SEEDANCE_2_5_MAX_REFERENCES = 50;
 const SEEDANCE_REFERENCE_MAX_IMAGES = 9;
 const SEEDANCE_REFERENCE_MAX_VIDEOS = 3;
 const SEEDANCE_REFERENCE_MAX_AUDIOS = 3;
 const SEEDANCE_REFERENCE_MAX_FILES = 12;
-const SEEDANCE_REFERENCE_MAX_IMAGES_BY_MODEL = Object.fromEntries(
-  SEEDANCE_2_REFERENCE_VIDEO_MODELS.map((model) => [model, SEEDANCE_REFERENCE_MAX_IMAGES]),
-);
-const SEEDANCE_REFERENCE_MAX_VIDEOS_BY_MODEL = Object.fromEntries(
-  SEEDANCE_2_REFERENCE_VIDEO_MODELS.map((model) => [model, SEEDANCE_REFERENCE_MAX_VIDEOS]),
-);
-const SEEDANCE_REFERENCE_MAX_AUDIOS_BY_MODEL = Object.fromEntries(
-  SEEDANCE_2_REFERENCE_VIDEO_MODELS.map((model) => [model, SEEDANCE_REFERENCE_MAX_AUDIOS]),
-);
+const SEEDANCE_REFERENCE_MAX_IMAGES_BY_MODEL = Object.fromEntries([
+  ...SEEDANCE_2_REFERENCE_VIDEO_MODELS.map((model) => [model, SEEDANCE_REFERENCE_MAX_IMAGES]),
+  [SEEDANCE_2_5_MODEL, SEEDANCE_2_5_MAX_REFERENCES],
+  ...MINIMAX_H3_REFERENCE_VIDEO_MODELS.map((model) => [model, MINIMAX_H3_MAX_IMAGES]),
+]);
+const SEEDANCE_REFERENCE_MAX_VIDEOS_BY_MODEL = Object.fromEntries([
+  ...SEEDANCE_2_REFERENCE_VIDEO_MODELS.map((model) => [model, SEEDANCE_REFERENCE_MAX_VIDEOS]),
+  ...MINIMAX_H3_REFERENCE_VIDEO_MODELS.map((model) => [model, MINIMAX_H3_MAX_VIDEOS]),
+]);
+const SEEDANCE_REFERENCE_MAX_AUDIOS_BY_MODEL = Object.fromEntries([
+  ...SEEDANCE_2_REFERENCE_VIDEO_MODELS.map((model) => [model, SEEDANCE_REFERENCE_MAX_AUDIOS]),
+  ...MINIMAX_H3_REFERENCE_VIDEO_MODELS.map((model) => [model, MINIMAX_H3_MAX_AUDIOS]),
+]);
 const DEFAULT_HTTP_TIMEOUT_MS = 30_000;
 const DEFAULT_OPERATION_TIMEOUT_MS = 1_200_000;
 const DEFAULT_GENERATED_VIDEO_MAX_BYTES = 16 * 1024 * 1024;
@@ -281,12 +319,27 @@ function isFalHeyGenVideoAgentModel(model: string): boolean {
   return normalizeLowercaseStringOrEmpty(model) === HEYGEN_VIDEO_AGENT_MODEL;
 }
 
+function isFalMiniMaxH3ReferenceModel(model: string): boolean {
+  return MINIMAX_H3_REFERENCE_VIDEO_MODELS.includes(
+    model as (typeof MINIMAX_H3_REFERENCE_VIDEO_MODELS)[number],
+  );
+}
+
+function isFalSeedance25Model(model: string): boolean {
+  return model === SEEDANCE_2_5_MODEL;
+}
+
 function resolveFalResolution(resolution: VideoGenerationRequest["resolution"], model: string) {
   if (!resolution) {
     return undefined;
   }
   if (isFalSeedance2Model(model)) {
     return resolution.toLowerCase();
+  }
+  // H3 documents its sizes in upper case ("768P"); sending a lower-cased value
+  // is not the same string the endpoint enumerates.
+  if (isFalMiniMaxH3ReferenceModel(model)) {
+    return resolution.toUpperCase();
   }
   return resolution;
 }
@@ -299,11 +352,24 @@ function resolveFalDuration(
     return undefined;
   }
   const duration = Math.max(1, Math.round(durationSeconds));
+  // Seedance 2.5 reaches 30s where 2.0 stops at 15, so the two are checked
+  // against their own published ranges rather than one shared list.
+  if (isFalSeedance25Model(model)) {
+    return SEEDANCE_2_5_DURATION_SECONDS.includes(duration) ? String(duration) : undefined;
+  }
   if (isFalSeedance2Model(model)) {
     return SEEDANCE_2_DURATION_SECONDS.includes(
       duration as (typeof SEEDANCE_2_DURATION_SECONDS)[number],
     )
       ? String(duration)
+      : undefined;
+  }
+  // H3 takes an integer, not a string enum.
+  if (isFalMiniMaxH3ReferenceModel(model)) {
+    return MINIMAX_H3_DURATION_SECONDS.includes(
+      duration as (typeof MINIMAX_H3_DURATION_SECONDS)[number],
+    )
+      ? duration
       : undefined;
   }
   return duration;
@@ -358,6 +424,51 @@ function applyFalSeedanceControls(params: {
   }
 }
 
+/**
+ * MiniMax H3 / H3 Max reference-to-video.
+ *
+ * A separate builder from Seedance's on purpose: the field names differ
+ * (`reference_image_urls` vs `image_urls`), the duration is an integer rather
+ * than a string enum, and there is no `generate_audio` — H3 produces native
+ * synchronized audio on every generation, so sending an audio flag would
+ * imply a control the endpoint does not expose.
+ */
+function buildMiniMaxH3ReferenceBody(params: {
+  req: VideoGenerationRequest;
+  model: string;
+}): Record<string, unknown> {
+  const body: Record<string, unknown> = { prompt: params.req.prompt };
+  const imageUrls = resolveFalReferenceUrls(params.req.inputImages, "image/png", "reference image");
+  const videoUrls = resolveFalReferenceUrls(params.req.inputVideos, "video/mp4", "reference video");
+  const audioUrls = resolveFalReferenceUrls(
+    params.req.inputAudios,
+    "audio/mpeg",
+    "reference audio",
+  );
+  if (imageUrls.length > 0) {
+    body.reference_image_urls = imageUrls;
+  }
+  if (videoUrls.length > 0) {
+    body.reference_video_urls = videoUrls;
+  }
+  if (audioUrls.length > 0) {
+    body.reference_audio_urls = audioUrls;
+  }
+  const aspectRatio = normalizeOptionalString(params.req.aspectRatio);
+  if (aspectRatio) {
+    body.aspect_ratio = aspectRatio;
+  }
+  const resolution = resolveFalResolution(params.req.resolution, params.model);
+  if (resolution) {
+    body.resolution = resolution;
+  }
+  const duration = resolveFalDuration(params.req.durationSeconds, params.model);
+  if (duration !== undefined) {
+    body.duration = duration;
+  }
+  return body;
+}
+
 function buildFalVideoRequestBody(params: {
   req: VideoGenerationRequest;
   model: string;
@@ -365,6 +476,13 @@ function buildFalVideoRequestBody(params: {
   const requestBody: Record<string, unknown> = {
     prompt: params.req.prompt,
   };
+
+  // Checked BEFORE the generic first-frame branch below: an H3 reference job
+  // must never fall through to `image_url`, which would turn a Character
+  // identity reference into first-frame semantics.
+  if (isFalMiniMaxH3ReferenceModel(params.model)) {
+    return buildMiniMaxH3ReferenceBody({ req: params.req, model: params.model });
+  }
 
   if (isFalSeedance2ReferenceModel(params.model)) {
     const imageUrls = resolveFalReferenceUrls(
@@ -420,6 +538,48 @@ function validateFalVideoReferenceInputs(params: {
   const imageCount = params.req.inputImages?.length ?? 0;
   const videoCount = params.req.inputVideos?.length ?? 0;
   const audioCount = params.req.inputAudios?.length ?? 0;
+  const totalReferenceFiles = imageCount + videoCount + audioCount;
+
+  if (isFalMiniMaxH3ReferenceModel(params.model)) {
+    if (imageCount > MINIMAX_H3_MAX_IMAGES) {
+      throw new Error(
+        `fal MiniMax H3 reference-to-video supports at most ${MINIMAX_H3_MAX_IMAGES} reference images.`,
+      );
+    }
+    if (videoCount > MINIMAX_H3_MAX_VIDEOS) {
+      throw new Error(
+        `fal MiniMax H3 reference-to-video supports at most ${MINIMAX_H3_MAX_VIDEOS} reference videos.`,
+      );
+    }
+    if (audioCount > MINIMAX_H3_MAX_AUDIOS) {
+      throw new Error(
+        `fal MiniMax H3 reference-to-video supports at most ${MINIMAX_H3_MAX_AUDIOS} reference audios.`,
+      );
+    }
+    if (totalReferenceFiles > MINIMAX_H3_MAX_FILES) {
+      throw new Error(
+        `fal MiniMax H3 reference-to-video supports at most ${MINIMAX_H3_MAX_FILES} total reference files.`,
+      );
+    }
+    return;
+  }
+
+  // Seedance 2.5 states one combined cap across every modality, where 2.0
+  // states per-modality caps plus a smaller total.
+  if (isFalSeedance25Model(params.model)) {
+    if (totalReferenceFiles > SEEDANCE_2_5_MAX_REFERENCES) {
+      throw new Error(
+        `fal Seedance 2.5 reference-to-video supports at most ${SEEDANCE_2_5_MAX_REFERENCES} total reference inputs.`,
+      );
+    }
+    if (audioCount > 0 && imageCount === 0 && videoCount === 0) {
+      throw new Error(
+        "fal Seedance reference-to-video requires at least one image or video reference when audio references are provided.",
+      );
+    }
+    return;
+  }
+
   if (isFalSeedance2ReferenceModel(params.model)) {
     if (imageCount > SEEDANCE_REFERENCE_MAX_IMAGES) {
       throw new Error(
@@ -587,6 +747,21 @@ function extractFalVideoPayload(payload: FalQueueResponse): FalVideoResponse {
   return readFalVideoPayload(payload);
 }
 
+/**
+ * Durations per endpoint, from each one's OWN published range.
+ *
+ * Seedance 2.5 reaches 30s and H3 spans 5-15, so a single shared list would
+ * either under-report 2.5 or over-report H3 — and over-reporting is what lets
+ * an unrunnable request reach a paid submission.
+ */
+function falDurationsByModel(): Record<string, readonly number[]> {
+  return Object.fromEntries([
+    ...SEEDANCE_2_VIDEO_MODELS.map((model) => [model, SEEDANCE_2_DURATION_SECONDS]),
+    [SEEDANCE_2_5_MODEL, SEEDANCE_2_5_DURATION_SECONDS],
+    ...MINIMAX_H3_REFERENCE_VIDEO_MODELS.map((model) => [model, MINIMAX_H3_DURATION_SECONDS]),
+  ]);
+}
+
 export function buildFalVideoGenerationProvider(): VideoGenerationProvider {
   return {
     id: "fal",
@@ -596,6 +771,7 @@ export function buildFalVideoGenerationProvider(): VideoGenerationProvider {
       DEFAULT_FAL_VIDEO_MODEL,
       HEYGEN_VIDEO_AGENT_MODEL,
       ...SEEDANCE_2_VIDEO_MODELS,
+      ...MINIMAX_H3_REFERENCE_VIDEO_MODELS,
       "fal-ai/kling-video/v2.1/master/text-to-video",
       "fal-ai/wan/v2.2-a14b/text-to-video",
       "fal-ai/wan/v2.2-a14b/image-to-video",
@@ -608,9 +784,7 @@ export function buildFalVideoGenerationProvider(): VideoGenerationProvider {
     capabilities: {
       generate: {
         maxVideos: 1,
-        supportedDurationSecondsByModel: Object.fromEntries(
-          SEEDANCE_2_VIDEO_MODELS.map((model) => [model, SEEDANCE_2_DURATION_SECONDS]),
-        ),
+        supportedDurationSecondsByModel: falDurationsByModel(),
         supportsAspectRatio: true,
         supportsResolution: true,
         supportsSize: true,
@@ -622,9 +796,7 @@ export function buildFalVideoGenerationProvider(): VideoGenerationProvider {
         maxInputImages: 1,
         maxInputImagesByModel: SEEDANCE_REFERENCE_MAX_IMAGES_BY_MODEL,
         maxInputAudiosByModel: SEEDANCE_REFERENCE_MAX_AUDIOS_BY_MODEL,
-        supportedDurationSecondsByModel: Object.fromEntries(
-          SEEDANCE_2_VIDEO_MODELS.map((model) => [model, SEEDANCE_2_DURATION_SECONDS]),
-        ),
+        supportedDurationSecondsByModel: falDurationsByModel(),
         supportsAspectRatio: true,
         supportsResolution: true,
         supportsSize: true,
@@ -638,9 +810,7 @@ export function buildFalVideoGenerationProvider(): VideoGenerationProvider {
         maxInputVideos: 0,
         maxInputVideosByModel: SEEDANCE_REFERENCE_MAX_VIDEOS_BY_MODEL,
         maxInputAudiosByModel: SEEDANCE_REFERENCE_MAX_AUDIOS_BY_MODEL,
-        supportedDurationSecondsByModel: Object.fromEntries(
-          SEEDANCE_2_REFERENCE_VIDEO_MODELS.map((model) => [model, SEEDANCE_2_DURATION_SECONDS]),
-        ),
+        supportedDurationSecondsByModel: falDurationsByModel(),
         supportsAspectRatio: true,
         supportsResolution: true,
         supportsSize: true,
