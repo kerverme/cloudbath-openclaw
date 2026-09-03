@@ -1,75 +1,132 @@
 /**
- * End-to-end owner video flow for the LINE channel, asserted against the real
- * stores rather than any model-authored prose:
+ * The official end-to-end owner video flow for the LINE channel, asserted
+ * against the real stores and the real routers rather than model-authored
+ * prose:
  *
- *   owner natural-language request
- *     -> reaches line_video_draft (no before_dispatch router claims it)
- *     -> DRAFT persisted, zero paid provider POSTs
- *     -> exact owner confirmation
- *     -> job running + active-job lock held
- *     -> terminal outcome releases the lock
- *     -> a new draft is immediately allowed
+ *   natural request
+ *     -> the bot asks 15 or 30 seconds, BEFORE building anything
+ *     -> storyboard, with NO paid VIDEO code
+ *     -> free revision, still no code
+ *     -> "ยืนยัน Storyboard" freezes the content
+ *     -> capability-aware default model, or a change
+ *     -> Final Video Draft naming the actual fal endpoint
+ *     -> exact "ยืนยัน VIDEO ####"
+ *     -> exactly one mocked fal submission -> R2 -> LINE
+ *     -> a replayed confirmation submits nothing
  *
- * Pins the production regressions from the deployed build: the undeclared
- * line_video_draft contract, the fail-open video_generate guard, and PR #23's
- * active-job lock lifecycle.
+ * fal is the only paid video provider in this flow, and every submission here
+ * goes through a mocked `generateVideo`; no paid call is made.
  */
 import type { PluginStateKeyedStore } from "openclaw/plugin-sdk/plugin-state-runtime";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const generateVideoMock = vi.fn();
 const sendMessageLineMock = vi.fn(async (..._args: unknown[]) => ({}));
+const stageLineOutboundVideoMock = vi.fn(async (..._args: unknown[]) => ({
+  url: "https://r2.example/archived.mp4?X-Amz-Signature=sig",
+  objectKey: "outbound/line-video/sha256/ab/abcd.mp4",
+  contentType: "video/mp4",
+  contentLength: 10,
+  sha256: "abcd",
+}));
+
+const ACCOUNT = "acct-1";
+const GROUP = "C1234567890abcdef";
+const OWNER = "U0987654321";
+const NOW = Date.parse("2026-09-03T10:00:00.000Z");
+const H3_MODEL = "minimax/h3/reference-to-video";
+const SEEDANCE_25 = "bytedance/seedance-2.5/reference-to-video";
+
+const CAPABILITIES = Object.fromEntries(
+  [
+    "PRODUCT_LIBRARY",
+    "CHARACTER_LIBRARY",
+    "UGC_PROJECTS",
+    "UGC_SHOTS",
+    "AI_VIDEO_LIBRARY",
+    "AI_IMAGE_LIBRARY",
+  ].map((id, index) => [
+    id,
+    { databaseId: String(index + 1).repeat(32), dataSourceId: String(index + 1).repeat(32) },
+  ]),
+);
+
+const runtimeConfigMock = vi.hoisted(() => ({ current: {} as Record<string, unknown> }));
 
 vi.mock("openclaw/plugin-sdk/video-generation-runtime", () => ({
   generateVideo: (...args: unknown[]) => generateVideoMock(...args),
 }));
-vi.mock("openclaw/plugin-sdk/runtime-config-snapshot", () => ({ getRuntimeConfig: () => ({}) }));
+vi.mock("openclaw/plugin-sdk/runtime-config-snapshot", () => ({
+  getRuntimeConfig: () => runtimeConfigMock.current,
+}));
 vi.mock("openclaw/plugin-sdk/provider-auth", () => ({
   resolveOpenClawAgentDir: () => "/agent-dir",
 }));
 vi.mock("openclaw/plugin-sdk/provider-auth-runtime", () => ({
-  resolveApiKeyForProvider: async () => ({ apiKey: "sk-test" }),
-}));
-vi.mock("./accounts.js", () => ({
-  resolveLineAccount: () => ({
-    accountId: "acct-1",
-    enabled: true,
-    channelAccessToken: "token",
-    channelSecret: "secret",
-    tokenSource: "config" as const,
-    config: {},
-  }),
+  resolveApiKeyForProvider: async () => ({ apiKey: "fal-key" }),
 }));
 vi.mock("./send.js", () => ({
   sendMessageLine: (...args: unknown[]) => sendMessageLineMock(...args),
 }));
 vi.mock("./video-outbound-staging.js", () => ({
-  stageLineOutboundVideo: async () => ({ url: "https://r2.example/video.mp4" }),
+  stageLineOutboundVideo: (...args: unknown[]) => stageLineOutboundVideoMock(...args),
   stageLineVideoPreviewImage: async () => ({ url: "https://r2.example/preview.jpg" }),
+  signArchivedLineVideoUrl: async (key: string) => `https://r2.example/${key}?sig`,
 }));
+// fal's endpoint takes reference URLs. Only the R2 publish is replaced; the
+// ORDERING comes from the real resolver, because that ordering is what binds
+// each reference marker to the right character.
+vi.mock("./video-reference-urls.js", async () => {
+  const scope =
+    await vi.importActual<typeof import("./video-ugc-scope.js")>("./video-ugc-scope.js");
+  return {
+    resolveLineVideoReferenceUrls: async (
+      value: Parameters<typeof scope.orderLineVideoUgcReferences>[0],
+    ) =>
+      scope.orderLineVideoUgcReferences(value).map((reference, index) => ({
+        index,
+        url: `https://r2.example/${encodeURIComponent(reference.locator)}?sig`,
+        mimeType: "image/png",
+      })),
+  };
+});
 
-const { createLineVideoDraftTool, createLineVideoGenerationGuard } =
-  await import("./video-draft-tool.js");
+const { CloudbathStoryboardLineRouter } =
+  await import("../../cloudbath-line-image-archive/src/storyboard-line-router.js");
+const { StoryboardStore } =
+  await import("../../cloudbath-line-image-archive/src/storyboard-store.js");
+const { resolver } =
+  await import("../../cloudbath-line-image-archive/src/storyboard-router.test-support.js");
+const { ugcDraftScopeKey } = await import("../../cloudbath-line-image-archive/src/ugc-workflow.js");
 const { createLineVideoConfirmationGate } = await import("./video-confirmation.js");
-const { createLineVideoModelControlRouter } = await import("./video-model-control.js");
-const { createLineModelSwitchIntentRouter } = await import("./model-switch-router.js");
+const { prepareLineStoryboardVideoDraft } = await import("./video-storyboard-draft.js");
+const { listFalStoryboardModels, matchFalStoryboardQuery, offerFalStoryboardDefault } =
+  await import("./fal-storyboard-seam.js");
 import type { LineVideoDraft } from "./video-draft-store.js";
 import type { LineVideoActiveJobLock, LineVideoJob } from "./video-job-store.js";
-import type { LinePendingVideoModelSelection } from "./video-model-control.js";
-import type { LineVideoModelPreferenceState } from "./video-model-preference.js";
 
-/** The owner's real production phrasing: "please make me a video of a cat sitting on water, 5s". */
-const OWNER_REQUEST = "ช่วยทำ วีดีโอ แมวนั่ง อยู่บนน้ำ ให้หน่อย 5 วิ";
-const OWNER_ID = "U-owner";
-const CTX = { accountId: "acct-1", conversationId: "grp-a" };
+/** The owner's natural request; the cast is resolved from the Character Library. */
+const NATURAL_REQUEST = "เอา Twong เดินในสวน เจอน้ำ แล้วเตะขวดน้ำออกไปนอกโลก";
+const DURATION_QUESTION = "ต้องการความยาวเท่าไร?\n1. 15 วินาที\n2. 30 วินาที";
+/** The director's second slot: speech is asked about separately from sound. */
+const DIALOGUE_QUESTION = "มีเสียงพูดในคลิปไหม? (มี / ไม่มี)";
+const DIALOGUE_TEXT_QUESTION = "ให้พูดว่าอะไร?";
+
 /**
- * The chat model-switch router keys off the session, not the LINE conversation
- * scope, so it takes a different before_dispatch context shape than the video
- * routers (model-switch-router.ts LineBeforeDispatchContext).
+ * One fal configuration, shared by allocation and the confirmation gate.
+ *
+ * Seedance 2.5 needs no operator rate: fal publishes a token price for it.
+ * H3 does, and its 5-15s range and native audio come from fal's product
+ * documentation rather than a declaration.
  */
-const CHAT_ROUTER_CTX = { sessionKey: "line:grp-a", agentId: "main" };
+function falVideoGeneration() {
+  return {
+    maxEstimatedCostUsd: 50,
+    falPricing: { models: { [H3_MODEL]: { usdPerSecond: 0.1 } } },
+  };
+}
 
-function createMemoryStore<T>(): PluginStateKeyedStore<T> {
+function mem<T>(): PluginStateKeyedStore<T> {
   const values = new Map<string, T>();
   return {
     async register(key, value) {
@@ -110,335 +167,373 @@ function createMemoryStore<T>(): PluginStateKeyedStore<T> {
   };
 }
 
-const SEEDANCE_CATALOG = {
-  data: [
-    {
-      id: "bytedance/seedance-2.5",
-      name: "ByteDance: Seedance 2.5",
-      supported_durations: [4, 6, 8],
-      supported_aspect_ratios: ["16:9", "9:16"],
-      supported_resolutions: ["720p", "1080p"],
-      supported_frame_images: ["first_frame"],
-      pricing_skus: { "per-video-second": "0.10" },
-    },
-  ],
-};
-
-/** Standalone OpenRouter catalog double for the routers that still read it. */
-function catalogFetchDouble(): typeof fetch {
-  return (async () =>
-    new Response(JSON.stringify(SEEDANCE_CATALOG), { status: 200 })) as unknown as typeof fetch;
-}
-
-function buildFlow() {
-  const draftStore = createMemoryStore<LineVideoDraft>();
-  const preferenceStore = createMemoryStore<LineVideoModelPreferenceState>();
-  const jobStore = createMemoryStore<LineVideoJob>();
-  const activeJobLockStore = createMemoryStore<LineVideoActiveJobLock>();
-  const requestedUrls: string[] = [];
-  const fetchImpl = vi.fn(async (url: string | URL) => {
-    requestedUrls.push(String(url));
-    return new Response(JSON.stringify(SEEDANCE_CATALOG), { status: 200 });
-  }) as unknown as typeof fetch;
-
-  const tool = createLineVideoDraftTool({
-    messageChannel: "line",
-    senderIsOwner: true,
-    requesterSenderId: OWNER_ID,
-    sessionId: "grp-a",
-    accountId: "acct-1",
-    deliveryTo: "line:group:grp-a",
-    cfg: {},
-    draftStore,
-    preferenceStore,
-    activeJobLockStore,
-    resolveApiKey: async () => "sk-test",
-    fetchImpl,
-  });
-
-  const scheduled: Array<() => Promise<void>> = [];
-  const gate = createLineVideoConfirmationGate({
-    draftStore,
-    jobStore,
-    activeJobLockStore,
-    resolveFalAuth: async () => true,
-    createNotionLibrary: () => ({
-      validate: async () => {},
-      createProcessing: async () => ({ pageId: "notion-page-1" }),
-      markCompleted: async () => {},
-      markFailed: async () => {},
-    }),
-    scheduleBackgroundWork: (run) => {
-      scheduled.push(run);
-    },
-  });
-
-  /** True when a paid `POST /videos` submit endpoint was contacted. */
-  const paidVideoPosts = () =>
-    requestedUrls.filter((url) => url.includes("/videos") && !url.includes("/videos/models"));
-
+function notionLibraryStub() {
   return {
-    tool,
-    gate,
-    scheduled,
-    draftStore,
-    jobStore,
-    activeJobLockStore,
-    preferenceStore,
-    requestedUrls,
-    paidVideoPosts,
+    validate: async () => {},
+    createProcessing: async () => ({ pageId: "notion-page-1" }),
+    markCompleted: async () => {},
+    markFailed: async () => {},
+    markUgcProcessing: async () => {},
+    markUgcCompleted: async () => {},
+    markUgcFailed: async () => {},
   };
 }
 
+function buildFlow() {
+  const draftStore = mem<LineVideoDraft>();
+  const jobStore = mem<LineVideoJob>();
+  const activeJobLockStore = mem<LineVideoActiveJobLock>();
+  const draftScopes = mem<Record<string, unknown>>();
+  const background: Array<() => Promise<void>> = [];
+
+  runtimeConfigMock.current = {
+    plugins: {
+      entries: {
+        "cloudbath-line-image-archive": {
+          config: { groupWorkspacePolicies: { ugc: { capabilities: CAPABILITIES } } },
+        },
+      },
+    },
+  };
+
+  // The REAL LINE-owned paid runtime and the REAL fal registry seams, injected
+  // rather than installed into the process-global slot so suites do not leak.
+  const paidDraftRuntime = {
+    offerDefaultVideoModel: async (_accountId: string, requirements: never) =>
+      offerFalStoryboardDefault({ videoGeneration: falVideoGeneration() }, requirements),
+    listCompatibleVideoModels: async (_accountId: string, requirements: never) =>
+      listFalStoryboardModels({ videoGeneration: falVideoGeneration() }, requirements),
+    matchVideoModelQuery: async (_accountId: string, requirements: never, text: string) =>
+      matchFalStoryboardQuery({ videoGeneration: falVideoGeneration() }, requirements, text),
+    prepareStoryboardVideoDraft: async (request: never) =>
+      await prepareLineStoryboardVideoDraft(request, {
+        draftStore: draftStore as never,
+        resolveFalAuth: async () => true,
+        cfg: { videoGeneration: falVideoGeneration() },
+        now: () => NOW,
+      }),
+  };
+
+  const storyboardRouter = new CloudbathStoryboardLineRouter({
+    store: new StoryboardStore({ heads: mem(), versions: mem(), now: () => NOW }),
+    resolver: resolver(),
+    active: mem(),
+    drafts: mem(),
+    dedupe: mem(),
+    director: mem(),
+    modelSelection: mem(),
+    registry: { lookup: async () => ({ policyId: "UGC", boundByOwnerId: OWNER }) },
+    now: () => NOW,
+    draftScopes: draftScopes as never,
+    ugcCapabilities: CAPABILITIES as never,
+    paidDraftRuntime: paidDraftRuntime as never,
+  } as never);
+
+  const gate = createLineVideoConfirmationGate({
+    draftStore: draftStore as never,
+    jobStore: jobStore as never,
+    activeJobLockStore: activeJobLockStore as never,
+    resolveFalAuth: async () => true,
+    workspaceRuntime: {
+      lookupBinding: async () => ({
+        accountId: ACCOUNT,
+        groupId: GROUP,
+        policyId: "UGC" as const,
+        boundByOwnerId: OWNER,
+        boundAt: "2026-08-30T00:00:00.000Z",
+      }),
+      lookupUgcDraftScope: async (draftId: string) =>
+        await draftScopes.lookup(ugcDraftScopeKey(draftId)),
+      consumeUgcDraftScope: async (draftId: string) =>
+        await draftScopes.consume(ugcDraftScopeKey(draftId)),
+    } as never,
+    createNotionLibrary: () => notionLibraryStub() as never,
+    scheduleBackgroundWork: (run) => void background.push(run),
+    resolveAccount: (() => ({
+      accountId: ACCOUNT,
+      enabled: true,
+      channelAccessToken: "token",
+      channelSecret: "secret",
+      tokenSource: "config" as const,
+      config: { videoGeneration: falVideoGeneration() },
+    })) as never,
+    now: () => NOW,
+  });
+
+  let message = 0;
+  const say = async (content: string, sender = OWNER) =>
+    await storyboardRouter.handleBeforeDispatch(
+      {
+        content,
+        senderId: sender,
+        senderIsOwner: sender === OWNER,
+        isGroup: true,
+        messageId: `m${(message += 1)}`,
+      },
+      { channelId: "line", accountId: ACCOUNT, conversationId: GROUP },
+    );
+
+  const confirm = async (code: string, sender = OWNER) =>
+    await gate(
+      {
+        content: "",
+        channel: "line",
+        body: `ยืนยัน VIDEO ${code}`,
+        senderId: sender,
+        senderIsOwner: sender === OWNER,
+      } as never,
+      { accountId: ACCOUNT, conversationId: GROUP } as never,
+    );
+
+  return { say, confirm, draftStore, jobStore, background };
+}
+
+/**
+ * Answers the director's two questions and returns the storyboard reply.
+ *
+ * `speech` decides the SOUND requirement, which is a capability input rather
+ * than flavour: fal's H3 endpoints always produce audio, so a silent scene
+ * must not resolve to one.
+ */
+async function answerDirector(
+  flow: ReturnType<typeof buildFlow>,
+  durationAnswer: string,
+  speech?: string,
+): Promise<string> {
+  const opened = await flow.say(NATURAL_REQUEST);
+  expect(opened?.text).toBe(DURATION_QUESTION);
+  expect((await flow.say(durationAnswer))?.text).toBe(DIALOGUE_QUESTION);
+  if (speech === undefined) {
+    return (await flow.say("ไม่มี"))?.text ?? "";
+  }
+  expect((await flow.say("มี"))?.text).toBe(DIALOGUE_TEXT_QUESTION);
+  return (await flow.say(speech))?.text ?? "";
+}
+
+/** Drives the flow to a Final Video Draft and returns its VIDEO code. */
+async function driveToDraft(
+  flow: ReturnType<typeof buildFlow>,
+  durationAnswer: string,
+  speech: string | undefined = "สวัสดีครับ",
+): Promise<{ code: string; draftText: string }> {
+  const storyboard = await answerDirector(flow, durationAnswer, speech);
+  expect(storyboard).toContain("Storyboard v1");
+  expect(storyboard).not.toMatch(/ยืนยัน VIDEO/u);
+
+  const confirmed = await flow.say("ยืนยัน Storyboard");
+  expect(confirmed?.text).toContain("ใช้ Default Model หรือเปลี่ยน Model?");
+
+  const drafted = await flow.say("ใช้ Default");
+  const code = /ยืนยัน VIDEO (\d{4})/u.exec(drafted?.text ?? "")?.[1];
+  expect(code).toMatch(/^\d{4}$/u);
+  return { code: code!, draftText: drafted?.text ?? "" };
+}
+
 beforeEach(() => {
-  generateVideoMock.mockReset();
-  sendMessageLineMock.mockClear();
-  generateVideoMock.mockResolvedValue({
-    videos: [{ buffer: Buffer.from("video-bytes"), mimeType: "video/mp4" }],
-    provider: "openrouter",
-    model: "bytedance/seedance-2.5",
+  generateVideoMock.mockReset().mockResolvedValue({
+    videos: [{ url: "https://v3.fal.media/out.mp4", mimeType: "video/mp4" }],
+    provider: "fal",
+    model: SEEDANCE_25,
     attempts: [],
     ignoredOverrides: [],
-    metadata: { usage: { cost: 0.48 } },
+    metadata: { requestId: "fal-req-1" },
+  });
+  sendMessageLineMock.mockReset().mockResolvedValue({});
+  stageLineOutboundVideoMock.mockClear();
+});
+
+describe("A-D. the owner conversation before any money", () => {
+  it("asks 15 or 30 seconds before building anything", async () => {
+    const flow = buildFlow();
+
+    const opened = await flow.say(NATURAL_REQUEST);
+
+    expect(opened?.text).toBe(DURATION_QUESTION);
+    // Nothing was drafted, quoted or billed by asking a question.
+    expect(await flow.draftStore.entries()).toEqual([]);
+    expect(generateVideoMock).not.toHaveBeenCalled();
+  });
+
+  it("B: the duration answer produces a storyboard with NO VIDEO code", async () => {
+    const flow = buildFlow();
+
+    const storyboard = await answerDirector(flow, "1");
+
+    expect(storyboard).toContain("Storyboard v1");
+    expect(storyboard).toContain("ยืนยัน Storyboard หรือบอกจุดที่ต้องการแก้");
+    expect(storyboard).not.toMatch(/ยืนยัน VIDEO/u);
+    expect(await flow.draftStore.entries()).toEqual([]);
+  });
+
+  it("C: a revision makes a new version and still mints no code", async () => {
+    const flow = buildFlow();
+    await answerDirector(flow, "1");
+
+    const revised = await flow.say("เปลี่ยนเป็นกลางคืน");
+
+    expect(revised?.text).toContain("Storyboard v2");
+    expect(revised?.text).not.toMatch(/ยืนยัน VIDEO/u);
+    expect(await flow.draftStore.entries()).toEqual([]);
+    expect(generateVideoMock).not.toHaveBeenCalled();
+  });
+
+  it("D: confirming the storyboard begins model selection, not a paid draft", async () => {
+    const flow = buildFlow();
+    await answerDirector(flow, "1");
+
+    const confirmed = await flow.say("ยืนยัน Storyboard");
+
+    expect(confirmed?.text).toContain("Default Model:");
+    expect(confirmed?.text).toContain("ใช้ Default Model หรือเปลี่ยน Model?");
+    expect(await flow.draftStore.entries()).toEqual([]);
   });
 });
 
-describe("owner natural-language video request routing", () => {
-  it("1: no before_dispatch router claims the request, so it reaches the agent and its tools", async () => {
-    const { gate, preferenceStore } = buildFlow();
-    const event = {
-      content: OWNER_REQUEST,
-      body: OWNER_REQUEST,
-      channel: "line",
-      senderId: OWNER_ID,
-      senderIsOwner: true,
-    };
+describe("E-J. model selection and the Final Video Draft", () => {
+  it("E/J: a 15-second scene defaults to MiniMax H3 and names the real endpoint", async () => {
+    const flow = buildFlow();
+    const { draftText, code } = await driveToDraft(flow, "1");
 
-    // The confirmation gate only claims the exact "ยืนยัน VIDEO ####" form.
-    expect(await gate(event, CTX)).toBeUndefined();
-
-    // The video-model control router only claims "video model"-scoped wording.
-    const videoModelRouter = createLineVideoModelControlRouter({
-      preferenceStore,
-      pendingStore: createMemoryStore<LinePendingVideoModelSelection>(),
-      resolveApiKey: async () => "sk-test",
-      fetchImpl: catalogFetchDouble(),
-    });
-    expect(await videoModelRouter(event, CTX)).toBeUndefined();
-
-    // The chat model-switch router must not claim it either.
-    const chatRouter = createLineModelSwitchIntentRouter({
-      pendingStore: createMemoryStore<never>() as never,
-    });
-    expect(await chatRouter(event, CHAT_ROUTER_CTX)).toBeUndefined();
+    expect(draftText).toContain("Final Video Draft");
+    // The ACTUAL fal endpoint that will receive the paid request.
+    expect(draftText).toContain("fal.ai");
+    expect(draftText).toContain(H3_MODEL);
+    expect(draftText).toMatch(/ราคาโดยประมาณ: ~\$\d/u);
+    const stored = await flow.draftStore.lookup(code);
+    expect(stored?.providerRoute).toEqual({ provider: "fal", modelId: H3_MODEL });
   });
 
-  it("2: line_video_draft is available to an owner LINE session", () => {
-    const { tool } = buildFlow();
-    expect(tool).not.toBeNull();
-    expect(tool?.name).toBe("line_video_draft");
+  it("F: a 30-second scene defaults to Seedance 2.5 and explains why, not 'none'", async () => {
+    const flow = buildFlow();
+    // With sound wanted, H3 clears every requirement except the length, so the
+    // displacement this asserts is about duration and nothing else.
+    await answerDirector(flow, "2", "สวัสดีครับ");
+
+    const confirmed = await flow.say("ยืนยัน Storyboard");
+
+    // H3 tops out at 15s, so it is not offered; the replacement is explained.
+    expect(confirmed?.text).toContain(
+      "งานนี้ยาว 30 วินาที MiniMax H3 Reference-to-Video รองรับสูงสุด 15 วินาที",
+    );
+    expect(confirmed?.text).toContain("Default สำหรับงานนี้จึงเป็น Seedance 2.5 Reference-to-Video");
+    const drafted = await flow.say("ใช้ Default");
+    const code = /ยืนยัน VIDEO (\d{4})/u.exec(drafted?.text ?? "")?.[1];
+    expect(code).toMatch(/^\d{4}$/u);
+    expect(await flow.draftStore.lookup(code!)).toMatchObject({
+      providerRoute: { provider: "fal", modelId: SEEDANCE_25 },
+      durationSeconds: 30,
+    });
   });
 
-  it("3: the draft returns the expected preview and makes ZERO paid provider POSTs", async () => {
-    const { tool, draftStore, paidVideoPosts } = buildFlow();
-    const result = await tool!.execute("call-1", {
-      prompt: "a cat sitting on water",
-      durationSeconds: 4,
+  it("a silent scene never defaults to an endpoint that always makes sound", async () => {
+    const flow = buildFlow();
+    // fal publishes no proven "generate_audio: false" for H3, so an owner who
+    // asked for no sound must not be handed one. Seedance 2.5 can turn it off.
+    await answerDirector(flow, "1");
+
+    const confirmed = await flow.say("ยืนยัน Storyboard");
+
+    expect(confirmed?.text).toContain("งานนี้ต้องไม่มีเสียง");
+    expect(confirmed?.text).toContain("Default Model: Seedance 2.5 Reference-to-Video");
+  });
+
+  it("G/H/I: change model -> family -> a named Seedance version", async () => {
+    const flow = buildFlow();
+    await answerDirector(flow, "1");
+    await flow.say("ยืนยัน Storyboard");
+
+    const families = await flow.say("เปลี่ยนโมเดล");
+    expect(families?.text).toContain("เลือกค่าย / Model Family:");
+    expect(families?.text).toContain("ByteDance / Seedance");
+
+    const versions = await flow.say("seedance");
+    expect(versions?.text).toContain("Seedance 2.5 Reference-to-Video");
+
+    const drafted = await flow.say("seedance 2.5");
+    const code = /ยืนยัน VIDEO (\d{4})/u.exec(drafted?.text ?? "")?.[1];
+    expect(code).toMatch(/^\d{4}$/u);
+    // The exact frozen paid model, never aliased onto 2.0.
+    expect(await flow.draftStore.lookup(code!)).toMatchObject({
+      providerRoute: { provider: "fal", modelId: SEEDANCE_25 },
     });
-    const text = (result as { content: Array<{ text: string }> }).content[0]?.text ?? "";
-
-    expect(text).toContain("🎬 Video draft");
-    expect(text).toContain("ByteDance: Seedance 2.5");
-    expect(text).toMatch(/ยืนยัน VIDEO \d{4}/u);
-    // The explicit supported duration is preserved exactly.
-    expect(text).toContain("Duration: 4 sec");
-
-    expect(paidVideoPosts()).toStrictEqual([]);
-    expect(generateVideoMock).not.toHaveBeenCalled();
-    expect((await draftStore.entries()).length).toBe(1);
   });
 });
 
-describe("owner confirmation -> job lifecycle (direct store assertions)", () => {
-  it("4: no paid submission and no job/lock exist until the exact confirmation arrives", async () => {
-    const { tool, jobStore, activeJobLockStore, paidVideoPosts } = buildFlow();
-    await tool!.execute("call-1", { prompt: "a cat sitting on water" });
-
-    expect(await jobStore.entries()).toStrictEqual([]);
-    expect(await activeJobLockStore.entries()).toStrictEqual([]);
-    expect(paidVideoPosts()).toStrictEqual([]);
-    expect(generateVideoMock).not.toHaveBeenCalled();
-  });
-
-  it("5: confirmation creates a running job and holds the lock; success releases it", async () => {
+describe("K-N. the paid confirmation", () => {
+  it("L/N: the exact phrase submits once to fal, then archives and delivers", async () => {
     const flow = buildFlow();
-    await flow.tool!.execute("call-1", { prompt: "a cat sitting on water" });
-    const [draftEntry] = await flow.draftStore.entries();
-    const draftId = draftEntry!.value.draftId;
+    const { code } = await driveToDraft(flow, "1");
 
-    const confirmed = await flow.gate(
-      {
-        content: "",
-        body: `ยืนยัน VIDEO ${draftId}`,
-        channel: "line",
-        senderId: OWNER_ID,
-        senderIsOwner: true,
-      },
-      CTX,
+    const started = await flow.confirm(code);
+    expect(started?.text).toContain("เริ่มสร้างวิดีโอแล้ว");
+    await flow.background[0]?.();
+
+    expect(generateVideoMock).toHaveBeenCalledTimes(1);
+    const submitted = generateVideoMock.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(submitted.modelOverride).toBe(`fal/${H3_MODEL}`);
+    expect(submitted.autoProviderFallback).toBe(false);
+    // N: reference ordering matches the markers compiled into the prompt.
+    const urls = (submitted.inputImages as ReadonlyArray<{ url?: string }> | undefined)?.map(
+      (asset) => asset.url,
     );
-    expect(confirmed?.handled).toBe(true);
+    expect(urls?.length).toBeGreaterThan(0);
+    expect(String(submitted.prompt)).toContain("Image 1 = ");
 
-    const [runningJob] = await flow.jobStore.entries();
-    expect(runningJob?.value.status).toBe("running");
-    expect((await flow.activeJobLockStore.entries()).length).toBe(1);
-    expect((await flow.activeJobLockStore.entries())[0]?.value.jobId).toBe(runningJob?.value.jobId);
-
-    await flow.scheduled[0]?.();
-
-    const [doneJob] = await flow.jobStore.entries();
-    expect(doneJob?.value.status).toBe("completed");
-    expect(doneJob?.value.actualCostUsd).toBe(0.48);
-    expect(await flow.activeJobLockStore.entries()).toStrictEqual([]);
-  });
-
-  it("6: a provider failure marks the job failed, releases the lock, and allows a new draft", async () => {
-    generateVideoMock.mockRejectedValueOnce(new Error("OpenRouter rejected the request"));
-    const flow = buildFlow();
-    await flow.tool!.execute("call-1", { prompt: "a cat sitting on water" });
-    const [firstDraft] = await flow.draftStore.entries();
-
-    await flow.gate(
-      {
-        content: "",
-        body: `ยืนยัน VIDEO ${firstDraft!.value.draftId}`,
-        channel: "line",
-        senderId: OWNER_ID,
-        senderIsOwner: true,
-      },
-      CTX,
-    );
-    expect((await flow.activeJobLockStore.entries()).length).toBe(1);
-
-    await flow.scheduled[0]?.();
-
-    const [failedJob] = await flow.jobStore.entries();
-    expect(failedJob?.value.status).toBe("failed");
-    expect(failedJob?.value.error).toContain("OpenRouter rejected the request");
-    // Terminal failure must not leave an active blocker behind.
-    expect(await flow.activeJobLockStore.entries()).toStrictEqual([]);
-
-    const retry = await flow.tool!.execute("call-2", { prompt: "second attempt" });
-    expect((retry as { details?: { resolution?: string } }).details?.resolution).toBe(
-      "draft_created",
-    );
-  });
-
-  it("7: the consumed confirmation code cannot be replayed; a retry needs a new code", async () => {
-    const flow = buildFlow();
-    await flow.tool!.execute("call-1", { prompt: "a cat sitting on water" });
-    const [draftEntry] = await flow.draftStore.entries();
-    const draftId = draftEntry!.value.draftId;
-    const confirmEvent = {
-      content: "",
-      body: `ยืนยัน VIDEO ${draftId}`,
-      channel: "line",
-      senderId: OWNER_ID,
-      senderIsOwner: true,
-    };
-
-    await flow.gate(confirmEvent, CTX);
-    const replay = await flow.gate(confirmEvent, CTX);
-
-    expect(replay).toStrictEqual({
-      handled: true,
-      text: "ไม่พบ video draft นี้ หรือถูกใช้ไปแล้ว",
+    // Archived in R2, delivered from the R2 URL, never fal's transient one.
+    expect(stageLineOutboundVideoMock).toHaveBeenCalledWith("https://v3.fal.media/out.mp4");
+    expect(JSON.stringify(sendMessageLineMock.mock.calls)).not.toContain("v3.fal.media");
+    const [job] = await flow.jobStore.entries();
+    expect(job?.value).toMatchObject({
+      status: "completed",
+      provider: "fal",
+      r2ObjectKey: "outbound/line-video/sha256/ab/abcd.mp4",
+      providerRequestId: "fal-req-1",
     });
-    expect((await flow.jobStore.entries()).length).toBe(1);
-    expect(flow.scheduled.length).toBe(1);
   });
 
-  it("8: a non-owner cannot confirm, and no paid submission happens", async () => {
+  it("M: a replayed confirmation submits nothing more", async () => {
     const flow = buildFlow();
-    await flow.tool!.execute("call-1", { prompt: "a cat sitting on water" });
-    const [draftEntry] = await flow.draftStore.entries();
+    const { code } = await driveToDraft(flow, "1");
+    await flow.confirm(code);
 
-    const result = await flow.gate(
-      {
-        content: "",
-        body: `ยืนยัน VIDEO ${draftEntry!.value.draftId}`,
-        channel: "line",
-        senderId: "U-member",
-        senderIsOwner: false,
-      },
-      CTX,
-    );
+    const replay = await flow.confirm(code);
 
-    expect(result).toEqual({ handled: true, text: "ไม่มีสิทธิ์ยืนยันการสร้างวิดีโอ" });
-    expect(await flow.jobStore.entries()).toStrictEqual([]);
-    expect(await flow.activeJobLockStore.entries()).toStrictEqual([]);
-    expect(flow.paidVideoPosts()).toStrictEqual([]);
-    expect(generateVideoMock).not.toHaveBeenCalled();
+    expect(replay).toEqual({ handled: true, text: "ไม่พบ video draft นี้ หรือถูกใช้ไปแล้ว" });
+    expect(flow.background).toHaveLength(1);
+  });
+
+  it("U: no OpenRouter video generation happens anywhere in this flow", async () => {
+    const flow = buildFlow();
+    const { code } = await driveToDraft(flow, "1");
+    await flow.confirm(code);
+    await flow.background[0]?.();
+
+    for (const call of generateVideoMock.mock.calls) {
+      expect(String((call[0] as { modelOverride?: string }).modelOverride)).toMatch(/^fal\//u);
+    }
   });
 });
 
 describe("unauthorized LINE video operations fail closed", () => {
-  it("denies draft, video-model, confirmation, and generic generation paths without paid work", async () => {
+  it("refuses a confirmation from someone other than the code's owner", async () => {
     const flow = buildFlow();
-    await flow.tool!.execute("call-owner", { prompt: "a cat sitting on water" });
-    const [draftEntry] = await flow.draftStore.entries();
+    const { code } = await driveToDraft(flow, "1");
 
-    expect(
-      createLineVideoDraftTool({
-        messageChannel: "line",
-        senderIsOwner: false,
-        requesterSenderId: "U-member",
-      }),
-    ).toBeNull();
+    const refused = await flow.confirm(code, "U-someone-else");
 
-    const videoModelRouter = createLineVideoModelControlRouter({
-      preferenceStore: flow.preferenceStore,
-      pendingStore: createMemoryStore<LinePendingVideoModelSelection>(),
-      resolveApiKey: async () => "sk-test",
-      fetchImpl: catalogFetchDouble(),
-    });
-    expect(
-      await videoModelRouter(
-        {
-          content: "เปลี่ยน video model เป็น seedance",
-          body: "เปลี่ยน video model เป็น seedance",
-          channel: "line",
-          senderId: "U-member",
-          senderIsOwner: false,
-        },
-        CTX,
-      ),
-    ).toBeUndefined();
-    expect(await flow.preferenceStore.entries()).toStrictEqual([]);
+    expect(refused?.text).not.toContain("เริ่มสร้างวิดีโอแล้ว");
+    // The code survives for its real owner, and nothing was billed.
+    expect(await flow.draftStore.lookup(code)).toMatchObject({ status: "pending" });
+    expect(flow.background).toHaveLength(0);
+    expect(generateVideoMock).not.toHaveBeenCalled();
+  });
 
-    expect(
-      await flow.gate(
-        {
-          content: "",
-          body: `ยืนยัน VIDEO ${draftEntry!.value.draftId}`,
-          channel: "line",
-          senderId: "U-member",
-          senderIsOwner: false,
-        },
-        CTX,
-      ),
-    ).toEqual({ handled: true, text: "ไม่มีสิทธิ์ยืนยันการสร้างวิดีโอ" });
+  it("does not claim a non-owner's storyboard request at all", async () => {
+    const flow = buildFlow();
 
-    const generationGuard = createLineVideoGenerationGuard();
-    generationGuard.beforeAgentRun({}, { channel: "line", runId: "run-member" });
-    expect(
-      generationGuard.beforeToolCall({ toolName: "video_generate" }, { runId: "run-member" }),
-    ).toMatchObject({ block: true });
-    generationGuard.agentEnd({}, { runId: "run-member" });
+    const ignored = await flow.say(NATURAL_REQUEST, "U-someone-else");
 
-    expect(await flow.draftStore.lookup(draftEntry!.value.draftId)).toBeDefined();
-    expect(await flow.jobStore.entries()).toStrictEqual([]);
-    expect(flow.scheduled).toHaveLength(0);
-    expect(flow.paidVideoPosts()).toStrictEqual([]);
+    expect(ignored).toBeUndefined();
     expect(generateVideoMock).not.toHaveBeenCalled();
   });
 });

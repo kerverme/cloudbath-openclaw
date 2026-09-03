@@ -46,7 +46,7 @@ function stubPaidRuntime(): StoryboardPaidDraftRuntime & {
 }
 
 describe("conversational video director", () => {
-  it("gathers duration and dialogue, then produces a storyboard and a draft", async () => {
+  it("gathers duration and dialogue, then produces a storyboard and no code", async () => {
     const paid = stubPaidRuntime();
     const h = harness({ paidDraftRuntime: paid });
 
@@ -61,14 +61,15 @@ describe("conversational video director", () => {
 
     const done = await h.dispatch("ไม่มี");
     expect(done.source).toBe("storyboard");
-    expect(done.text).toContain("Final Video Draft");
-    expect(done.text).toContain("ความยาว: 10 วิ");
-    expect(done.text).toContain("ราคาโดยประมาณ: ~$0.42");
+    expect(done.text).toContain("Storyboard v1");
+    expect(done.text).toContain("ยืนยัน Storyboard หรือบอกจุดที่ต้องการแก้");
     const version = await h.latest();
     expect(version.document.durationSeconds).toBe(10);
     expect(version.document.cast.map((member) => member.characterId)).toEqual(["CHAR-6"]);
-    // A silent scene asks the provider for no audio, which is what re-quotes it.
-    expect(paid.calls).toEqual([{ audio: "off", durationSeconds: 10 }]);
+    // The gathered answers are still CONTENT. Nothing is quoted and no code is
+    // minted until "ยืนยัน Storyboard" opens the model conversation.
+    expect(done.text).not.toContain("Final Video Draft");
+    expect(paid.calls).toEqual([]);
   });
 
   it("asks what is said only when the owner wants dialogue, and carries it into the scene", async () => {
@@ -81,10 +82,11 @@ describe("conversational video director", () => {
     expect(wantsText.text).toBe(DIALOGUE_TEXT_QUESTION);
 
     const done = await h.dispatch("สวัสดีครับ");
-    expect(done.text).toContain("Final Video Draft");
+    expect(done.text).toContain("Storyboard v1");
     const version = await h.latest();
     expect(version.document.scenePrompt).toContain("สวัสดีครับ");
-    expect(paid.calls).toEqual([{ audio: "full", durationSeconds: 10 }]);
+    expect(version.document.audio).toBe("full");
+    expect(paid.calls).toEqual([]);
   });
 
   it("writes nothing billable while the request is still being gathered", async () => {
@@ -187,23 +189,22 @@ describe("natural draft revision", () => {
     expect(version.document.cast.map((member) => member.characterId)).toEqual(["CHAR-6"]);
   });
 
-  it("drops every spoken line and re-quotes the scene without audio", async () => {
+  it("drops every spoken line and turns the scene silent", async () => {
     const paid = stubPaidRuntime();
     const h = harness({ paidDraftRuntime: paid });
     await h.dispatch(NATURAL_REQUEST);
     await h.dispatch("10 วิ");
     await h.dispatch("มี");
     await h.dispatch("ทักทายกันหน่อย");
-    expect(paid.calls.at(-1)?.audio).toBe("full");
 
     await h.dispatch("ไม่เอาเสียงพูด");
 
     const version = await h.latest();
     expect(version.document.beats.some((beat) => beat.dialogue)).toBe(false);
     expect(version.document.audio).toBe("off");
-    // The revision itself re-quotes nothing, so the last paid call is still
-    // the pre-revision one: no model is bound to content awaiting confirmation.
-    expect(paid.calls.at(-1)?.audio).toBe("full");
+    // Sound is a capability input, so flipping it must not be bound to a model
+    // behind the owner's back: nothing is quoted before confirmation.
+    expect(paid.calls).toEqual([]);
   });
 
   it("applies a camera instruction to the whole scene", async () => {
@@ -260,10 +261,11 @@ describe("natural draft revision", () => {
 
     await h.dispatch("ขอ 15 วิแทน");
 
-    // A revision re-quotes, which allocates a draft code, but generation is
-    // still exclusively the LINE confirmation gate's job.
+    // A revision neither quotes nor generates: the model conversation starts
+    // at "ยืนยัน Storyboard", and generation stays the LINE gate's job alone.
     expect(generate).not.toHaveBeenCalled();
-    expect(paid.calls.length).toBeGreaterThan(0);
+    expect(paid.calls).toEqual([]);
+    await expectNothingBillable(h);
   });
 });
 
@@ -298,7 +300,8 @@ describe("requoteActiveStoryboardDraft seam", () => {
     expect(result.kind).toBe("created");
     // Same storyboard, re-prepared — not new work.
     expect(result.kind === "created" && result.draft.storyboardId).toBe(before.storyboardId);
-    expect(paid.calls.length).toBeGreaterThan(1);
+    // The re-quote is the FIRST paid call: the director itself minted nothing.
+    expect(paid.calls.length).toBe(1);
   });
 
   it("passes the owner's answer through as an override", async () => {

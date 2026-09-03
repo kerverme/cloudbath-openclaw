@@ -564,18 +564,18 @@ export class CloudbathStoryboardLineRouter {
   }
 
   /**
-   * Turns a complete session into a storyboard AND its Final Video Draft.
+   * Turns a complete session into a storyboard, and nothing else.
    *
-   * Both in one reply because the owner asked for a video, not a storyboard:
-   * the draft is where the quote and the confirmable code live. The draft is
-   * prepared through the SAME path `สร้างวิดีโอ` uses, so the paid gate sees
-   * nothing new.
+   * Deliberately NOT quoted or coded here. The gathered answers are still
+   * content, so they follow the same order every other scene does: the owner
+   * reads the storyboard, revises it freely, and only "ยืนยัน Storyboard"
+   * opens the model conversation that mints a payable code.
    */
   private async completeDirector(
     session: StoryboardDirectorSession,
     claim: StoryboardAccessClaim,
   ): Promise<string> {
-    const created = await this.create(
+    return await this.create(
       {
         kind: "create",
         characterNames: session.characterNames,
@@ -591,11 +591,6 @@ export class CloudbathStoryboardLineRouter {
       },
       claim,
     );
-    const active = await this.readActive(claim);
-    if (!active) {
-      return created;
-    }
-    return `${created}\n\n${await this.prepareDraft(claim, active)}`;
   }
 
   /**
