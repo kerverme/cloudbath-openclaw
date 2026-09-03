@@ -273,7 +273,7 @@ storyboard):
 
 | Endpoint                                                       | Duration | Resolutions | Audio            | Reference field        | Prompt marker |
 | -------------------------------------------------------------- | -------- | ----------- | ---------------- | ---------------------- | ------------- |
-| `minimax/h3/reference-to-video`                                | 5–15s    | 768P, 1080P | always on        | `reference_image_urls` | `Image 1`     |
+| `minimax/h3/reference-to-video`                                | 5–15s    | 2K          | always on        | `reference_image_urls` | `Image 1`     |
 | `minimax/h3-max/reference-to-video`                            | 5–15s    | 480P, 768P  | always on        | `reference_image_urls` | `Image 1`     |
 | `bytedance/seedance-2.5/reference-to-video`                    | 4–30s    | 480p, 720p  | `generate_audio` | `image_urls`           | `[Image1]`    |
 | `bytedance/seedance-2.0/reference-to-video` (+ `fast`, `mini`) | 4–15s    | up to 4k    | `generate_audio` | `image_urls`           | `@Image1`     |
@@ -296,6 +296,13 @@ Consequences worth knowing:
   synchronized audio on every generation and publish no proven off switch, so
   they can serve a scene that wants sound and are filtered out of one that must
   be silent.
+- **H3 offers one output size, 2K.** Its endpoint documents a single
+  `resolution` and describes itself as generating 2K video. fal's H3 comparison
+  articles list a 480p/768p/2K/4K rate ladder, but a rate table is not an input
+  enum and does not outrank the endpoint's own contract — so only 2K is
+  offered, and the request serializer omits any other value rather than
+  submitting an enum the endpoint never listed. H3 Max's 480P/768P are **its**
+  sizes and are never copied onto H3.
 
 ### Configuration
 
@@ -308,6 +315,14 @@ the output pixel area, the duration and 24 FPS. That estimate covers the proven
 image-reference case; a shape it cannot prove (reference video or audio inputs)
 falls back to your endpoint rate, and without one the endpoint is not offered.
 
+**MiniMax H3 requires an operator rate.** fal's own current material disagrees
+with itself: the reference-to-video endpoint is quoted at $0.13 per 2K second in
+one place and about $0.26 per generated second in another. A roughly 2x spread
+is not a rounding difference, so no H3 rate is compiled in — declare one with
+your own `source`, or H3 is capability-compatible but never offered. When that
+happens the bot says so rather than switching models quietly:
+`งานนี้ MiniMax H3 Reference-to-Video ทำได้ แต่ยังไม่มีราคาที่ยืนยันได้`.
+
 `falModels` supplies only what fal's own pages leave open — H3's duration range
 and audio behaviour are read from fal's model page and need no declaration.
 
@@ -318,9 +333,10 @@ and audio behaviour are read from fal's model page and need no declaration.
       "maxEstimatedCostUsd": 5,
       "falPricing": {
         "models": {
+          // H3 produces 2K only, so this rate is a 2K second.
           "minimax/h3/reference-to-video": {
-            "usdPerSecond": 0.1,
-            "source": "https://fal.ai/pricing",
+            "usdPerSecond": 0.13,
+            "source": "https://fal.ai/models/minimax/h3/reference-to-video",
           },
           "bytedance/seedance-2.0/reference-to-video": {
             "usdPerSecond": 0.05,

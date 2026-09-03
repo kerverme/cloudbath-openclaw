@@ -249,6 +249,8 @@ function minimaxH3ReferenceModel(params: {
       values: Object.freeze([...params.resolutions]),
       provenance: "fal_model_page",
     }),
+    // `adaptive` plus the six named ratios, default `adaptive`, per the
+    // endpoint's own documented enum.
     aspectRatios: Object.freeze({
       values: Object.freeze(["adaptive", "21:9", "16:9", "4:3", "1:1", "3:4", "9:16"]),
       provenance: "fal_model_page",
@@ -282,7 +284,13 @@ export const FAL_VIDEO_MODELS: readonly FalVideoModel[] = Object.freeze([
     modelId: "minimax/h3/reference-to-video",
     displayName: "MiniMax H3 Reference-to-Video",
     aliases: ["minimax h3", "h3", "hailuo h3"],
-    resolutions: ["768P", "1080P"],
+    // 2K ONLY. The endpoint documents `resolution` with a single default of
+    // "2K" and describes itself as generating 2K video; fal's comparison
+    // articles list 480p/768p/2K/4K rates for the H3 family, but a rate table
+    // is not an input enum and does not outrank the endpoint's own contract.
+    // Listing a size the endpoint may not accept is the expensive direction of
+    // this error, so the unproven ones stay out.
+    resolutions: ["2K"],
   }),
   minimaxH3ReferenceModel({
     modelId: "minimax/h3-max/reference-to-video",
@@ -291,6 +299,8 @@ export const FAL_VIDEO_MODELS: readonly FalVideoModel[] = Object.freeze([
     // bill something they did not choose.
     displayName: "MiniMax H3 Max Reference-to-Video",
     aliases: ["minimax h3 max", "h3 max", "h3max"],
+    // H3 Max's contract is the clear one: an explicit 480P/768P enum. These
+    // are ITS sizes and must never be copied onto plain H3, which documents 2K.
     resolutions: ["480P", "768P"],
   }),
   Object.freeze({

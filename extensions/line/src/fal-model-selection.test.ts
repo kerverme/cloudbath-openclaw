@@ -1,9 +1,10 @@
 /**
  * Capability matching between a frozen storyboard and fal's registry.
  *
- * Every fact under test comes from fal's own published schema
- * (`@fal-ai/client`), transcribed in fal-video-registry.ts. No network call and
- * no provider call happens anywhere in this file.
+ * Every fact under test is transcribed in fal-video-registry.ts from the
+ * strongest source fal publishes for that endpoint, ranked by
+ * FAL_PROVENANCE_RANK. No network call and no provider call happens anywhere
+ * in this file.
  */
 import { describe, expect, it } from "vitest";
 import {
@@ -201,8 +202,56 @@ describe("output resolution is resolved, not required", () => {
   });
 
   it("falls to the endpoint's own size when it cannot produce the requested one", () => {
-    // H3 lists 768P/1080P, so a lower-case "720p" request resolves to a size
-    // it really produces — and the Final Video Draft shows that.
-    expect(resolveFalOutputResolution(resolveFalVideoModel({}, H3)!, "720p")).toBe("1080P");
+    // H3's endpoint documents one size, 2K, so any other request resolves to
+    // it — and the Final Video Draft shows the size that will really arrive.
+    expect(resolveFalOutputResolution(resolveFalVideoModel({}, H3)!, "720p")).toBe("2K");
+  });
+});
+
+describe("each H3 endpoint keeps its own resolution contract", () => {
+  it("A: H3 offers exactly the size its endpoint documents", () => {
+    // 2K, and nothing else. fal's H3 comparison articles list a
+    // 480p/768p/2K/4K rate ladder, but a rate table is not an input enum: the
+    // endpoint contract documents one `resolution`, so only that is offered.
+    expect(resolveFalVideoModel({}, H3)?.resolutions.values).toEqual(["2K"]);
+  });
+
+  it("D: H3 Max's sizes never leak onto H3, in either direction", () => {
+    const h3 = resolveFalVideoModel({}, H3)!.resolutions.values;
+    const h3Max = resolveFalVideoModel({}, H3_MAX)!.resolutions.values;
+
+    expect(h3Max).toEqual(["480P", "768P"]);
+    // Two endpoints, two contracts. Sharing a size list would let a pick of
+    // one bill the other's shape.
+    for (const size of h3Max) {
+      expect(h3).not.toContain(size);
+    }
+    expect(h3Max).not.toContain("2K");
+  });
+
+  it("keeps H3's proven duration and aspect enums alongside the narrowed size", () => {
+    const h3 = resolveFalVideoModel({}, H3)!;
+    expect(h3.durations).toMatchObject({
+      kind: "enum",
+      seconds: [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+    });
+    expect(h3.aspectRatios.values).toEqual([
+      "adaptive",
+      "21:9",
+      "16:9",
+      "4:3",
+      "1:1",
+      "3:4",
+      "9:16",
+    ]);
+    // 9 images, 12 files total, cited in the prompt as "Image 1".
+    expect(h3.references).toMatchObject({
+      kind: "identity_reference",
+      field: "reference_image_urls",
+      markerStyle: "image_space_n",
+      maxImages: 9,
+      maxTotalFiles: 12,
+    });
+    expect(h3.audio.kind).toBe("always_on");
   });
 });

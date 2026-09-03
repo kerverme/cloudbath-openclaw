@@ -184,9 +184,37 @@ describe("per-model fal pricing", () => {
 
     it("never lets Seedance 2.5's published price reach H3", () => {
       expect(
-        estimateFalVideoCostUsd({ cfg: {}, model: H3, durationSeconds: 10, resolution: "768P" })
-          .kind,
+        estimateFalVideoCostUsd({ cfg: {}, model: H3, durationSeconds: 10, resolution: "2K" }).kind,
       ).toBe("unavailable");
+    });
+
+    it("C: H3 stays operator-priced while fal's own numbers disagree", () => {
+      // fal quotes H3 reference-to-video at $0.13/2K-second in one place and
+      // ~$0.26/generated-second in another. A 2x spread is not a rounding
+      // difference, so no rate is compiled in: an operator must declare one,
+      // with their own citation, or H3 is not payable at all.
+      expect(isFalModelPriced({}, H3.modelId)).toBe(false);
+
+      const cfg = {
+        videoGeneration: {
+          falPricing: {
+            models: { [H3.modelId]: { usdPerSecond: 0.13, source: "https://fal.ai/pricing" } },
+          },
+        },
+      };
+      const quote = estimateFalVideoCostUsd({
+        cfg,
+        model: H3,
+        durationSeconds: 15,
+        // The size the endpoint really produces, which is what gets billed.
+        resolution: "2K",
+      });
+      expect(quote.kind).toBe("available");
+      expect(quote.kind === "available" && quote.amountUsd).toBeCloseTo(1.95, 6);
+      expect(quote.kind === "available" && quote.source).toMatchObject({
+        kind: "operator_configured",
+        modelId: H3.modelId,
+      });
     });
   });
 });

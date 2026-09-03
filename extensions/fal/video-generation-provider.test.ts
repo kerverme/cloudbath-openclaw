@@ -220,7 +220,7 @@ describe("fal video generation provider", () => {
       const provider = buildFalVideoGenerationProvider();
 
       await provider.generateVideo(
-        referenceRequest({ model: "minimax/h3/reference-to-video", resolution: "768P" }),
+        referenceRequest({ model: "minimax/h3/reference-to-video", resolution: "2K" }),
       );
 
       expect(fetchGuardUrl(1)).toBe("https://queue.fal.run/minimax/h3/reference-to-video");
@@ -234,9 +234,49 @@ describe("fal video generation provider", () => {
       expect(body.image_urls).toBeUndefined();
       // Integer duration, not Seedance's string enum, and 15s is accepted.
       expect(body.duration).toBe(15);
-      expect(body.resolution).toBe("768P");
+      expect(body.resolution).toBe("2K");
       // No audio control exists on this endpoint, so none is sent.
       expect(body.generate_audio).toBeUndefined();
+    });
+
+    it("B: H3 sends only its own resolution enum, and omits anything else", async () => {
+      mockFalProviderRuntime();
+      mockCompletedFalVideoJob({
+        requestId: "req-4b",
+        statusUrl: "https://queue.fal.run/status/req-4b",
+        responseUrl: "https://queue.fal.run/response/req-4b",
+        videoUrl: "https://v3.fal.media/out.mp4",
+        bytes: "video-bytes",
+      });
+      const provider = buildFalVideoGenerationProvider();
+
+      // 720p is H3 Max's neighbourhood, not H3's. Sending an enum value the
+      // endpoint never listed would be rejected outright, so it is dropped and
+      // the endpoint applies its own documented default instead.
+      await provider.generateVideo(
+        referenceRequest({ model: "minimax/h3/reference-to-video", resolution: "720p" }),
+      );
+
+      expect(getSubmitBody().resolution).toBeUndefined();
+    });
+
+    it("D: H3 Max keeps its OWN sizes, which never leak onto H3", async () => {
+      mockFalProviderRuntime();
+      mockCompletedFalVideoJob({
+        requestId: "req-4c",
+        statusUrl: "https://queue.fal.run/status/req-4c",
+        responseUrl: "https://queue.fal.run/response/req-4c",
+        videoUrl: "https://v3.fal.media/out.mp4",
+        bytes: "video-bytes",
+      });
+      const provider = buildFalVideoGenerationProvider();
+
+      await provider.generateVideo(
+        referenceRequest({ model: "minimax/h3-max/reference-to-video", resolution: "768p" }),
+      );
+
+      expect(fetchGuardUrl(1)).toBe("https://queue.fal.run/minimax/h3-max/reference-to-video");
+      expect(getSubmitBody().resolution).toBe("768P");
     });
 
     it("G: MiniMax H3 drops a 30-second duration rather than sending an unsupported one", async () => {

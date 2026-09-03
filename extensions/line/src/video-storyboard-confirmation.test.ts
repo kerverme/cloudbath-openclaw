@@ -401,7 +401,7 @@ describe("Storyboard -> LINE draft -> real confirmation gate -> provider boundar
       ownerSenderId: OWNER,
       status: "pending",
       durationSeconds: 15,
-      resolution: "1080P",
+      resolution: "2K",
       aspectRatio: "9:16",
     });
     expect((stored as unknown as { estimatedCostUsd: number }).estimatedCostUsd).toBeCloseTo(
@@ -418,7 +418,7 @@ describe("Storyboard -> LINE draft -> real confirmation gate -> provider boundar
     const submitted = generateVideoMock.mock.calls[0]![0];
     expect(submitted.modelOverride).toBe(`fal/${H3_MODEL}`);
     expect(submitted.durationSeconds).toBe(15);
-    expect(submitted.resolution).toBe("1080P");
+    expect(submitted.resolution).toBe("2K");
     expect(submitted.aspectRatio).toBe("9:16");
     expect(submitted.autoProviderFallback).toBe(false);
 
@@ -453,7 +453,7 @@ describe("Storyboard -> LINE draft -> real confirmation gate -> provider boundar
     expect(job).toMatchObject({
       model: H3_MODEL,
       durationSeconds: 15,
-      resolution: "1080P",
+      resolution: "2K",
       aspectRatio: "9:16",
     });
     expect((job as unknown as { estimatedCostUsd: number }).estimatedCostUsd).toBeCloseTo(1.5, 3);

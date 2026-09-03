@@ -62,6 +62,17 @@ const MINIMAX_H3_MAX_VIDEOS = 3;
 const MINIMAX_H3_MAX_AUDIOS = 3;
 const MINIMAX_H3_MAX_FILES = 12;
 const MINIMAX_H3_DURATION_SECONDS = [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15] as const;
+/**
+ * Each H3 endpoint's OWN documented `resolution` enum.
+ *
+ * H3 documents a single "2K"; H3 Max documents 480P/768P. They are separate
+ * entries because copying one endpoint's sizes onto the other is exactly the
+ * mistake that submits an enum value the endpoint never accepted.
+ */
+const MINIMAX_H3_RESOLUTIONS: Readonly<Record<string, readonly string[]>> = Object.freeze({
+  "minimax/h3/reference-to-video": Object.freeze(["2K"]),
+  "minimax/h3-max/reference-to-video": Object.freeze(["480P", "768P"]),
+});
 const SEEDANCE_2_VIDEO_MODELS = [
   ...SEEDANCE_2_TEXT_IMAGE_VIDEO_MODELS,
   ...SEEDANCE_2_REFERENCE_VIDEO_MODELS,
@@ -336,10 +347,13 @@ function resolveFalResolution(resolution: VideoGenerationRequest["resolution"], 
   if (isFalSeedance2Model(model)) {
     return resolution.toLowerCase();
   }
-  // H3 documents its sizes in upper case ("768P"); sending a lower-cased value
-  // is not the same string the endpoint enumerates.
+  // H3 documents its sizes in upper case ("2K", "768P"), and each endpoint
+  // enumerates its own. An unlisted size is OMITTED rather than sent: the
+  // endpoint then applies its documented default, where a made-up enum value
+  // would be rejected outright.
   if (isFalMiniMaxH3ReferenceModel(model)) {
-    return resolution.toUpperCase();
+    const upper = resolution.toUpperCase();
+    return MINIMAX_H3_RESOLUTIONS[model]?.includes(upper) ? upper : undefined;
   }
   return resolution;
 }

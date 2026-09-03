@@ -13,6 +13,15 @@
  * There is deliberately no global fallback rate: a model with no declared
  * price is simply not payable, which is the same fail-closed exit the cost
  * guard already takes on an unknown estimate.
+ *
+ * MiniMax H3 stays operator-priced ON PURPOSE. fal's own current material
+ * disagrees with itself about it: the reference-to-video endpoint is quoted at
+ * $0.13 per 2K second in one place and ~$0.26 per generated second in another,
+ * and a third lists a 480p/768p/2K/4K rate ladder the endpoint's own input
+ * contract does not offer. A ~2x spread is not a rounding difference, and
+ * hardcoding either number would bill the owner a figure we cannot stand
+ * behind. Until ONE current H3 endpoint page settles it, an H3 quote requires
+ * an operator rate with its own citation, and without one H3 is not offered.
  */
 import type { FalVideoModel } from "./fal-video-registry.js";
 

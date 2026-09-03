@@ -105,6 +105,23 @@ export function describeFalDisplacement(
   return `${detail}\nDefault สำหรับงานนี้จึงเป็น ${replacementName}`;
 }
 
+/**
+ * Owner-facing sentence for a default dropped on PRICE, not capability.
+ *
+ * A separate sentence because the situation is different and the fix is
+ * different: the endpoint can run this scene, but it has no rate we can stand
+ * behind, so quoting it would put a number on the draft that nobody can
+ * defend. Saying only "Default is X" would hide that an operator setting is
+ * all that stands between the owner and their preferred model.
+ */
+export function describeFalUnpricedDisplacement(
+  modelName: string,
+  replacementName: string,
+): string {
+  const detail = `งานนี้ ${modelName} ทำได้ แต่ยังไม่มีราคาที่ยืนยันได้`;
+  return `${detail}\nDefault สำหรับงานนี้จึงเป็น ${replacementName}`;
+}
+
 export type FalStoryboardOffer =
   | Readonly<{
       kind: "offered";
@@ -148,20 +165,22 @@ export function offerFalStoryboardDefault(
     resolution: outputResolution,
   });
   const displaced = selection.preferredUnavailable;
+  // Two different ways the preferred endpoint can lose, and the owner is owed
+  // the right one: it could not run the scene, or it could but carries no
+  // rate. The second is invisible without this branch, because an unpriced
+  // model is filtered by `pricedCompatibleModels` AFTER capability selection
+  // has already declared it the winner.
+  const displacedReason = displaced
+    ? describeFalDisplacement(displaced.model.displayName, displaced.reasons, priced.displayName)
+    : priced.modelId === selection.model.modelId
+      ? undefined
+      : describeFalUnpricedDisplacement(selection.model.displayName, priced.displayName);
   return {
     kind: "offered",
     model: toOption(priced),
     outputResolution,
     ...(price.kind === "available" ? { estimatedCostUsd: price.amountUsd } : {}),
-    ...(displaced
-      ? {
-          displacedReason: describeFalDisplacement(
-            displaced.model.displayName,
-            displaced.reasons,
-            priced.displayName,
-          ),
-        }
-      : {}),
+    ...(displacedReason ? { displacedReason } : {}),
   };
 }
 
