@@ -103,6 +103,8 @@ function detectVideoContentType(bytes: Buffer): string {
 export type LineVideoOutboundStagingDependencies = {
   env?: NodeJS.ProcessEnv;
   s3Client?: { send(command: HeadObjectCommand | PutObjectCommand): Promise<unknown> };
+  // GetObjectCommand is only ever presigned, never sent, so it is not part of
+  // the send() union above.
   presign?: typeof getSignedUrl;
   guardedFetch?: GuardedFetchLike;
 };
@@ -267,6 +269,45 @@ export async function stageLineOutboundVideo(
       return fail("signed_url_generation_failed");
     }
     return { url, objectKey, contentType, contentLength: bytes.byteLength, sha256 };
+  } catch {
+    return fail("signed_url_generation_failed");
+  }
+}
+
+/**
+ * Re-signs an ALREADY-ARCHIVED video object.
+ *
+ * Signed delivery URLs expire, so a delivery retry minutes or hours after the
+ * paid job completed cannot reuse the one `stageLineOutboundVideo` returned.
+ * This re-signs from the persisted object key instead — no bytes are fetched,
+ * nothing is re-uploaded, and above all the provider is never called again.
+ */
+export async function signArchivedLineVideoUrl(
+  objectKey: string,
+  dependencies: LineVideoOutboundStagingDependencies = {},
+): Promise<string> {
+  if (!objectKey.trim()) {
+    fail("r2_object_key_invalid");
+  }
+  const config = resolveR2Config(dependencies.env ?? process.env);
+  const client =
+    dependencies.s3Client ??
+    new S3Client({
+      region: "auto",
+      endpoint: config.endpoint,
+      credentials: { accessKeyId: config.accessKeyId, secretAccessKey: config.secretAccessKey },
+    });
+  const presign = dependencies.presign ?? getSignedUrl;
+  try {
+    const url = await presign(
+      client as S3Client,
+      new GetObjectCommand({ Bucket: config.bucketName, Key: objectKey }),
+      { expiresIn: SIGNED_URL_EXPIRY_SECONDS },
+    );
+    if (new URL(url).protocol !== "https:") {
+      return fail("signed_url_generation_failed");
+    }
+    return url;
   } catch {
     return fail("signed_url_generation_failed");
   }

@@ -1,73 +1,90 @@
-import { describe, expect, it, vi } from "vitest";
-import { DEFAULT_VIDEO_MAX_ESTIMATED_COST_USD } from "./video-cost-guard.js";
+/**
+ * LINE-owned paid-draft preparation for a frozen storyboard, on fal.
+ *
+ * No test here reaches a real provider: nothing in this module submits, and
+ * the fal registry is a published schema transcription rather than a network
+ * call, so the paid call count is structurally zero.
+ */
+import { describe, expect, it } from "vitest";
 import {
   createLineVideoDraft,
   LINE_VIDEO_DRAFT_NAMESPACE,
   type LineVideoDraft,
   type LineVideoDraftStore,
 } from "./video-draft-store.js";
-import type { OpenRouterVideoModel } from "./video-model-catalog.js";
-import { DEFAULT_LINE_VIDEO_MODEL } from "./video-model-preference.js";
 import {
-  LINE_STORYBOARD_VIDEO_MODEL_ID,
+  listStoryboardCompatibleModels,
   prepareLineStoryboardVideoDraft,
   type LineStoryboardVideoDraftRequest,
 } from "./video-storyboard-draft.js";
 
-/**
- * LINE-owned paid-draft preparation for a storyboard.
- *
- * No test here reaches a real provider: the catalog is a fixture and nothing in
- * this module submits, so the paid call count is structurally zero.
- */
-
 const ACCOUNT = "acct-1";
 const GROUP = "C1234567890abcdef";
 const OWNER = "U0987654321";
+const H3 = "minimax/h3/reference-to-video";
+const H3_MAX = "minimax/h3-max/reference-to-video";
+const SEEDANCE_25 = "bytedance/seedance-2.5/reference-to-video";
+const SEEDANCE = "bytedance/seedance-2.0/reference-to-video";
 
 /**
- * A Seedance-shaped catalog row.
+ * An operator who has declared everything fal's schema leaves out.
  *
- * Priced per video second so the arithmetic in these tests is legible; the
- * production guard also handles token- and flat-priced shapes.
+ * H3's duration bound and audio behaviour are declarations because fal's
+ * schema states neither; the Seedance facts below are schema-proven and need
+ * only a price.
  */
-function seedanceRow(overrides: Partial<OpenRouterVideoModel> = {}): OpenRouterVideoModel {
+type FalTestConfig = {
+  videoGeneration: {
+    maxEstimatedCostUsd?: number;
+    falModels?: Record<
+      string,
+      { durationSeconds?: number[]; audio?: "always_on"; enabled?: boolean }
+    >;
+    falPricing?: { models: Record<string, { usdPerSecond?: number; source?: string }> };
+  };
+};
+
+/**
+ * H3 needs no declaration now: fal's product documentation proves 5-15s and
+ * native audio. Only the per-endpoint rates are operator-supplied.
+ */
+function fullyConfigured(maxEstimatedCostUsd = 20): FalTestConfig {
   return {
-    id: DEFAULT_LINE_VIDEO_MODEL,
-    name: "Seedance 2.5",
-    supportedDurationSeconds: [4, 5, 10, 15, 20, 30],
-    supportedAspectRatios: ["16:9", "9:16", "1:1", "4:3", "3:4", "21:9"],
-    supportedResolutions: ["480p", "720p"],
-    supportedSizes: ["854x480", "480x854", "1280x720", "720x1280"],
-    supportsFrameImages: true,
-    supportsAudio: true,
-    pricingSkus: { "per-video-second": "0.2312" },
-    ...overrides,
+    videoGeneration: {
+      maxEstimatedCostUsd,
+      falPricing: {
+        models: {
+          [H3]: { usdPerSecond: 0.1, source: "https://fal.ai/pricing" },
+          [SEEDANCE_25]: { usdPerSecond: 0.05, source: "https://fal.ai/pricing" },
+          [SEEDANCE]: { usdPerSecond: 0.05, source: "https://fal.ai/pricing" },
+        },
+      },
+    },
   };
 }
 
 function memoryDraftStore(): LineVideoDraftStore {
   const values = new Map<string, LineVideoDraft>();
   return {
-    async register(key, value) {
+    async register(key: string, value: LineVideoDraft) {
       values.set(key, structuredClone(value));
     },
-    async registerIfAbsent(key, value) {
+    async registerIfAbsent(key: string, value: LineVideoDraft) {
       if (values.has(key)) {
         return false;
       }
       values.set(key, structuredClone(value));
       return true;
     },
-    async lookup(key) {
+    async lookup(key: string) {
       return values.get(key);
     },
-    async consume(key) {
+    async consume(key: string) {
       const value = values.get(key);
       values.delete(key);
       return value;
     },
-    async delete(key) {
+    async delete(key: string) {
       return values.delete(key);
     },
     async entries() {
@@ -79,7 +96,7 @@ function memoryDraftStore(): LineVideoDraftStore {
   } as LineVideoDraftStore;
 }
 
-/** The flagship storyboard request: 15s · 720p · 9:16 with two canonical characters. */
+/** The flagship request: 15s · 720p · 9:16, one canonical character, sound on. */
 function request(
   overrides: Partial<LineStoryboardVideoDraftRequest> = {},
 ): LineStoryboardVideoDraftRequest {
@@ -87,332 +104,350 @@ function request(
     accountId: ACCOUNT,
     conversationId: GROUP,
     ownerSenderId: OWNER,
-    prompt: "Setting: cafe\nBeats:\n0-7s | Medium-wide | CHAR-6 walks past CHAR-7",
+    prompt: "Setting: garden\nBeats:\n0-15s | Medium-wide | F1 walks",
     durationSeconds: 15,
     aspectRatio: "9:16",
     resolution: "720p",
-    audio: true,
+    audio: "full",
+    spokenDialogue: false,
     storyboardId: "sb_1",
     storyboardVersionNumber: 2,
-    characterLocks: [
-      { code: "CHAR-6", pageId: "page-char-6" },
-      { code: "CHAR-7", pageId: "page-char-7" },
-    ],
+    characterLocks: [{ code: "CHAR-12", pageId: "page-char-12" }],
     referenceAssets: [
-      { kind: "identity", source: "r2", locator: "ugc/characters/Twong.png" },
-      { kind: "identity", source: "r2", locator: "ugc/characters/Twong2.png" },
+      {
+        kind: "identity",
+        source: "r2",
+        locator: "ugc/characters/F1.png",
+        characterCode: "CHAR-12",
+        displayName: "F1",
+      },
     ],
     ...overrides,
   };
 }
 
-function harness(
-  options: {
-    models?: OpenRouterVideoModel[];
-    maxEstimatedCostUsd?: number;
-    apiKey?: string | undefined;
-    loadModels?: () => Promise<OpenRouterVideoModel[]>;
-    randomDraftCode?: () => number;
-  } = {},
-) {
+function harness(options: { cfg?: ReturnType<typeof fullyConfigured>; falAuth?: boolean } = {}) {
   const draftStore = memoryDraftStore();
-  const loadModels = options.loadModels ?? (async () => options.models ?? [seedanceRow()]);
-  const deps = {
+  return {
     draftStore,
-    resolveApiKey: async () => ("apiKey" in options ? options.apiKey : "sk-test-key"),
-    cfg:
-      options.maxEstimatedCostUsd === undefined
-        ? {}
-        : { videoGeneration: { maxEstimatedCostUsd: options.maxEstimatedCostUsd } },
-    loadModels,
-    ...(options.randomDraftCode ? { randomDraftCode: options.randomDraftCode } : {}),
+    deps: {
+      draftStore,
+      resolveFalAuth: async () => options.falAuth ?? true,
+      cfg: options.cfg ?? fullyConfigured(),
+    },
   };
-  return { draftStore, deps };
 }
 
-describe("A. สร้างวิดีโอ allocates a LINE-owned paid draft", () => {
-  it("binds seedance 2.5 from the live catalog and quotes it, submitting nothing", async () => {
-    const h = harness({ maxEstimatedCostUsd: 5 });
+describe("E. the capability-aware default", () => {
+  it("defaults a compatible 15-second scene to MiniMax H3", async () => {
+    const h = harness();
     const result = await prepareLineStoryboardVideoDraft(request(), h.deps);
 
-    expect(result.kind).toBe("created");
+    expect(result).toMatchObject({ kind: "created" });
     if (result.kind !== "created") {
       return;
     }
-    expect(result.modelId).toBe("bytedance/seedance-2.5");
-    expect(result.draftId).toMatch(/^\d{4}$/u);
-    // 15s at $0.2312/s, the live catalog's own number -- not a constant here.
-    expect(result.estimatedCostUsd).toBeCloseTo(3.468, 3);
-    expect(result.maxAllowedUsd).toBe(5);
-    expect(result.durationSeconds).toBe(15);
-    expect(result.resolution).toBe("720p");
-    expect(result.aspectRatio).toBe("9:16");
-    expect(result.outputSize).toBe("720x1280");
-
-    // The draft is pending in LINE's own store, scoped to this owner.
-    const stored = await h.draftStore.lookup(result.draftId);
-    expect(stored?.model).toBe("bytedance/seedance-2.5");
-    expect(stored?.ownerSenderId).toBe(OWNER);
-    expect(stored?.status).toBe("pending");
-    expect(stored?.estimatedCostUsd).toBeCloseTo(3.468, 3);
+    expect(result.modelId).toBe(H3);
+    expect(result.familyId).toBe("minimax");
+    // fal's own declared rate, per endpoint. 15s at $0.10/s.
+    expect(result.estimatedCostUsd).toBeCloseTo(1.5, 6);
+    expect(result.pricingSource).toBe(`fal:${H3}`);
+    expect(result.displacedPreferred).toBeUndefined();
   });
 
-  it("binds the same slug the conversation preference defaults to", () => {
-    // One model id, not two literals that can drift apart.
-    expect(LINE_STORYBOARD_VIDEO_MODEL_ID).toBe(DEFAULT_LINE_VIDEO_MODEL);
-    expect(LINE_STORYBOARD_VIDEO_MODEL_ID).toBe("bytedance/seedance-2.5");
+  it("freezes the actual fal endpoint into the draft before the code exists", async () => {
+    const h = harness();
+    const result = await prepareLineStoryboardVideoDraft(request(), h.deps);
+    if (result.kind !== "created") {
+      throw new Error("expected a created draft");
+    }
+    const stored = await h.draftStore.lookup(result.draftId);
+    expect(stored?.providerRoute).toEqual({ provider: "fal", modelId: H3 });
+    expect(stored?.model).toBe(H3);
+    expect(stored?.estimatedCostUsd).toBeCloseTo(1.5, 6);
+  });
+});
+
+describe("F. a 30-second scene H3 cannot execute", () => {
+  it("defaults to Seedance 2.5 and explains why H3 was not offered", async () => {
+    const h = harness();
+    const result = await prepareLineStoryboardVideoDraft(request({ durationSeconds: 30 }), h.deps);
+    expect(result).toMatchObject({ kind: "created", modelId: SEEDANCE_25 });
+    if (result.kind !== "created") {
+      return;
+    }
+    expect(result.displacedPreferred?.modelName).toContain("H3");
+    expect(result.displacedPreferred?.reasons[0]).toMatchObject({
+      kind: "duration",
+      requested: 30,
+    });
+  });
+
+  it("drops H3 for a silent scene it cannot be made to silence", async () => {
+    const h = harness();
+    const result = await prepareLineStoryboardVideoDraft(request({ audio: "off" }), h.deps);
+    // H3 produces native audio on every generation with no off switch.
+    expect(result).toMatchObject({ kind: "created", modelId: SEEDANCE_25 });
+  });
+
+  it("finds nothing for a length no fal endpoint reaches", async () => {
+    const h = harness();
+    const result = await prepareLineStoryboardVideoDraft(request({ durationSeconds: 60 }), h.deps);
+    expect(result).toMatchObject({ kind: "rejected", reason: "no_compatible_model" });
+  });
+});
+
+describe("K. no VIDEO code before model, price, auth and compatibility all pass", () => {
+  it("mints nothing when fal auth is unavailable, and calls no provider", async () => {
+    const h = harness({ falAuth: false });
+    const result = await prepareLineStoryboardVideoDraft(request(), h.deps);
+    expect(result).toEqual({ kind: "rejected", reason: "provider_auth_unavailable" });
+    expect((await h.draftStore.entries()).length).toBe(0);
+  });
+
+  it("mints nothing when the chosen endpoint has no declared price", async () => {
+    // The two endpoints fal publishes a price for are disabled, so the ones
+    // that remain need an operator rate and none is configured.
+    const h = harness({
+      cfg: {
+        videoGeneration: {
+          maxEstimatedCostUsd: 20,
+          falModels: {
+            ...fullyConfigured().videoGeneration.falModels,
+            [H3]: { enabled: false },
+            [SEEDANCE_25]: { enabled: false },
+          },
+          falPricing: { models: {} },
+        },
+      },
+    });
+    const result = await prepareLineStoryboardVideoDraft(request(), h.deps);
+    expect(result).toMatchObject({ kind: "rejected", reason: "unknown_cost" });
+    expect((await h.draftStore.entries()).length).toBe(0);
+  });
+
+  it("still mints nothing when no endpoint has a usable price", async () => {
+    // Seedance 2.5 carries fal's published token price, so it is excluded by
+    // making its output size one fal publishes no dimensions for.
+    const h = harness({
+      cfg: {
+        videoGeneration: { maxEstimatedCostUsd: 0.01, falPricing: { models: {} } },
+      },
+    });
+    const result = await prepareLineStoryboardVideoDraft(request(), h.deps);
+    expect(result).toMatchObject({ kind: "rejected" });
+    expect((await h.draftStore.entries()).length).toBe(0);
+  });
+
+  it("refuses a named model that cannot execute the frozen storyboard", async () => {
+    const h = harness();
+    const result = await prepareLineStoryboardVideoDraft(
+      request({ requestedModelId: "fal-ai/veo3.1/reference-to-video" }),
+      h.deps,
+    );
+    // Veo's schema documents one length ("8s"), so it cannot run a 15s scene —
+    // and naming it explicitly is not a way past that.
+    expect(result).toMatchObject({ kind: "rejected", reason: "model_incompatible" });
+    expect((await h.draftStore.entries()).length).toBe(0);
+  });
+
+  it("refuses an endpoint that is not in the registry at all", async () => {
+    const h = harness();
+    const result = await prepareLineStoryboardVideoDraft(
+      request({ requestedModelId: "bytedance/seedance-9.9/reference-to-video" }),
+      h.deps,
+    );
+    expect(result).toMatchObject({ kind: "rejected", reason: "model_unavailable" });
+  });
+
+  it("binds fal's REAL Seedance 2.5 endpoint when the owner names it", async () => {
+    const h = harness();
+    const result = await prepareLineStoryboardVideoDraft(
+      request({ requestedModelId: SEEDANCE_25 }),
+      h.deps,
+    );
+    expect(result).toMatchObject({ kind: "created", modelId: SEEDANCE_25 });
+    if (result.kind !== "created") {
+      return;
+    }
+    const stored = await h.draftStore.lookup(result.draftId);
+    // The exact frozen paid model, never aliased onto 2.0.
+    expect(stored?.providerRoute).toEqual({ provider: "fal", modelId: SEEDANCE_25 });
+    // Seedance 2.5's own bracket dialect, not 2.0's @Image form.
+    expect(stored?.prompt).toContain("[Image1] = F1 (CHAR-12), identity reference.");
+    expect(stored?.prompt).not.toContain("@Image1");
+  });
+
+  it("refuses when the quote exceeds the configured ceiling", async () => {
+    const h = harness({ cfg: fullyConfigured(0.5) });
+    const result = await prepareLineStoryboardVideoDraft(request(), h.deps);
+    expect(result).toMatchObject({ kind: "rejected", reason: "over_limit" });
+    expect((await h.draftStore.entries()).length).toBe(0);
+  });
+});
+
+describe("I. an explicitly chosen compatible endpoint", () => {
+  it("binds exactly the endpoint the owner named", async () => {
+    const h = harness();
+    const result = await prepareLineStoryboardVideoDraft(
+      request({ requestedModelId: SEEDANCE }),
+      h.deps,
+    );
+    expect(result).toMatchObject({ kind: "created", modelId: SEEDANCE });
+    if (result.kind !== "created") {
+      return;
+    }
+    // Seedance's own rate, not H3's.
+    expect(result.estimatedCostUsd).toBeCloseTo(0.75, 6);
+  });
+});
+
+describe("N. reference markers match the submitted ordering", () => {
+  it("writes the selected model's own marker dialect into the frozen prompt", async () => {
+    const h = harness();
+    const twoCharacters = request({
+      requestedModelId: SEEDANCE,
+      characterLocks: [
+        { code: "CHAR-12", pageId: "p1" },
+        { code: "CHAR-13", pageId: "p2" },
+      ],
+      referenceAssets: [
+        {
+          kind: "identity",
+          source: "r2",
+          locator: "a.png",
+          characterCode: "CHAR-12",
+          displayName: "F1",
+        },
+        {
+          kind: "identity",
+          source: "r2",
+          locator: "b.png",
+          characterCode: "CHAR-13",
+          displayName: "F2",
+        },
+      ],
+    });
+    const result = await prepareLineStoryboardVideoDraft(twoCharacters, h.deps);
+    if (result.kind !== "created") {
+      throw new Error("expected a created draft");
+    }
+    const stored = await h.draftStore.lookup(result.draftId);
+    // Seedance reads "@ImageN"; position N is the Nth identity asset submitted.
+    expect(stored?.prompt).toContain("@Image1 = F1 (CHAR-12), identity reference.");
+    expect(stored?.prompt).toContain("@Image2 = F2 (CHAR-13), identity reference.");
+    // The confirmed storyboard text is preserved byte-for-byte ahead of it.
+    expect(stored?.prompt.startsWith(twoCharacters.prompt)).toBe(true);
+  });
+
+  it("uses MiniMax H3's 'Image N' dialect, not Seedance's '@ImageN'", async () => {
+    const h = harness();
+    const result = await prepareLineStoryboardVideoDraft(request({ requestedModelId: H3 }), h.deps);
+    if (result.kind !== "created") {
+      throw new Error("expected a created draft");
+    }
+    const stored = await h.draftStore.lookup(result.draftId);
+    expect(stored?.prompt).toContain("Image 1 = F1 (CHAR-12), identity reference.");
+    expect(stored?.prompt).not.toContain("@Image1");
+  });
+});
+
+describe("compatible-model listing for the pickers", () => {
+  it("offers only endpoints that are both compatible AND priced", async () => {
+    const cfg = fullyConfigured();
+    const models = listStoryboardCompatibleModels(request(), cfg);
+    expect(models.map((model) => model.modelId)).toEqual(
+      expect.arrayContaining([H3, SEEDANCE_25, SEEDANCE]),
+    );
+  });
+
+  it("omits a compatible endpoint the operator never priced", () => {
+    const cfg = {
+      videoGeneration: {
+        ...fullyConfigured().videoGeneration,
+        falPricing: { models: { [SEEDANCE]: { usdPerSecond: 0.05 } } },
+      },
+    };
+    const models = listStoryboardCompatibleModels(request(), cfg).map((model) => model.modelId);
+    // H3 and Seedance 2.5 carry fal's own published prices, so they stay
+    // payable with no operator rate; H3 Max publishes none and drops out.
+    expect(models).toContain(H3);
+    expect(models).toContain(SEEDANCE);
+    expect(models).not.toContain(H3_MAX);
+  });
+});
+
+describe("the draft lives in LINE's own store", () => {
+  it("uses the shipped LINE draft namespace and no second one", () => {
+    expect(LINE_VIDEO_DRAFT_NAMESPACE).toBe("video-draft-v1");
   });
 
   it("scopes the draft to the LINE conversation key, not a rebuilt one", async () => {
-    const h = harness({ maxEstimatedCostUsd: 5 });
+    const h = harness();
     const created = await prepareLineStoryboardVideoDraft(
       request({ conversationId: `line:group:${GROUP}` }),
       h.deps,
     );
-    expect(created.kind).toBe("created");
     if (created.kind !== "created") {
-      return;
+      throw new Error("expected a created draft");
     }
-    // Same normalized key whether the caller passed the native or prefixed id.
     const stored = await h.draftStore.lookup(created.draftId);
     expect(stored?.conversationKey).toBe(`${ACCOUNT}|${GROUP}`);
+    expect(stored?.ownerSenderId).toBe(OWNER);
+    expect(stored?.status).toBe("pending");
   });
-});
 
-describe("B. the draft lives in LINE's own store", () => {
-  it("uses the shipped LINE draft namespace and no second one", () => {
-    // The storyboard plugin has no allocator at all; this is the only 4-digit
-    // code space, and it is this plugin's.
-    expect(LINE_VIDEO_DRAFT_NAMESPACE).toBe("video-draft-v1");
-  });
-});
-
-describe("C. the allocator avoids an existing pending code", () => {
   it("never reuses a code the LINE flow already holds", async () => {
-    const h = harness({ maxEstimatedCostUsd: 5, randomDraftCode: codes([4821, 4821, 4822]) });
-    // An unrelated LINE paid draft already owns 4821.
+    const codes = [4821, 4821, 4822];
+    let index = 0;
+    const h = harness();
     await createLineVideoDraft({
       store: h.draftStore,
       accountId: ACCOUNT,
       conversationKey: `${ACCOUNT}|other`,
       ownerSenderId: "U-someone-else",
-      model: "bytedance/seedance-2.5",
+      model: SEEDANCE,
       prompt: "an unrelated pending job",
       durationSeconds: 5,
       aspectRatio: "16:9",
-      resolution: "480p",
+      resolution: "720p",
       audio: false,
-      estimatedCostUsd: 0.5,
+      estimatedCostUsd: 0.25,
       randomDraftCode: () => 4821,
     });
-
-    const result = await prepareLineStoryboardVideoDraft(request(), h.deps);
-    expect(result.kind).toBe("created");
-    if (result.kind !== "created") {
-      return;
-    }
-    expect(result.draftId).toBe("4822");
-    // The unrelated draft is untouched: still its own prompt and owner.
-    const other = await h.draftStore.lookup("4821");
-    expect(other?.ownerSenderId).toBe("U-someone-else");
-    expect(other?.prompt).toBe("an unrelated pending job");
-  });
-});
-
-/** Deterministic code sequence for allocator tests. */
-function codes(sequence: readonly number[]): () => number {
-  let index = 0;
-  return () => sequence[Math.min(index++, sequence.length - 1)]!;
-}
-
-describe("G/H. the cost guard decides, and it fails closed", () => {
-  it("allows the flagship quote under an account-scoped $10 ceiling", async () => {
-    const h = harness({ maxEstimatedCostUsd: 10 });
-    const result = await prepareLineStoryboardVideoDraft(request(), h.deps);
-    expect(result).toMatchObject({
-      kind: "created",
-      modelId: "bytedance/seedance-2.5",
-      maxAllowedUsd: 10,
+    const created = await prepareLineStoryboardVideoDraft(request(), {
+      ...h.deps,
+      randomDraftCode: () => codes[index++] ?? 4823,
     });
+    expect(created).toMatchObject({ kind: "created", draftId: "4822" });
   });
 
-  it("refuses the flagship job under the global $2 default", async () => {
+  it("supersedes only the previous code for THIS storyboard", async () => {
     const h = harness();
-    const result = await prepareLineStoryboardVideoDraft(request(), h.deps);
-
-    expect(result).toMatchObject({ kind: "rejected", reason: "over_limit" });
-    if (result.kind !== "rejected" || result.reason !== "over_limit") {
-      return;
+    const first = await prepareLineStoryboardVideoDraft(request(), h.deps);
+    const second = await prepareLineStoryboardVideoDraft(request(), h.deps);
+    if (first.kind !== "created" || second.kind !== "created") {
+      throw new Error("expected two created drafts");
     }
-    expect(result.maxAllowedUsd).toBe(DEFAULT_VIDEO_MAX_ESTIMATED_COST_USD);
-    expect(result.maxAllowedUsd).toBe(2);
-    expect(result.estimatedCostUsd).toBeGreaterThan(2);
-    // Fail closed means no code was minted at all.
-    expect(await h.draftStore.entries()).toEqual([]);
-  });
-
-  it("refuses a 30s job even under the $5 account override", async () => {
-    const h = harness({ maxEstimatedCostUsd: 5 });
-    const result = await prepareLineStoryboardVideoDraft(request({ durationSeconds: 30 }), h.deps);
-    expect(result).toMatchObject({ kind: "rejected", reason: "over_limit" });
-    expect(await h.draftStore.entries()).toEqual([]);
-  });
-
-  it("refuses a model whose price it cannot read, rather than assuming free", async () => {
-    const h = harness({
-      maxEstimatedCostUsd: 5,
-      models: [seedanceRow({ pricingSkus: { "some-future-shape": "0.5" } })],
+    expect(second.supersededDraftIds).toEqual([first.draftId]);
+    const retired = await h.draftStore.lookup(first.draftId);
+    expect(retired).toMatchObject({
+      status: "superseded",
+      supersededByDraftId: second.draftId,
     });
-    const result = await prepareLineStoryboardVideoDraft(request(), h.deps);
-    expect(result).toMatchObject({ kind: "rejected", reason: "unknown_cost" });
-    expect(await h.draftStore.entries()).toEqual([]);
-  });
-});
-
-describe("P. provider capability comes from the live catalog", () => {
-  it("fails closed when the catalog does not list the model", async () => {
-    const h = harness({ maxEstimatedCostUsd: 5, models: [seedanceRow({ id: "other/model" })] });
-    const result = await prepareLineStoryboardVideoDraft(request(), h.deps);
-    expect(result).toMatchObject({
-      kind: "rejected",
-      reason: "model_unavailable",
-      model: "bytedance/seedance-2.5",
-    });
-    expect(await h.draftStore.entries()).toEqual([]);
   });
 
-  it("fails closed on an unsupported duration, resolution or aspect", async () => {
-    const cases: ReadonlyArray<readonly [Partial<OpenRouterVideoModel>, string]> = [
-      [{ supportedDurationSeconds: [4, 5, 10] }, "unsupported_duration"],
-      [{ supportedResolutions: ["480p"] }, "unsupported_resolution"],
-      [{ supportedAspectRatios: ["16:9"] }, "unsupported_aspect_ratio"],
-    ];
-    for (const [override, reason] of cases) {
-      const h = harness({ maxEstimatedCostUsd: 5, models: [seedanceRow(override)] });
-      const result = await prepareLineStoryboardVideoDraft(request(), h.deps);
-      expect(result, reason).toMatchObject({ kind: "rejected", reason });
-      expect(await h.draftStore.entries(), reason).toEqual([]);
-    }
-  });
-
-  it("fails closed when the catalog cannot be read or auth is missing", async () => {
-    const noAuth = harness({ apiKey: undefined });
-    expect(await prepareLineStoryboardVideoDraft(request(), noAuth.deps)).toMatchObject({
-      kind: "rejected",
-      reason: "provider_auth_unavailable",
-    });
-
-    const broken = harness({
-      maxEstimatedCostUsd: 5,
-      loadModels: async () => {
-        throw new Error("catalog down");
-      },
-    });
-    expect(await prepareLineStoryboardVideoDraft(request(), broken.deps)).toMatchObject({
-      kind: "rejected",
-      reason: "catalog_unavailable",
-    });
-    expect(await broken.draftStore.entries()).toEqual([]);
-  });
-
-  it("fails closed on a conversation id it cannot scope", async () => {
-    const h = harness({ maxEstimatedCostUsd: 5 });
-    const result = await prepareLineStoryboardVideoDraft(
-      request({ conversationId: "   " }),
+  it("leaves another storyboard's pending code untouched", async () => {
+    const h = harness();
+    const other = await prepareLineStoryboardVideoDraft(
+      request({ storyboardId: "sb_new_project" }),
       h.deps,
     );
-    expect(result).toMatchObject({ kind: "rejected", reason: "invalid_conversation" });
-    expect(await h.draftStore.entries()).toEqual([]);
-  });
-});
-
-describe("Q. audio is granted by the catalog, never by the request", () => {
-  it("keeps audio when the catalog reports support", async () => {
-    const h = harness({ maxEstimatedCostUsd: 5 });
-    const result = await prepareLineStoryboardVideoDraft(request({ audio: true }), h.deps);
-    expect(result).toMatchObject({ kind: "created", audio: true });
-  });
-
-  it("drops audio the catalog does not report, instead of inventing support", async () => {
-    for (const override of [{ supportsAudio: false }, {}] as const) {
-      const row = seedanceRow(override);
-      if (!("supportsAudio" in override)) {
-        delete (row as { supportsAudio?: boolean }).supportsAudio;
-      }
-      const h = harness({ maxEstimatedCostUsd: 5, models: [row] });
-      const result = await prepareLineStoryboardVideoDraft(request({ audio: true }), h.deps);
-      expect(result).toMatchObject({ kind: "created", audio: false });
-      if (result.kind !== "created") {
-        return;
-      }
-      const stored = await h.draftStore.lookup(result.draftId);
-      expect(stored?.audio).toBe(false);
+    const mine = await prepareLineStoryboardVideoDraft(request(), h.deps);
+    if (other.kind !== "created" || mine.kind !== "created") {
+      throw new Error("expected two created drafts");
     }
-  });
-});
-
-describe("no test in this file can spend money", () => {
-  it("never performs a network call", async () => {
-    const fetchSpy = vi.fn();
-    const h = harness({ maxEstimatedCostUsd: 5 });
-    await prepareLineStoryboardVideoDraft(request(), { ...h.deps, fetchImpl: fetchSpy as never });
-    expect(fetchSpy).not.toHaveBeenCalled();
-  });
-});
-
-describe("the snapshotted ceiling is the one the guard used", () => {
-  it("falls back to the global default for an unusable configured limit", async () => {
-    // A zero, negative or non-finite limit must not read as "no limit"; the
-    // guard's own resolver decides, so this can never drift from it.
-    for (const maxEstimatedCostUsd of [0, -1, Number.NaN]) {
-      const h = harness({ maxEstimatedCostUsd });
-      const result = await prepareLineStoryboardVideoDraft(request(), h.deps);
-      expect(result, String(maxEstimatedCostUsd)).toMatchObject({
-        kind: "rejected",
-        reason: "over_limit",
-        maxAllowedUsd: DEFAULT_VIDEO_MAX_ESTIMATED_COST_USD,
-      });
-      expect(await h.draftStore.entries()).toEqual([]);
-    }
-  });
-
-  it("allows a quote exactly at the configured ceiling", async () => {
-    // The guard rejects strictly above the limit; a draft priced exactly at it
-    // is allowed, and the snapshot records that same ceiling.
-    const h = harness({ maxEstimatedCostUsd: 3.468 });
-    const result = await prepareLineStoryboardVideoDraft(request(), h.deps);
-    expect(result).toMatchObject({ kind: "created", maxAllowedUsd: 3.468 });
-  });
-});
-
-describe("the cross-plugin seam round-trips and is owner-guarded", () => {
-  it("resolves what LINE installed, and only the installer can clear it", async () => {
-    const [{ installLineStoryboardVideoRuntime, clearLineStoryboardVideoRuntime }, consumer] =
-      await Promise.all([
-        import("./video-storyboard-runtime.js"),
-        import("../../cloudbath-line-image-archive/src/storyboard-paid-draft-runtime.js"),
-      ]);
-    const owner = Symbol("line.test-owner");
-    const runtime = {
-      prepareStoryboardVideoDraft: async () => ({ kind: "rejected" as const, reason: "test" }),
-    };
-    try {
-      expect(consumer.tryGetStoryboardPaidDraftRuntime()).toBeNull();
-
-      installLineStoryboardVideoRuntime(owner, runtime as never);
-      // The storyboard side resolves the SAME object through its own
-      // structurally-typed view of the shared registry key.
-      expect(consumer.tryGetStoryboardPaidDraftRuntime()).toBe(runtime);
-
-      // A different plugin cannot evict LINE's runtime.
-      expect(clearLineStoryboardVideoRuntime(Symbol("someone-else"))).toBe(false);
-      expect(consumer.tryGetStoryboardPaidDraftRuntime()).toBe(runtime);
-
-      expect(clearLineStoryboardVideoRuntime(owner)).toBe(true);
-      expect(consumer.tryGetStoryboardPaidDraftRuntime()).toBeNull();
-    } finally {
-      // The slot lives on globalThis, so it must not outlive this test.
-      clearLineStoryboardVideoRuntime(owner);
-    }
+    expect(mine.supersededDraftIds).toBeUndefined();
+    expect(await h.draftStore.lookup(other.draftId)).toMatchObject({ status: "pending" });
   });
 });

@@ -114,6 +114,243 @@ describe("fal video generation provider", () => {
     setFalVideoFetchGuardForTesting(null);
   });
 
+  /**
+   * Endpoint contract tests against the REAL provider.
+   *
+   * These drive `generateVideo` with a mocked queue and assert the POST target
+   * and serialized body, so a wrong field name or a wrong endpoint is caught
+   * here rather than by a paid request. No network call is made.
+   */
+  describe("reference-to-video endpoint contracts", () => {
+    const REFERENCES = [
+      { url: "https://r2.example/char-12.png", mimeType: "image/png" },
+      { url: "https://r2.example/char-13.png", mimeType: "image/png" },
+    ];
+
+    function referenceRequest(overrides: Record<string, unknown> = {}) {
+      return {
+        cfg: {},
+        prompt: "F1 walks in the garden",
+        agentDir: "/agent",
+        inputImages: REFERENCES,
+        durationSeconds: 15,
+        resolution: "720p",
+        aspectRatio: "9:16",
+        ...overrides,
+      } as never;
+    }
+
+    it("A/B/C: Seedance 2.5 posts to its own endpoint with ordered image_urls", async () => {
+      mockFalProviderRuntime();
+      mockCompletedFalVideoJob({
+        requestId: "req-1",
+        statusUrl: "https://queue.fal.run/status/req-1",
+        responseUrl: "https://queue.fal.run/response/req-1",
+        videoUrl: "https://v3.fal.media/out.mp4",
+        bytes: "video-bytes",
+      });
+      const provider = buildFalVideoGenerationProvider();
+
+      await provider.generateVideo(
+        referenceRequest({ model: "bytedance/seedance-2.5/reference-to-video" }),
+      );
+
+      expect(fetchGuardUrl(1)).toBe(
+        "https://queue.fal.run/bytedance/seedance-2.5/reference-to-video",
+      );
+      const body = getSubmitBody();
+      // Frozen order preserved: image_urls[N] is the Nth reference submitted,
+      // which is what the prompt's [ImageN] markers bind to.
+      expect(body.image_urls).toEqual([
+        "https://r2.example/char-12.png",
+        "https://r2.example/char-13.png",
+      ]);
+      expect(body.image_url).toBeUndefined();
+      expect(body.reference_image_urls).toBeUndefined();
+    });
+
+    it("H: Seedance 2.5 accepts 30 seconds, which no other endpoint here does", async () => {
+      mockFalProviderRuntime();
+      mockCompletedFalVideoJob({
+        requestId: "req-2",
+        statusUrl: "https://queue.fal.run/status/req-2",
+        responseUrl: "https://queue.fal.run/response/req-2",
+        videoUrl: "https://v3.fal.media/out.mp4",
+        bytes: "video-bytes",
+      });
+      const provider = buildFalVideoGenerationProvider();
+
+      await provider.generateVideo(
+        referenceRequest({
+          model: "bytedance/seedance-2.5/reference-to-video",
+          durationSeconds: 30,
+        }),
+      );
+
+      expect(getSubmitBody().duration).toBe("30");
+    });
+
+    it("I: Seedance 2.5 serializes generate_audio=false for a silent scene", async () => {
+      mockFalProviderRuntime();
+      mockCompletedFalVideoJob({
+        requestId: "req-3",
+        statusUrl: "https://queue.fal.run/status/req-3",
+        responseUrl: "https://queue.fal.run/response/req-3",
+        videoUrl: "https://v3.fal.media/out.mp4",
+        bytes: "video-bytes",
+      });
+      const provider = buildFalVideoGenerationProvider();
+
+      await provider.generateVideo(
+        referenceRequest({ model: "bytedance/seedance-2.5/reference-to-video", audio: false }),
+      );
+
+      expect(getSubmitBody().generate_audio).toBe(false);
+    });
+
+    it("D/E/F: MiniMax H3 uses reference_image_urls, never the first-frame image_url", async () => {
+      mockFalProviderRuntime();
+      mockCompletedFalVideoJob({
+        requestId: "req-4",
+        statusUrl: "https://queue.fal.run/status/req-4",
+        responseUrl: "https://queue.fal.run/response/req-4",
+        videoUrl: "https://v3.fal.media/out.mp4",
+        bytes: "video-bytes",
+      });
+      const provider = buildFalVideoGenerationProvider();
+
+      await provider.generateVideo(
+        referenceRequest({ model: "minimax/h3/reference-to-video", resolution: "2K" }),
+      );
+
+      expect(fetchGuardUrl(1)).toBe("https://queue.fal.run/minimax/h3/reference-to-video");
+      const body = getSubmitBody();
+      // Character identity references must NOT become first-frame semantics.
+      expect(body.reference_image_urls).toEqual([
+        "https://r2.example/char-12.png",
+        "https://r2.example/char-13.png",
+      ]);
+      expect(body.image_url).toBeUndefined();
+      expect(body.image_urls).toBeUndefined();
+      // Integer duration, not Seedance's string enum, and 15s is accepted.
+      expect(body.duration).toBe(15);
+      expect(body.resolution).toBe("2K");
+      // No audio control exists on this endpoint, so none is sent.
+      expect(body.generate_audio).toBeUndefined();
+    });
+
+    it.each(["768P", "2K", "4K"])("C/D/E: H3 sends its own enum value %s", async (resolution) => {
+      mockFalProviderRuntime();
+      mockCompletedFalVideoJob({
+        requestId: `req-4b-${resolution}`,
+        statusUrl: "https://queue.fal.run/status/req-4b",
+        responseUrl: "https://queue.fal.run/response/req-4b",
+        videoUrl: "https://v3.fal.media/out.mp4",
+        bytes: "video-bytes",
+      });
+      const provider = buildFalVideoGenerationProvider();
+
+      await provider.generateVideo(
+        referenceRequest({ model: "minimax/h3/reference-to-video", resolution }),
+      );
+
+      expect(getSubmitBody().resolution).toBe(resolution);
+    });
+
+    it.each(["480P", "1080P"])(
+      "F: H3 never submits %s, which is not in its enum",
+      async (resolution) => {
+        mockFalProviderRuntime();
+        mockCompletedFalVideoJob({
+          requestId: `req-4c-${resolution}`,
+          statusUrl: "https://queue.fal.run/status/req-4c",
+          responseUrl: "https://queue.fal.run/response/req-4c",
+          videoUrl: "https://v3.fal.media/out.mp4",
+          bytes: "video-bytes",
+        });
+        const provider = buildFalVideoGenerationProvider();
+
+        // 480P is H3 Max's, 1080P is nobody's. Submitting an enum value the
+        // endpoint never listed would be rejected outright, so it is dropped and
+        // the endpoint applies its own documented default (2K) instead.
+        await provider.generateVideo(
+          referenceRequest({ model: "minimax/h3/reference-to-video", resolution }),
+        );
+
+        expect(getSubmitBody().resolution).toBeUndefined();
+      },
+    );
+
+    it("G: H3 Max keeps its OWN sizes, which never leak onto H3", async () => {
+      mockFalProviderRuntime();
+      mockCompletedFalVideoJob({
+        requestId: "req-4c",
+        statusUrl: "https://queue.fal.run/status/req-4c",
+        responseUrl: "https://queue.fal.run/response/req-4c",
+        videoUrl: "https://v3.fal.media/out.mp4",
+        bytes: "video-bytes",
+      });
+      const provider = buildFalVideoGenerationProvider();
+
+      await provider.generateVideo(
+        referenceRequest({ model: "minimax/h3-max/reference-to-video", resolution: "768p" }),
+      );
+
+      expect(fetchGuardUrl(1)).toBe("https://queue.fal.run/minimax/h3-max/reference-to-video");
+      expect(getSubmitBody().resolution).toBe("768P");
+    });
+
+    it("G: MiniMax H3 drops a 30-second duration rather than sending an unsupported one", async () => {
+      mockFalProviderRuntime();
+      mockCompletedFalVideoJob({
+        requestId: "req-5",
+        statusUrl: "https://queue.fal.run/status/req-5",
+        responseUrl: "https://queue.fal.run/response/req-5",
+        videoUrl: "https://v3.fal.media/out.mp4",
+        bytes: "video-bytes",
+      });
+      const provider = buildFalVideoGenerationProvider();
+
+      await provider.generateVideo(
+        referenceRequest({ model: "minimax/h3/reference-to-video", durationSeconds: 30 }),
+      );
+
+      // The LINE flow refuses 30s on H3 long before this point; the provider
+      // additionally refuses to invent a value the endpoint does not accept.
+      expect(getSubmitBody().duration).toBeUndefined();
+      expect(
+        provider.capabilities.videoToVideo?.supportedDurationSecondsByModel?.[
+          "minimax/h3/reference-to-video"
+        ],
+      ).not.toContain(30);
+    });
+
+    it("keeps H3 Max a distinct endpoint from H3", async () => {
+      mockFalProviderRuntime();
+      mockCompletedFalVideoJob({
+        requestId: "req-6",
+        statusUrl: "https://queue.fal.run/status/req-6",
+        responseUrl: "https://queue.fal.run/response/req-6",
+        videoUrl: "https://v3.fal.media/out.mp4",
+        bytes: "video-bytes",
+      });
+      const provider = buildFalVideoGenerationProvider();
+
+      await provider.generateVideo(
+        referenceRequest({ model: "minimax/h3-max/reference-to-video", resolution: "480P" }),
+      );
+
+      expect(fetchGuardUrl(1)).toBe("https://queue.fal.run/minimax/h3-max/reference-to-video");
+      expect(getSubmitBody().resolution).toBe("480P");
+    });
+
+    it("J: every case above went through the mocked guard, so nothing was billed", () => {
+      // The guard is the only egress path in this provider; it is reset in
+      // afterEach and replaced with a mock in every case here.
+      expect(fetchGuardMock.mock.calls.length).toBe(0);
+    });
+  });
+
   it("declares explicit mode capabilities", () => {
     const provider = buildFalVideoGenerationProvider();
     expectExplicitVideoGenerationCapabilities(provider);
@@ -124,12 +361,26 @@ describe("fal video generation provider", () => {
       ],
     ).toBe(9);
     expect(provider.capabilities.videoToVideo?.maxInputVideos).toBe(0);
-    expect(
-      Object.keys(provider.capabilities.videoToVideo?.supportedDurationSecondsByModel ?? {}),
-    ).toEqual([
-      "bytedance/seedance-2.0/fast/reference-to-video",
-      "bytedance/seedance-2.0/reference-to-video",
+    const durationsByModel =
+      provider.capabilities.videoToVideo?.supportedDurationSecondsByModel ?? {};
+    // Each endpoint reports its OWN published range: 2.5 reaches 30s, 2.0 stops
+    // at 15, and H3 spans 5-15. A shared list would over-report one of them.
+    expect(durationsByModel["bytedance/seedance-2.5/reference-to-video"]).toContain(30);
+    expect(durationsByModel["bytedance/seedance-2.0/reference-to-video"]).not.toContain(30);
+    expect(durationsByModel["minimax/h3/reference-to-video"]).toEqual([
+      5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
     ]);
+    expect(durationsByModel["minimax/h3-max/reference-to-video"]).toEqual(
+      durationsByModel["minimax/h3/reference-to-video"],
+    );
+    expect(
+      provider.capabilities.imageToVideo?.maxInputImagesByModel?.[
+        "bytedance/seedance-2.5/reference-to-video"
+      ],
+    ).toBe(50);
+    expect(
+      provider.capabilities.imageToVideo?.maxInputImagesByModel?.["minimax/h3/reference-to-video"],
+    ).toBe(9);
   });
 
   it("submits fal video jobs through the queue API and downloads the completed result", async () => {

@@ -6,13 +6,22 @@
  * as the storyboard itself.
  */
 
+import { STORYBOARD_CONFIRMATION_PROMPT } from "./storyboard-confirmation.js";
 import type {
+  StoryboardAudioMode,
   StoryboardCostEstimate,
   StoryboardDraftConfirmation,
   StoryboardDocument,
   StoryboardFinalVideoDraft,
   StoryboardVideoModelSelection,
 } from "./storyboard-types.js";
+
+/** Owner-facing wording for the scene audio decision. */
+const AUDIO_MODE_LABELS: Readonly<Record<StoryboardAudioMode, string>> = Object.freeze({
+  off: "ไม่มีเสียง",
+  ambient: "มีเสียงประกอบ ไม่มีเสียงพูด",
+  full: "มีเสียง",
+});
 
 function beatBlock(document: StoryboardDocument): string[] {
   return document.beats.flatMap((beat) => {
@@ -24,7 +33,10 @@ function beatBlock(document: StoryboardDocument): string[] {
       `${beat.startSeconds}–${beat.endSeconds} วิ`,
       heading,
       beat.action,
-      ...(beat.dialogue ? [`เสียง: ${beat.dialogue}`] : []),
+      // SPEECH and SOUND are labelled apart. One shared "เสียง:" line is what
+      // made "มีเสียง" and "มีบทพูด" read identically to the owner.
+      ...(beat.dialogue ? [`พูด: ${beat.dialogue}`] : []),
+      ...(beat.soundDesign ? [`เสียง: ${beat.soundDesign}`] : []),
       ...(beat.camera && beat.camera !== "Static" ? [`กล้อง: ${beat.camera}`] : []),
     ];
   });
@@ -39,6 +51,7 @@ export function formatStoryboardForLine(params: {
   const lines = [
     `🎬 Storyboard v${params.versionNumber} — ${document.durationSeconds} วิ · ${document.aspectRatio}`,
     ...(document.environment ? [`สถานที่: ${document.environment}`] : []),
+    `เสียง: ${AUDIO_MODE_LABELS[document.audio]}`,
     ...beatBlock(document),
     "",
     "ตัวละคร:",
@@ -50,15 +63,24 @@ export function formatStoryboardForLine(params: {
     // and the router would reject the hint it just printed.
     `“วิ ${document.beats.at(-1)?.startSeconds ?? 0}-${document.durationSeconds} ให้เปลี่ยนเป็น close-up”`,
     "",
-    "เมื่อพร้อม:",
-    "“สร้างวิดีโอ”",
+    // Content confirmation, which costs nothing. The paid code does not exist
+    // yet and is not mentioned: no model has been chosen and nothing is quoted.
+    STORYBOARD_CONFIRMATION_PROMPT,
   ];
   return lines.join("\n");
 }
 
+/**
+ * The model line on a Final Video Draft.
+ *
+ * Shows the provider AND the exact endpoint id, never a friendly name alone:
+ * the owner is about to authorise a charge, and the thing they authorise must
+ * be the thing that receives the request. No display-name-only shorthand, and
+ * no translation between what is shown and what is submitted.
+ */
 function formatModel(model: StoryboardVideoModelSelection): string {
   return model.kind === "provider-bound"
-    ? `${model.displayName} (${model.providerModelId})`
+    ? `${model.displayName}\nEndpoint: ${model.provider} · ${model.providerModelId}`
     : `${model.displayName} (ยังไม่ผูกกับผู้ให้บริการ)`;
 }
 

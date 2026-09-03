@@ -3,13 +3,26 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const generateVideoMock = vi.fn();
 const sendMessageLineMock = vi.fn(async (..._args: unknown[]) => ({}));
+/**
+ * The draft in this fixture is 8s at 1080p on Seedance, quoted at $0.80.
+ *
+ * The rate is declared per endpoint, exactly as production requires: an
+ * unpriced endpoint is not payable, so the gate would refuse before any of
+ * these cases could run.
+ */
+const FAL_MODEL = "bytedance/seedance-2.0/reference-to-video";
+const ACCOUNT_CONFIG = {
+  videoGeneration: {
+    falPricing: { models: { [FAL_MODEL]: { usdPerSecond: 0.1 } } },
+  },
+};
 const resolveLineAccountMock = vi.fn((..._args: unknown[]) => ({
   accountId: "acct-1",
   enabled: true,
   channelAccessToken: "token",
   channelSecret: "secret",
   tokenSource: "config" as const,
-  config: {},
+  config: ACCOUNT_CONFIG,
 }));
 const stageLineOutboundVideoMock = vi.fn(async (..._args: unknown[]) => ({
   url: "https://r2.example/video.mp4",
@@ -67,6 +80,9 @@ vi.mock("./send.js", () => ({
 vi.mock("./video-outbound-staging.js", () => ({
   stageLineOutboundVideo: (...args: unknown[]) => stageLineOutboundVideoMock(...args),
   stageLineVideoPreviewImage: (...args: unknown[]) => stageLineVideoPreviewImageMock(...args),
+  // Exported because the module under test imports it, even though no case
+  // here reaches the delivery-retry path.
+  signArchivedLineVideoUrl: async (key: string) => `https://r2.example/${key}`,
 }));
 
 const { createLineVideoConfirmationGate, parseLineVideoConfirmationCode } =
@@ -119,34 +135,6 @@ function createMemoryStore<T>(): PluginStateKeyedStore<T> {
   };
 }
 
-function catalogFetch(
-  overrides?: Partial<{
-    pricingSkus: Record<string, string>;
-    aspectRatios: string[];
-    resolutions: string[];
-    durations: number[];
-  }>,
-) {
-  return vi.fn(
-    async () =>
-      new Response(
-        JSON.stringify({
-          data: [
-            {
-              id: "bytedance/seedance-2.5",
-              name: "Seedance 2.5",
-              supported_durations: overrides?.durations ?? [4, 6, 8],
-              supported_aspect_ratios: overrides?.aspectRatios ?? ["16:9", "9:16"],
-              supported_resolutions: overrides?.resolutions ?? ["720p", "1080p"],
-              pricing_skus: overrides?.pricingSkus ?? { "per-video-second": "0.10" },
-            },
-          ],
-        }),
-        { status: 200 },
-      ),
-  ) as unknown as typeof fetch;
-}
-
 const OWNER_ID = "U-owner";
 const MEMBER_ID = "U-member";
 const UGC_CAPABILITIES = {
@@ -159,10 +147,19 @@ const UGC_CAPABILITIES = {
 } as const;
 
 async function fixture(params?: {
-  fetchImpl?: typeof fetch;
   now?: () => number;
   workspaceRuntime?: LineVideoWorkspaceRuntime;
+  /** Account config the gate revalidates against, e.g. a changed fal rate. */
+  accountConfig?: Record<string, unknown>;
 }) {
+  resolveLineAccountMock.mockImplementation(() => ({
+    accountId: "acct-1",
+    enabled: true,
+    channelAccessToken: "token",
+    channelSecret: "secret",
+    tokenSource: "config" as const,
+    config: (params?.accountConfig ?? ACCOUNT_CONFIG) as typeof ACCOUNT_CONFIG,
+  }));
   const draftStore = createMemoryStore<LineVideoDraft>();
   const jobStore = createMemoryStore<LineVideoJob>();
   const activeJobLockStore = createMemoryStore<LineVideoActiveJobLock>();
@@ -171,10 +168,9 @@ async function fixture(params?: {
     draftStore,
     jobStore,
     activeJobLockStore,
-    resolveApiKey: async () => "sk-test",
+    resolveFalAuth: async () => true,
     createNotionLibrary: createNotionLibraryMock,
     ...(params?.workspaceRuntime ? { workspaceRuntime: params.workspaceRuntime } : {}),
-    fetchImpl: params?.fetchImpl ?? catalogFetch(),
     scheduleBackgroundWork: (run) => {
       scheduled.push(run);
     },
@@ -185,7 +181,10 @@ async function fixture(params?: {
     accountId: "acct-1",
     conversationKey: "acct-1|grp-a",
     ownerSenderId: OWNER_ID,
-    model: "bytedance/seedance-2.5",
+    model: FAL_MODEL,
+    // fal-bound, exactly as a real draft is: the endpoint is frozen in before
+    // the code exists and the gate reads it back rather than re-deciding.
+    providerRoute: { provider: "fal", modelId: FAL_MODEL },
     prompt: "a cat riding a skateboard",
     durationSeconds: 8,
     aspectRatio: "16:9",
@@ -289,7 +288,7 @@ describe("createLineVideoConfirmationGate", () => {
     expect(generateVideoMock).toHaveBeenCalledTimes(1);
     expect(generateVideoMock.mock.calls[0]?.[0]).toMatchObject({
       prompt: "a cat riding a skateboard",
-      modelOverride: "openrouter/bytedance/seedance-2.5",
+      modelOverride: `fal/${FAL_MODEL}`,
       autoProviderFallback: false,
     });
     expect(stageLineOutboundVideoMock).toHaveBeenCalledWith(expect.any(Buffer));
@@ -298,11 +297,12 @@ describe("createLineVideoConfirmationGate", () => {
         jobId: expect.any(String),
         accountId: "acct-1",
         conversationId: "grp-a",
-        model: "bytedance/seedance-2.5",
+        model: FAL_MODEL,
         prompt: "a cat riding a skateboard",
-        actualCostUsd: 0.79,
       }),
     );
+    // fal reports no billed amount, so no actual cost is invented from it.
+    expect(notionCreateProcessingMock.mock.calls.at(0)?.at(0)).not.toHaveProperty("actualCostUsd");
     expect(generateVideoMock.mock.invocationCallOrder[0]).toBeLessThan(
       notionCreateProcessingMock.mock.invocationCallOrder[0]!,
     );
@@ -314,7 +314,6 @@ describe("createLineVideoConfirmationGate", () => {
       expect.objectContaining({
         r2Url: "https://r2.example/video.mp4",
         r2ObjectKey: "outbound/line-video/x.mp4",
-        actualCostUsd: 0.79,
       }),
     );
     expect(notionMarkCompletedMock.mock.invocationCallOrder[0]).toBeLessThan(
@@ -327,7 +326,7 @@ describe("createLineVideoConfirmationGate", () => {
     );
     const [job] = await jobStore.entries();
     expect(job?.value.status).toBe("completed");
-    expect(job?.value.actualCostUsd).toBe(0.79);
+    expect(job?.value.actualCostUsd).toBeUndefined();
     expect(job?.value.notionPageId).toBe("notion-page-1");
     expect(job?.value.r2ObjectKey).toBe("outbound/line-video/x.mp4");
     // running -> completed released the lock: a new draft is immediately allowed.
@@ -339,7 +338,7 @@ describe("createLineVideoConfirmationGate", () => {
     generateVideoMock.mockResolvedValueOnce({
       videos: [{ url: providerUrl, mimeType: "video/mp4" }],
       provider: "openrouter",
-      model: "bytedance/seedance-2.5",
+      model: FAL_MODEL,
       attempts: [],
       ignoredOverrides: [],
       metadata: { usage: { cost: 0.79 } },
@@ -485,7 +484,7 @@ describe("createLineVideoConfirmationGate", () => {
     // The scene ledger receives the ARCHIVED R2 key, never the provider URL.
     expect(notionMarkUgcCompletedMock).toHaveBeenCalledWith(
       scope,
-      0.79,
+      undefined,
       expect.objectContaining({ r2ObjectKey: expect.any(String) }),
     );
     expect(stageLineOutboundVideoMock).toHaveBeenCalledTimes(1);
@@ -553,8 +552,14 @@ describe("createLineVideoConfirmationGate", () => {
   });
 
   it("5: an over-cost draft is refused at confirmation time even if it passed the draft-time check", async () => {
+    // The operator's fal rate rose after the draft was quoted, past the ceiling.
     const { gate, draft } = await fixture({
-      fetchImpl: catalogFetch({ pricingSkus: { "per-video-second": "10" } }),
+      accountConfig: {
+        videoGeneration: {
+          maxEstimatedCostUsd: 2,
+          falPricing: { models: { [FAL_MODEL]: { usdPerSecond: 10 } } },
+        },
+      },
     });
     const result = await gate(confirmEvent(draft.draftId), CTX);
 
@@ -563,8 +568,12 @@ describe("createLineVideoConfirmationGate", () => {
   });
 
   it("rejects a changed estimate even when the fresh cost remains below the ceiling", async () => {
+    // The rate moved a little: still under the ceiling, but no longer the
+    // number the owner confirmed.
     const { gate, draft, draftStore, scheduled } = await fixture({
-      fetchImpl: catalogFetch({ pricingSkus: { "per-video-second": "0.11" } }),
+      accountConfig: {
+        videoGeneration: { falPricing: { models: { [FAL_MODEL]: { usdPerSecond: 0.11 } } } },
+      },
     });
 
     const result = await gate(confirmEvent(draft.draftId), CTX);
@@ -575,13 +584,19 @@ describe("createLineVideoConfirmationGate", () => {
     expect(generateVideoMock).not.toHaveBeenCalled();
   });
 
-  it("6: settings no longer supported by the live model are revalidated and refused", async () => {
+  it("6: an endpoint retired since the quote is revalidated and refused", async () => {
+    // The operator retired this endpoint after the draft was quoted.
     const { gate, draft } = await fixture({
-      fetchImpl: catalogFetch({ resolutions: ["720p"] }), // draft was created for 1080p
+      accountConfig: {
+        videoGeneration: {
+          falModels: { [FAL_MODEL]: { enabled: false } },
+          falPricing: { models: { [FAL_MODEL]: { usdPerSecond: 0.1 } } },
+        },
+      },
     });
     const result = await gate(confirmEvent(draft.draftId), CTX);
 
-    expect(result?.text).toContain("ไม่รองรับแล้ว");
+    expect(result?.text).toContain("ไม่พร้อมใช้งานแล้ว");
     expect(generateVideoMock).not.toHaveBeenCalled();
   });
 
@@ -649,20 +664,34 @@ describe("createLineVideoConfirmationGate", () => {
     expect(sendMessageLineMock).toHaveBeenCalledTimes(1);
   });
 
-  it("changes the same Notion record from Completed to Failed when LINE delivery fails", async () => {
+  it("keeps a delivery-only failure recoverable instead of calling the generation failed", async () => {
     sendMessageLineMock.mockRejectedValueOnce(new Error("LINE delivery failed"));
     const { gate, draft, scheduled, jobStore } = await fixture();
 
     await gate(confirmEvent(draft.draftId), CTX);
     await scheduled[0]?.();
 
+    // The provider generated and was paid; only the send failed. The Notion
+    // record therefore stays Completed and the job stays recoverable.
     expect(notionMarkCompletedMock).toHaveBeenCalledTimes(1);
-    expect(notionMarkFailedMock).toHaveBeenCalledWith(
-      { pageId: "notion-page-1" },
-      "LINE delivery failed",
-    );
+    expect(notionMarkFailedMock).not.toHaveBeenCalled();
     const [job] = await jobStore.entries();
-    expect(job?.value.status).toBe("failed");
+    expect(job?.value.status).toBe("delivery_failed");
+    expect(job?.value.stage).toBe("line_delivery");
+    // The archived object is what a retry re-signs from, so it must persist.
+    expect(job?.value.r2ObjectKey).toBeTruthy();
+  });
+
+  it("never tells the owner the video failed when only delivery failed", async () => {
+    sendMessageLineMock.mockRejectedValueOnce(new Error("LINE delivery failed"));
+    const { gate, draft, scheduled } = await fixture();
+
+    await gate(confirmEvent(draft.draftId), CTX);
+    await scheduled[0]?.();
+
+    const notices = sendMessageLineMock.mock.calls.map((call) => String(call[1]));
+    expect(notices.some((text) => text.includes("สร้างวิดีโอไม่สำเร็จ"))).toBe(false);
+    expect(notices.some((text) => text.includes("สร้างวิดีโอสำเร็จแล้ว"))).toBe(true);
   });
 
   it("validates Notion before the paid provider call and fails closed when unavailable", async () => {
@@ -713,7 +742,8 @@ describe("createLineVideoConfirmationGate", () => {
       accountId: "acct-1",
       conversationKey: "acct-1|grp-a",
       ownerSenderId: OWNER_ID,
-      model: "bytedance/seedance-2.5",
+      model: FAL_MODEL,
+      providerRoute: { provider: "fal", modelId: FAL_MODEL },
       prompt: "first video",
       durationSeconds: 8,
       aspectRatio: "16:9",
@@ -727,7 +757,8 @@ describe("createLineVideoConfirmationGate", () => {
       accountId: "acct-1",
       conversationKey: "acct-1|grp-a",
       ownerSenderId: OWNER_ID,
-      model: "bytedance/seedance-2.5",
+      model: FAL_MODEL,
+      providerRoute: { provider: "fal", modelId: FAL_MODEL },
       prompt: "second video",
       durationSeconds: 8,
       aspectRatio: "16:9",

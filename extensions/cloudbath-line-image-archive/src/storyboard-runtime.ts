@@ -8,6 +8,11 @@
 
 import type { LineGroupWorkspacePolicyRegistry } from "./group-workspace-policy.js";
 import {
+  STORYBOARD_CONFIRMATION_NAMESPACE,
+  STORYBOARD_CONFIRMATION_TTL_MS,
+  type StoryboardModelSelectionState,
+} from "./storyboard-confirmation.js";
+import {
   CLOUDBATH_STORYBOARD_DIRECTOR_NAMESPACE,
   CLOUDBATH_STORYBOARD_DIRECTOR_TTL_MS,
   type StoryboardDirectorSession,
@@ -116,6 +121,14 @@ export function createCloudbathStoryboardLineRouter(deps: {
       maxEntries: CLOUDBATH_STORYBOARD_MAX_ENTRIES,
       overflowPolicy: "evict-oldest",
       defaultTtlMs: CLOUDBATH_STORYBOARD_DIRECTOR_TTL_MS,
+    }),
+    // The post-freeze model conversation. Transient like the director's: a
+    // stale step must never claim a reply the owner meant for something else.
+    modelSelection: deps.state.openKeyedStore<StoryboardModelSelectionState>({
+      namespace: STORYBOARD_CONFIRMATION_NAMESPACE,
+      maxEntries: CLOUDBATH_STORYBOARD_MAX_ENTRIES,
+      overflowPolicy: "evict-oldest",
+      defaultTtlMs: STORYBOARD_CONFIRMATION_TTL_MS,
     }),
     dedupe: deps.state.openKeyedStore<{ reply: string }>({
       namespace: CLOUDBATH_STORYBOARD_DEDUPE_NAMESPACE,

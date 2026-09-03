@@ -8,6 +8,19 @@
  */
 import { randomInt } from "node:crypto";
 import type { PluginStateKeyedStore } from "openclaw/plugin-sdk/plugin-state-runtime";
+/**
+ * The paid path a draft is locked to.
+ *
+ * fal is the only video-generation provider in this flow, so this carries the
+ * endpoint rather than a provider choice. It is still a tagged shape: a draft
+ * minted by an older build carries a different tag (or none), and the
+ * confirmation gate refuses it instead of submitting it somewhere unintended.
+ */
+export type LineVideoProviderRoute = Readonly<{
+  provider: "fal";
+  /** fal endpoint id, submitted as `fal/<modelId>`. */
+  modelId: string;
+}>;
 
 export const LINE_VIDEO_DRAFT_NAMESPACE = "video-draft-v1";
 export const LINE_VIDEO_DRAFT_MAX_ENTRIES = 5_000;
@@ -33,12 +46,31 @@ export type LineVideoDraft = {
   conversationKey: string;
   ownerSenderId: string;
   model: string;
+  /**
+   * The paid path this draft is LOCKED to, frozen before its code was minted.
+   *
+   * Confirmation reads this back verbatim instead of re-deciding: the owner
+   * confirmed a quote for one provider, and re-running the routing at
+   * submission time could bill a different one after the price was shown.
+   * Absent on drafts created before provider routing existed, which the
+   * confirmation gate treats as the OpenRouter path it was quoted against.
+   */
+  providerRoute?: LineVideoProviderRoute;
   prompt: string;
   sourceImagePath?: string;
   durationSeconds: number;
   aspectRatio: string;
   resolution: string;
   audio: boolean;
+  /**
+   * Reference images this draft was quoted with.
+   *
+   * Frozen because some endpoints charge past a free allowance, so the
+   * confirmation gate's re-quote needs the same count the owner was shown.
+   * Absent on drafts minted before any endpoint charged per image, where zero
+   * and undefined price identically.
+   */
+  referenceImageCount?: number;
   estimatedCostUsd: number;
   createdAt: number;
   expiresAt: number;
@@ -86,12 +118,14 @@ export async function createLineVideoDraft(params: {
   conversationKey: string;
   ownerSenderId: string;
   model: string;
+  providerRoute?: LineVideoProviderRoute;
   prompt: string;
   sourceImagePath?: string;
   durationSeconds: number;
   aspectRatio: string;
   resolution: string;
   audio: boolean;
+  referenceImageCount?: number;
   estimatedCostUsd: number;
   deliveryTo?: string;
   storyboardId?: string;
@@ -109,12 +143,16 @@ export async function createLineVideoDraft(params: {
     conversationKey: params.conversationKey,
     ownerSenderId: params.ownerSenderId,
     model: params.model,
+    ...(params.providerRoute ? { providerRoute: params.providerRoute } : {}),
     prompt: params.prompt,
     ...(params.sourceImagePath ? { sourceImagePath: params.sourceImagePath } : {}),
     durationSeconds: params.durationSeconds,
     aspectRatio: params.aspectRatio,
     resolution: params.resolution,
     audio: params.audio,
+    ...(params.referenceImageCount === undefined
+      ? {}
+      : { referenceImageCount: params.referenceImageCount }),
     estimatedCostUsd: params.estimatedCostUsd,
     createdAt: now,
     expiresAt: now + LINE_VIDEO_DRAFT_TTL_MS,

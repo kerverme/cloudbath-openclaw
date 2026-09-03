@@ -17,17 +17,17 @@ import { getRuntimeConfig } from "openclaw/plugin-sdk/runtime-config-snapshot";
 import { jsonResult } from "openclaw/plugin-sdk/tool-results";
 import { Type, type TSchema } from "typebox";
 import { resolveLineAccount } from "./accounts.js";
+import { offerFalStoryboardDefault } from "./fal-storyboard-seam.js";
+import { falSeedanceDurations } from "./fal-video-registry.js";
 import { LINE_OPENROUTER_PROVIDER_ID, resolveLineProviderApiKey } from "./openrouter-auth.js";
-import { evaluateLineVideoCostGuard, resolveLineVideoOutputSize } from "./video-cost-guard.js";
+import { resolveLineVideoMaxEstimatedCostUsd } from "./video-cost-guard.js";
 import { createLineVideoDraft, type LineVideoDraftStore } from "./video-draft-store.js";
 import {
   resolveLineVideoActiveJobLock,
   type LineVideoActiveJobLockStore,
 } from "./video-job-store.js";
-import { loadOpenRouterVideoModels, type OpenRouterVideoModel } from "./video-model-catalog.js";
 import {
   buildLineVideoConversationKey,
-  resolveLineVideoModelPreference,
   type LineVideoModelPreferenceStore,
 } from "./video-model-preference.js";
 
@@ -51,33 +51,6 @@ const VideoDraftToolProperties = {
   resolution: Type.Optional(Type.String()),
   audio: Type.Optional(Type.Boolean()),
 } satisfies Record<string, TSchema>;
-
-function nearestSupported(values: readonly number[], requested: number): number {
-  if (values.length === 0) {
-    return requested;
-  }
-  return values.reduce((best, current) =>
-    Math.abs(current - requested) < Math.abs(best - requested) ? current : best,
-  );
-}
-
-function resolveDefaultDuration(model: OpenRouterVideoModel): number {
-  const supported = model.supportedDurationSeconds;
-  return supported.length > 0
-    ? nearestSupported(supported, DEFAULT_DURATION_SECONDS)
-    : DEFAULT_DURATION_SECONDS;
-}
-
-function resolveChoice(
-  supported: readonly string[],
-  requested: string | undefined,
-  fallback: string,
-): string {
-  if (requested && (supported.length === 0 || supported.includes(requested))) {
-    return requested;
-  }
-  return supported.length > 0 && supported[0] ? supported[0] : fallback;
-}
 
 function formatDraftPreview(params: {
   draftId: string;
@@ -123,7 +96,6 @@ type LineVideoDraftResolution =
   | "already_running"
   | "image_unavailable"
   | "provider_auth_unavailable"
-  | "catalog_unavailable"
   | "model_unavailable"
   | "unsupported_duration"
   | "unknown_cost"
@@ -141,10 +113,8 @@ type LineVideoDraftResolution =
 const DRAFT_FAILURE_TEXT: Partial<Record<LineVideoDraftResolution, string>> = {
   context_unavailable: "❌ ยังสร้าง Video Draft ไม่ได้\nสาเหตุ: LINE runtime context ไม่ครบ",
   provider_auth_unavailable:
-    "❌ ยังสร้าง Video Draft ไม่ได้\nสาเหตุ: ระบบไม่พบการเชื่อมต่อ OpenRouter สำหรับ Video",
-  catalog_unavailable:
-    "❌ ยังสร้าง Video Draft ไม่ได้\nสาเหตุ: โหลดรายการ Video Model จาก OpenRouter ไม่สำเร็จ",
-  model_unavailable: "❌ ยังสร้าง Video Draft ไม่ได้\nสาเหตุ: ไม่พบ Video Model ที่เลือกไว้ใน OpenRouter",
+    "❌ ยังสร้าง Video Draft ไม่ได้\nสาเหตุ: ระบบไม่พบการเชื่อมต่อ fal.ai สำหรับ Video",
+  model_unavailable: "❌ ยังสร้าง Video Draft ไม่ได้\nสาเหตุ: ไม่พบ Video Model ที่รองรับใน fal.ai",
   // Says explicitly that NO draft exists. The cost guard runs BEFORE
   // createLineVideoDraft, so any "draft created" wording here would be false --
   // which is exactly what the LLM produced in production
@@ -179,6 +149,8 @@ type CreateLineVideoDraftToolParams = {
   activeJobLockStore?: LineVideoActiveJobLockStore;
   /** Overrides canonical OpenRouter credential resolution (tests only). */
   resolveApiKey?: () => Promise<string | undefined>;
+  /** Direct fal credential check; preferred over `resolveApiKey` when supplied. */
+  resolveFalAuth?: () => Promise<boolean>;
   /** ctx.hasAuthForProvider, for diagnostics only -- never gates the flow. */
   hasProviderAuth?: (providerId: string) => boolean;
   /**
@@ -207,9 +179,20 @@ export function createLineVideoDraftTool(params: CreateLineVideoDraftToolParams)
     return null;
   }
   const resolveAccount = params.resolveAccount ?? resolveLineAccount;
-  // Canonical resolver by default; tests inject their own.
-  const resolveApiKey =
-    params.resolveApiKey ?? (() => resolveLineProviderApiKey(VIDEO_PROVIDER_ID));
+  /**
+   * Proves fal credentials exist before a payable code is minted.
+   *
+   * `resolveApiKey` is still accepted so the existing wiring and tests keep
+   * their injection point; whatever it returns is treated only as "credentials
+   * are present". The key itself is never read into this module or logged.
+   */
+  const resolveFalAuth = async (): Promise<boolean> => {
+    if (params.resolveFalAuth) {
+      return await params.resolveFalAuth();
+    }
+    const resolve = params.resolveApiKey ?? (() => resolveLineProviderApiKey(VIDEO_PROVIDER_ID));
+    return Boolean((await resolve())?.trim());
+  };
   const fileExists =
     params.fileExists ??
     (async (path: string) => {
@@ -347,45 +330,45 @@ export function createLineVideoDraftTool(params: CreateLineVideoDraftToolParams)
         );
       }
 
-      // Renamed from the ambiguous "auth_unavailable": this is strictly a
-      // missing OpenRouter provider credential. Owner authorization was already
-      // enforced at factory time and has NOT failed here.
-      const apiKey = await resolveApiKey();
-      if (!apiKey?.trim()) {
+      // Strictly a missing fal provider credential. Owner authorization was
+      // already enforced at factory time and has NOT failed here. Proven
+      // before a payable code exists, so the owner is never handed one that
+      // dies on credentials once they commit to it.
+      if (!(await resolveFalAuth())) {
         return failDeterministic("provider_auth_unavailable", { provider: VIDEO_PROVIDER_ID });
       }
 
-      let models: OpenRouterVideoModel[];
-      try {
-        models = await loadOpenRouterVideoModels({ apiKey, fetchImpl: params.fetchImpl });
-      } catch {
-        return failDeterministic("catalog_unavailable", { provider: VIDEO_PROVIDER_ID });
-      }
-
-      const modelId = await resolveLineVideoModelPreference({
-        store: params.preferenceStore,
-        key: conversationKey,
-      });
-      const model = models.find((entry) => entry.id === modelId);
-      if (!model) {
-        return failDeterministic("model_unavailable", {
-          provider: VIDEO_PROVIDER_ID,
-          model: modelId,
-        });
-      }
-
+      const account = resolveAccount({ cfg: params.cfg ?? getRuntimeConfig(), accountId });
+      const cfg = account.config;
       const requestedDurationSeconds =
         typeof input.durationSeconds === "number" ? input.durationSeconds : undefined;
-      if (
-        requestedDurationSeconds !== undefined &&
-        model.supportedDurationSeconds.length > 0 &&
-        !model.supportedDurationSeconds.includes(requestedDurationSeconds)
-      ) {
-        const supported = model.supportedDurationSeconds.toSorted((left, right) => left - right);
+      const durationSeconds = requestedDurationSeconds ?? DEFAULT_DURATION_SECONDS;
+      const aspectRatio =
+        typeof input.aspectRatio === "string" ? input.aspectRatio : DEFAULT_ASPECT_RATIO;
+      const resolution =
+        typeof input.resolution === "string" ? input.resolution : DEFAULT_RESOLUTION;
+      const audio = typeof input.audio === "boolean" ? input.audio : false;
+
+      // The same capability-aware selection the storyboard flow uses, against
+      // the same fal registry: one place decides which endpoint can execute a
+      // request, so the two owner paths cannot bind different models.
+      const requirements = {
+        durationSeconds,
+        aspectRatio,
+        resolution,
+        audio: audio ? ("full" as const) : ("off" as const),
+        spokenDialogue: false,
+        // This path carries at most the owner's own attached image, which is
+        // not a Character Library identity lock.
+        identityReferenceCount: 0,
+      };
+      const offer = offerFalStoryboardDefault(cfg, requirements);
+      if (offer.kind !== "offered") {
+        const supported = falSeedanceDurations();
         const text = [
           "❌ ยังไม่ได้สร้าง Video Draft",
-          `สาเหตุ: ระยะเวลา ${requestedDurationSeconds} วินาทีไม่รองรับสำหรับโมเดลนี้`,
-          `ระยะเวลาที่รองรับ: ${supported.join(", ")} วินาที (สูงสุด ${supported.at(-1)} วินาที)`,
+          `สาเหตุ: ไม่มีโมเดลที่รองรับคำขอนี้ (ความยาว ${durationSeconds} วินาที)`,
+          `ระยะเวลาที่รองรับ: ${supported.join(", ")} วินาที`,
           "ยังไม่มีการส่งคำขอสร้างวิดีโอและยังไม่มีค่าใช้จ่าย",
         ].join("\n");
         await recordDeterministicText(text);
@@ -393,98 +376,62 @@ export function createLineVideoDraftTool(params: CreateLineVideoDraftToolParams)
           content: [{ type: "text" as const, text }],
           details: {
             resolution: "unsupported_duration",
-            requestedDurationSeconds,
+            requestedDurationSeconds: durationSeconds,
             supportedDurationSeconds: supported,
           },
         });
       }
-      const durationSeconds = requestedDurationSeconds ?? resolveDefaultDuration(model);
-      const aspectRatio = resolveChoice(
-        model.supportedAspectRatios,
-        typeof input.aspectRatio === "string" ? input.aspectRatio : undefined,
-        DEFAULT_ASPECT_RATIO,
-      );
-      const resolution = resolveChoice(
-        model.supportedResolutions,
-        typeof input.resolution === "string" ? input.resolution : undefined,
-        DEFAULT_RESOLUTION,
-      );
-      const audio = typeof input.audio === "boolean" ? input.audio : false;
-
-      // Token-priced models bill by output pixel area, so the concrete size --
-      // not just the "720p" label -- is part of the estimate.
-      const outputSize = resolveLineVideoOutputSize({
-        supportedSizes: model.supportedSizes,
-        resolution,
-        aspectRatio,
-      });
-
-      const account = resolveAccount({ cfg: params.cfg ?? getRuntimeConfig(), accountId });
-      const costGuard = evaluateLineVideoCostGuard({
-        model,
-        selector: {
-          durationSeconds,
-          ...(outputSize ? { size: outputSize } : {}),
-          resolution,
-          audio,
-        },
-        cfg: { videoGeneration: account.config.videoGeneration },
-      });
-      if (!costGuard.allowed) {
-        if (costGuard.reason === "unknown_cost") {
-          // Pricing-shape diagnostics only: SKU KEYS, never values, plus the
-          // request dimensions that select a SKU. Lets an unrecognized future
-          // pricing shape be identified from logs without a repro.
-          logInfo(
-            `[line/video-draft] event=video_cost_unknown model=${model.id} ` +
-              `pricingSkusPresent=${model.pricingSkus !== undefined} ` +
-              `pricingSkuKeys=${
-                Object.keys(model.pricingSkus ?? {})
-                  .toSorted()
-                  .join("|") || "-"
-              } ` +
-              `durationSeconds=${durationSeconds} resolution=${resolution} ` +
-              `size=${outputSize ?? "-"} audio=${audio}`,
-          );
-        }
-        if (costGuard.reason === "unknown_cost") {
-          return failDeterministic("unknown_cost", { model: model.id });
-        }
+      const model = offer.model;
+      // The size this endpoint will really produce. Shown, frozen and billed
+      // as one value: displaying the requested size would quote one thing and
+      // deliver another whenever the endpoint cannot produce it.
+      const outputResolution = offer.outputResolution;
+      if (offer.estimatedCostUsd === undefined) {
+        logInfo(
+          `[line/video-draft] event=video_cost_unknown model=${model.modelId} ` +
+            `durationSeconds=${durationSeconds} resolution=${resolution} audio=${audio}`,
+        );
+        return failDeterministic("unknown_cost", { model: model.modelId });
+      }
+      const maxAllowedUsd = resolveLineVideoMaxEstimatedCostUsd(cfg);
+      if (offer.estimatedCostUsd > maxAllowedUsd) {
         return finish(
-          costGuard.reason,
+          "over_limit",
           jsonResult({
-            resolution: costGuard.reason,
-            estimatedCostUsd: costGuard.estimatedCostUsd,
-            maxAllowedUsd: costGuard.maxAllowedUsd,
+            resolution: "over_limit",
+            estimatedCostUsd: offer.estimatedCostUsd,
+            maxAllowedUsd,
           }),
         );
       }
+      const estimatedCostUsd = offer.estimatedCostUsd;
 
       const draft = await createLineVideoDraft({
         store: params.draftStore,
         accountId,
         conversationKey,
         ownerSenderId: requesterSenderId,
-        model: model.id,
+        model: model.modelId,
+        providerRoute: Object.freeze({ provider: "fal", modelId: model.modelId }),
         prompt,
         ...(imagePath ? { sourceImagePath: imagePath } : {}),
         durationSeconds,
         aspectRatio,
-        resolution,
+        resolution: outputResolution,
         audio,
-        estimatedCostUsd: costGuard.estimatedCostUsd,
+        estimatedCostUsd,
         deliveryTo,
         ...(params.now ? { now: params.now } : {}),
       });
 
       const preview = formatDraftPreview({
         draftId: draft.draftId,
-        modelName: model.name,
+        modelName: model.displayName,
         durationSeconds,
-        resolution,
+        resolution: outputResolution,
         aspectRatio,
         audio,
-        estimatedCostUsd: costGuard.estimatedCostUsd,
+        estimatedCostUsd,
         prompt,
       });
       await recordDeterministicText(preview);
@@ -493,8 +440,8 @@ export function createLineVideoDraftTool(params: CreateLineVideoDraftToolParams)
         details: {
           resolution: "draft_created",
           draftId: draft.draftId,
-          model: model.id,
-          estimatedCostUsd: costGuard.estimatedCostUsd,
+          model: model.modelId,
+          estimatedCostUsd,
         },
       });
     },

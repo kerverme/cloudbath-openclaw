@@ -228,6 +228,163 @@ link-local, and private-network targets.
 
 Generic media sends without LINE-specific options use the image route.
 
+## Paid video generation
+
+Video for this flow is generated on **fal.ai only**. OpenRouter is no longer
+used to generate video here (it remains available for chat and other uses).
+
+The owner conversation runs in this order, and money enters at the very end:
+
+1. Describe the scene naturally.
+2. The bot asks the length (15 or 30 seconds) **before** building anything.
+3. It renders a storyboard — time windows, action, camera, characters,
+   environment, and beat-level sound design when audio was asked for.
+4. `ยืนยัน Storyboard` freezes the scene. This costs nothing and mints no code;
+   revisions before it are free and unlimited.
+5. Only then does model selection begin: the bot offers a **capability-aware
+   default**, or `เปลี่ยนโมเดล` opens a family picker and then a version picker.
+6. The Final Video Draft shows the actual fal endpoint that will be billed, and
+   its price, with the exact `ยืนยัน VIDEO ####` code.
+7. That exact phrase is the only paid trigger, and it is consumed once.
+
+### Model registry
+
+Every selectable endpoint, and its capabilities, lives in one place
+(`extensions/line/src/fal-video-registry.ts`). Nothing is fetched or scraped at
+runtime.
+
+Each capability records **where it came from**, and that order is a precedence
+order — strongest first:
+
+| Provenance          | Source                                                | Notes                                                                                               |
+| ------------------- | ----------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| `fal_api_page`      | fal's current official API reference for the endpoint | The deployed contract; wins over everything below.                                                  |
+| `fal_model_page`    | fal's current official model page                     | Product-level limits the API reference does not spell out.                                          |
+| `fal_client_schema` | generated types in `@fal-ai/client`                   | **Lags fal's live catalog**, so never sufficient on its own and never overrides a current API page. |
+| `operator_declared` | your config (`falModels`)                             | For facts none of the above establish.                                                              |
+
+**An unproven capability is never treated as permission** — a model that cannot
+be shown to execute the confirmed storyboard is never offered, defaulted to, or
+given a payable code.
+
+Endpoints, all reference-to-video (this flow always casts Character Library
+identities, so a text-to-video or first-frame endpoint cannot execute its
+storyboard):
+
+| Endpoint                                                       | Duration | Resolutions      | Audio            | Reference field        | Prompt marker |
+| -------------------------------------------------------------- | -------- | ---------------- | ---------------- | ---------------------- | ------------- |
+| `minimax/h3/reference-to-video`                                | 5–15s    | 768P, **2K**, 4K | always on        | `reference_image_urls` | `Image 1`     |
+| `minimax/h3-max/reference-to-video`                            | 5–15s    | 480P, 768P       | always on        | `reference_image_urls` | `Image 1`     |
+| `bytedance/seedance-2.5/reference-to-video`                    | 4–30s    | 480p, 720p       | `generate_audio` | `image_urls`           | `[Image1]`    |
+| `bytedance/seedance-2.0/reference-to-video` (+ `fast`, `mini`) | 4–15s    | up to 4k         | `generate_audio` | `image_urls`           | `@Image1`     |
+| `fal-ai/veo3.1/reference-to-video`                             | 8s       | 720p–4k          | `generate_audio` | `image_urls`           | none          |
+
+Consequences worth knowing:
+
+- **H3 and H3 Max are distinct models**, never aliases of each other: different
+  endpoints and different output sizes. Naming one when you meant the other
+  would bill something you did not choose, so an ambiguous name asks rather
+  than picking.
+- **Seedance 2.5 is not Seedance 2.0.** Same vendor, different endpoint,
+  different marker dialect, and different duration ceiling. A prompt written in
+  the wrong dialect does not error — the references are simply ignored and you
+  pay for a video without your character in it.
+- **A 30-second scene resolves to Seedance 2.5.** H3 tops out at 15 seconds, so
+  it is displaced with an explanation rather than the flow dead-ending on "no
+  compatible endpoint".
+- **Audio is a capability, not a preference.** The H3 endpoints produce native
+  synchronized audio on every generation and publish no proven off switch, so
+  they can serve a scene that wants sound and are filtered out of one that must
+  be silent.
+- **A default is not a ceiling.** H3's `ResolutionEnum` is 768P | 2K | 4K with
+  a documented default of 2K, so a scene asking for a size H3 does not offer
+  resolves to **2K** — the endpoint's own default, never the largest (and
+  dearest) listed size. 480P and 1080P are in neither H3 list, and the request
+  serializer omits an unlisted value rather than submitting an enum the
+  endpoint never published. H3 Max's 480P/768P are **its** sizes and are never
+  copied onto H3.
+
+### Configuration
+
+Rates are per endpoint. There is no blended fallback rate, and an endpoint with
+no usable rate is simply not payable.
+
+Seedance 2.5 needs no operator rate: fal publishes a token price of
+**$0.0214 / 1000 tokens** at both 480p and 720p, and tokens are estimated from
+the output pixel area, the duration and 24 FPS. That estimate covers the proven
+image-reference case; a shape it cannot prove (reference video or audio inputs)
+falls back to your endpoint rate, and without one the endpoint is not offered.
+
+**MiniMax H3 needs no operator rate either.** Its own model page publishes a
+per-second rate by output size, plus a reference-image allowance:
+
+| H3 output | Rate                     |
+| --------- | ------------------------ |
+| 768P      | $0.08 / generated second |
+| 2K        | $0.13 / generated second |
+| 4K        | $0.16 / generated second |
+
+The first 5 reference images are free; each one after adds $0.08. A 15-second
+2K clip with one Character reference quotes **$1.95**, and the same clip with
+six references quotes **$2.03**. Reference **video** and **audio** inputs are
+deliberately not priced: the page publishes rates for output seconds and
+reference images and says nothing about the other two, so that shape falls back
+to your operator rate and is refused without one.
+
+An endpoint whose price is neither published nor declared — H3 Max, for
+instance — is simply not offered, and the bot says why rather than switching
+models quietly:
+`งานนี้ MiniMax H3 Max Reference-to-Video ทำได้ แต่ยังไม่มีราคาที่ยืนยันได้`.
+
+`falModels` supplies only what fal's own pages leave open — H3's duration range,
+resolution enum and audio behaviour all come from fal and need no declaration.
+
+```jsonc
+{
+  "line": {
+    "videoGeneration": {
+      "maxEstimatedCostUsd": 5,
+      "falPricing": {
+        "models": {
+          // Only needed to OVERRIDE fal's published H3 rate, e.g. a
+          // negotiated price. Omit it and the published rate applies.
+          "minimax/h3/reference-to-video": {
+            "byResolution": { "768P": 0.08, "2K": 0.13, "4K": 0.16 },
+            "source": "https://fal.ai/models/minimax/h3/reference-to-video",
+          },
+          "bytedance/seedance-2.0/reference-to-video": {
+            "usdPerSecond": 0.05,
+            "byResolution": { "1080p": 0.09 },
+            "source": "https://fal.ai/pricing",
+          },
+        },
+      },
+    },
+  },
+}
+```
+
+An operator rate always wins over the published token price, so you can pin a
+negotiated rate without editing code.
+
+Credentials come from the standard `fal` provider (`FAL_KEY`) and are verified
+**before** a payable code is minted, so a code is never handed out that cannot
+be spent.
+
+### Delivery and recovery
+
+Generated video is always archived in your R2 bucket and delivered from a signed
+R2 URL; a transient provider artifact URL is never sent to LINE. Reference images
+are published to fal as short-lived signed R2 URLs, so the bucket stays private.
+
+The job records each stage separately — `provider_submission`,
+`provider_generation_completed`, `artifact_retrieval`, `r2_archive`,
+`line_delivery` — and only the first spends money. Once generation has
+completed, **no failure afterwards re-generates**: the owner can type
+`ส่งวิดีโออีกครั้ง` and delivery resumes from the furthest stage that
+succeeded, re-signing the archived object or re-fetching fal's own existing
+result. That command is scoped to the same account, group and owner.
+
 ## Troubleshooting
 
 - **Webhook verification fails:** ensure the webhook URL is HTTPS and the

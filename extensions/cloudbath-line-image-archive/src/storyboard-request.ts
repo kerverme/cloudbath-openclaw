@@ -36,6 +36,7 @@ const ASPECT_WORDS: ReadonlyArray<readonly [RegExp, StoryboardAspectRatio]> = [
 
 const RESOLUTION_WORDS: ReadonlyArray<readonly [RegExp, StoryboardResolution]> = [
   [/\b4k\b/iu, "4K"],
+  [/\b2k\b/iu, "2K"],
   [/\b1080p?\b/iu, "1080p"],
   [/\b720p?\b/iu, "720p"],
   [/\b480p?\b/iu, "480p"],

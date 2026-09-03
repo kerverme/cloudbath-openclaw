@@ -26,6 +26,26 @@ interface LineThreadBindingsConfig {
 interface LineVideoGenerationConfig {
   maxEstimatedCostUsd?: number;
   defaultModel?: string;
+  /** Operator-declared fal rates, per endpoint. A model with none is not payable. */
+  falPricing?: {
+    models?: Record<
+      string,
+      {
+        usdPerSecond?: number;
+        byResolution?: Record<string, number>;
+        source?: string;
+      }
+    >;
+  };
+  /** Operator declarations for capabilities fal's published schema omits. */
+  falModels?: Record<
+    string,
+    {
+      durationSeconds?: number[];
+      audio?: "controllable" | "always_on";
+      enabled?: boolean;
+    }
+  >;
 }
 
 interface LineAccountBaseConfig {

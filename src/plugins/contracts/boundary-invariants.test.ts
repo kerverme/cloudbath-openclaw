@@ -44,11 +44,19 @@ const BUNDLED_TYPED_HOOK_REGISTRATION_GUARDS = {
   // before_tool_call / agent_end trio: createLineModelSwitchGuard and
   // createLineVideoGenerationGuard. Both need the run-scoped pair because a
   // tool-call context alone cannot tell them the run is LINE-originated.
+  //
+  // Five before_dispatch registrations: the reply-relay turn marker, the paid
+  // VIDEO confirmation gate, the "ส่งวิดีโออีกครั้ง" retry router (resumes an
+  // already-paid job; never generates), the video model control router, and
+  // the chat model-switch intent router. All exact owner-only commands or
+  // deterministic pre-agent routing, claimed here (first-claim-wins) before
+  // the broader chat router ever sees the message.
   "extensions/line/index.ts": [
     "agent_end",
     "agent_end",
     "before_agent_run",
     "before_agent_run",
+    "before_dispatch",
     "before_dispatch",
     "before_dispatch",
     "before_dispatch",

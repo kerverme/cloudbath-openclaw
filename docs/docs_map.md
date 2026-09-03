@@ -521,6 +521,10 @@ Do not edit it by hand; run `pnpm docs:map:gen`.
   - H2: Channel data (rich messages)
   - H2: ACP support
   - H2: Outbound media
+  - H2: Paid video generation
+  - H3: Model registry
+  - H3: Configuration
+  - H3: Delivery and recovery
   - H2: Troubleshooting
   - H2: Related
 
@@ -2153,6 +2157,51 @@ Do not edit it by hand; run `pnpm docs:map:gen`.
   - H3: Dispatch says data-only
   - H3: Dispatch starts nothing
   - H2: Related
+
+## cloudbath/ARCHITECTURE-PLAN.md
+
+- Route: /cloudbath/ARCHITECTURE-PLAN
+- Headings:
+  - H1: Cloudbath Architecture Plan
+  - H2: Verified repository facts
+  - H2: Future Cloudbath flow
+  - H2: Notion integration recommendation
+  - H2: Extension boundaries
+  - H2: Compatibility guardrails
+
+## cloudbath/DEPLOYMENT-PLAN.md
+
+- Route: /cloudbath/DEPLOYMENT-PLAN
+- Headings:
+  - H1: Cloudbath Deployment Plan
+  - H2: Responsibilities
+  - H2: Minimum DigitalOcean requirements
+  - H2: Network plan
+  - H2: Deployment sequence for a later task
+  - H2: Non-goals for this task
+
+## cloudbath/README.md
+
+- Route: /cloudbath/README
+- Headings:
+  - H1: Cloudbath Planning
+  - H2: Scope
+  - H2: Principles
+  - H2: Documents
+  - H2: Placeholder environment file
+
+## cloudbath/SECURITY-BASELINE.md
+
+- Route: /cloudbath/SECURITY-BASELINE
+- Headings:
+  - H1: Cloudbath Security Baseline
+  - H2: Trust model
+  - H2: Secrets
+  - H2: LINE access
+  - H2: Notion access
+  - H2: Agent capability limits
+  - H2: Control interface exposure
+  - H2: Audit checklist before implementation
 
 ## concepts/active-memory.md
 

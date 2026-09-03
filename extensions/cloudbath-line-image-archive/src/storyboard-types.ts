@@ -19,8 +19,16 @@ import type { UgcCharacterLock } from "./types.js";
 export const STORYBOARD_ASPECT_RATIOS = ["16:9", "9:16", "1:1", "4:3", "2.39:1"] as const;
 export type StoryboardAspectRatio = (typeof STORYBOARD_ASPECT_RATIOS)[number];
 
-/** Target output resolutions a request may name. */
-export const STORYBOARD_RESOLUTIONS = ["480p", "720p", "1080p", "4K"] as const;
+/**
+ * Target output resolutions a REQUEST may name.
+ *
+ * "2K" and "4K" are here because provider endpoints offer them: MiniMax H3's
+ * reference-to-video enumerates 768P/2K/4K, so without them the storyboard
+ * vocabulary could not describe a scene that endpoint can execute. What the
+ * endpoint actually produces is a separate, provider-owned value — see the
+ * Final Video Draft's own `resolution`.
+ */
+export const STORYBOARD_RESOLUTIONS = ["480p", "720p", "1080p", "2K", "4K"] as const;
 export type StoryboardResolution = (typeof STORYBOARD_RESOLUTIONS)[number];
 
 /**
@@ -29,6 +37,15 @@ export type StoryboardResolution = (typeof STORYBOARD_RESOLUTIONS)[number];
  * A closed union rather than free text so timing and framing stay derivable:
  * an unrecognised action becomes `"action"`, never a new implicit kind.
  */
+/**
+ * Scene-level audio decision.
+ *
+ * `ambient` is the shape the previous boolean could not express: sound on,
+ * speech off. Collapsing it back to a boolean is what made "ไม่มีเสียงพูด
+ * แต่มีเสียง" render as a silent scene.
+ */
+export type StoryboardAudioMode = "off" | "ambient" | "full";
+
 export type StoryboardBeatKind =
   | "establishing"
   | "locomotion"
@@ -63,8 +80,10 @@ export type StoryboardBeat = Readonly<{
   action: string;
   /** Camera instruction, e.g. "Track with the subject". */
   camera: string;
-  /** Dialogue or audio intent, when the beat carries any. */
+  /** SPEECH only: the spoken line, verbatim. Absent unless the beat is spoken. */
   dialogue?: string;
+  /** SOUND only: ambience and effects for this window. Absent when audio is off. */
+  soundDesign?: string;
   /** Beat-local environment note, when it differs from the scene environment. */
   environmentNote?: string;
   /** Canonical character ids this beat frames, in cast order. */
@@ -81,6 +100,8 @@ export type StoryboardDocument = Readonly<{
   resolution: StoryboardResolution;
   /** Scene location, e.g. "ร้านกาแฟ". Empty when the request named none. */
   environment: string;
+  /** Scene audio decision. Drives both the LINE rendering and the provider prompt. */
+  audio: StoryboardAudioMode;
   cast: readonly StoryboardCastMember[];
   beats: readonly StoryboardBeat[];
 }>;
@@ -148,7 +169,14 @@ export type ActiveStoryboardContext = Readonly<{
  * the paid pipeline to a string no catalog can resolve.
  */
 export type StoryboardVideoModelSelection =
-  | Readonly<{ kind: "provider-bound"; providerModelId: string; displayName: string }>
+  | Readonly<{
+      kind: "provider-bound";
+      /** Provider that will receive the paid request, e.g. "fal.ai". */
+      provider: string;
+      /** The ACTUAL endpoint id billed, e.g. "minimax/h3/reference-to-video". */
+      providerModelId: string;
+      displayName: string;
+    }>
   | Readonly<{ kind: "deferred"; displayName: string }>;
 
 /**
@@ -175,6 +203,7 @@ export type StoryboardVideoPlan = Readonly<{
   aspectRatio: StoryboardAspectRatio;
   resolution: StoryboardResolution;
   environment: string;
+  audio: StoryboardAudioMode;
   characters: readonly StoryboardPlanCharacter[];
   beats: readonly StoryboardPlanBeat[];
 }>;
@@ -197,6 +226,7 @@ export type StoryboardPlanBeat = Readonly<{
   action: string;
   camera: string;
   dialogue?: string;
+  soundDesign?: string;
   characterIds: readonly string[];
 }>;
 
@@ -234,7 +264,17 @@ export type StoryboardFinalVideoDraft = Readonly<{
   characterLocks: readonly UgcCharacterLock[];
   durationSeconds: number;
   aspectRatio: StoryboardAspectRatio;
-  resolution: StoryboardResolution;
+  /**
+   * The size the chosen endpoint will REALLY produce, in that endpoint's own
+   * spelling ("2K", "768P", "720p").
+   *
+   * Deliberately not `StoryboardResolution`: this is a provider answer, not
+   * the owner's request, and the two differ whenever the endpoint cannot
+   * produce what was asked for. It is what the draft displays and what the
+   * quote was computed from, so it must not be re-narrowed to the request
+   * vocabulary.
+   */
+  resolution: string;
   model: StoryboardVideoModelSelection;
   estimatedCost: StoryboardCostEstimate;
   plan: StoryboardVideoPlan;

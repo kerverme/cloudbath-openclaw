@@ -1,56 +1,61 @@
 /**
- * LINE-owned paid-draft preparation for a Cloudbath storyboard.
+ * LINE-owned paid-draft preparation for a Cloudbath storyboard, on fal.
  *
  * This is the ONLY way a storyboard reaches the paid pipeline, and every step
  * of it is LINE-owned code running against LINE-owned state:
  *
- *   live OpenRouter catalog -> capability validation -> live quote ->
- *   cost guard -> `createLineVideoDraft` (the one 4-digit code space)
+ *   frozen storyboard -> derived requirements -> fal registry compatibility ->
+ *   per-model quote -> fal auth check -> `createLineVideoDraft`
+ *   (the one 4-digit code space)
+ *
+ * fal is the only video-generation provider in this flow. OpenRouter's video
+ * catalog is deliberately not consulted: it describes a different provider's
+ * models and prices, and using it to choose or quote a fal endpoint would show
+ * the owner one thing and bill another. (OpenRouter remains in the repository
+ * for chat and non-video use; nothing here removes it.)
  *
  * The storyboard plugin cannot open this plugin's keyed store — plugin state is
  * partitioned by plugin id (`createPluginStateKeyedStore(pluginId, …)`), so a
  * second allocator there would be a second, colliding code space whose codes
  * `video-confirmation.ts` would resolve against ITS drafts and bill the wrong
  * job. Hence the handoff: the storyboard hands over a provider-neutral request
- * and this module allocates.
+ * and this module selects, quotes and allocates.
  *
  * Nothing here submits. Submission stays behind the exact
  * `ยืนยัน VIDEO ####` gate in video-confirmation.ts.
  */
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import {
-  evaluateLineVideoCostGuard,
-  resolveLineVideoMaxEstimatedCostUsd,
-  resolveLineVideoOutputSize,
-} from "./video-cost-guard.js";
+  evaluateFalModel,
+  listCompatibleFalModels,
+  resolveFalOutputResolution,
+  selectDefaultFalModel,
+  type FalIncompatibility,
+  type FalVideoRequirements,
+} from "./fal-model-selection.js";
+import { compileFalProviderPrompt, type FalBoundReference } from "./fal-prompt-bindings.js";
+import { estimateFalVideoCostUsd, type FalVideoPricingConfig } from "./fal-video-pricing.js";
+import {
+  resolveFalVideoModel,
+  type FalVideoModel,
+  type FalVideoModelConfig,
+} from "./fal-video-registry.js";
+import { resolveLineVideoMaxEstimatedCostUsd } from "./video-cost-guard.js";
 import {
   createLineVideoDraft,
   supersedeLineVideoDraftsForStoryboard,
   type LineVideoDraftStore,
 } from "./video-draft-store.js";
-import { loadOpenRouterVideoModels, type OpenRouterVideoModel } from "./video-model-catalog.js";
-import {
-  buildLineVideoConversationKey,
-  DEFAULT_LINE_VIDEO_MODEL,
-  resolveLineVideoModelPreference,
-  type LineVideoModelPreferenceStore,
-} from "./video-model-preference.js";
-
-/**
- * The model a storyboard draft binds to.
- *
- * Reuses this plugin's existing default rather than restating the slug, so the
- * storyboard path and the conversation preference can never bind different
- * models. The slug is the only fixed fact: duration, resolution, aspect,
- * frame-image support, audio and price all come from the live catalog below,
- * so a provider capability or price change is observed rather than assumed.
- */
-export const LINE_STORYBOARD_VIDEO_MODEL_ID = DEFAULT_LINE_VIDEO_MODEL;
+import { buildLineVideoConversationKey } from "./video-model-preference.js";
 
 export type LineStoryboardReferenceAsset = Readonly<{
   kind: "identity" | "product" | "style";
   source: "r2" | "https";
   locator: string;
+  /** Canonical Character Library code, for the model's reference markers. */
+  characterCode?: string;
+  /** Name as cast in the scene, e.g. "F1". */
+  displayName?: string;
 }>;
 
 export type LineStoryboardCharacterLock = Readonly<{
@@ -71,43 +76,44 @@ export type LineStoryboardVideoDraftRequest = Readonly<{
   conversationId: string;
   ownerSenderId: string;
   deliveryTo?: string;
-  /** Compiled provider-neutral instruction from the storyboard version. */
+  /** Compiled instruction from the FROZEN storyboard version, used verbatim. */
   prompt: string;
   durationSeconds: number;
   aspectRatio: string;
   resolution: string;
-  /** Requested only when the live catalog reports audio support. */
-  audio: boolean;
+  /** Scene audio decision, carried across the seam as the storyboard's own mode. */
+  audio: FalVideoRequirements["audio"];
+  /** True when a beat carries a spoken line. */
+  spokenDialogue: boolean;
   storyboardId: string;
   storyboardVersionNumber: number;
   characterLocks: readonly LineStoryboardCharacterLock[];
   referenceAssets: readonly LineStoryboardReferenceAsset[];
+  /**
+   * Endpoint the owner picked. Absent means "use the capability-aware default".
+   *
+   * A named model is still checked against the frozen storyboard; choosing is
+   * never a way to bypass compatibility.
+   */
+  requestedModelId?: string;
 }>;
 
 /** Why a storyboard draft was refused. Every reason is fail-closed: no draft, no code. */
 export type LineStoryboardVideoDraftRejection =
   | { kind: "rejected"; reason: "provider_auth_unavailable" }
-  | { kind: "rejected"; reason: "catalog_unavailable" }
   | { kind: "rejected"; reason: "invalid_conversation" }
-  | { kind: "rejected"; reason: "model_unavailable"; model: string }
   | {
       kind: "rejected";
-      reason: "unsupported_duration";
-      requested: number;
-      supported: readonly number[];
+      reason: "model_unavailable";
+      model: string;
     }
   | {
       kind: "rejected";
-      reason: "unsupported_resolution";
-      requested: string;
-      supported: readonly string[];
+      reason: "model_incompatible";
+      model: string;
+      incompatibilities: readonly FalIncompatibility[];
     }
-  | {
-      kind: "rejected";
-      reason: "unsupported_aspect_ratio";
-      requested: string;
-      supported: readonly string[];
-    }
+  | { kind: "rejected"; reason: "no_compatible_model" }
   | { kind: "rejected"; reason: "unknown_cost"; model: string }
   | {
       kind: "rejected";
@@ -120,8 +126,10 @@ export type LineStoryboardVideoDraftResult =
   | Readonly<{
       kind: "created";
       draftId: string;
+      /** fal endpoint that will receive the paid request. Shown to the owner. */
       modelId: string;
       modelName: string;
+      familyId: string;
       durationSeconds: number;
       resolution: string;
       aspectRatio: string;
@@ -129,53 +137,131 @@ export type LineStoryboardVideoDraftResult =
       estimatedCostUsd: number;
       /** Snapshotted so confirmation can tell a re-quote from the accepted one. */
       maxAllowedUsd: number;
-      /**
-       * Provenance for the quote, e.g. "openrouter:bytedance/seedance-2.5".
-       *
-       * Produced here because the provider is this plugin's concern: the
-       * storyboard side must be able to show where a price came from without
-       * naming a provider in its own source.
-       */
+      /** Provenance for the quote, e.g. "fal:minimax/h3/reference-to-video". */
       pricingSource: string;
-      outputSize?: string;
       /** Codes this allocation retired, so the caller can say which are dead. */
       supersededDraftIds?: readonly string[];
+      /**
+       * The preferred default this model replaced, when it was displaced.
+       *
+       * Lets the reply say WHY the default differs instead of the owner
+       * quietly receiving a different model than the product usually picks.
+       */
+      displacedPreferred?: Readonly<{ modelName: string; reasons: readonly FalIncompatibility[] }>;
     }>
   | Readonly<LineStoryboardVideoDraftRejection>;
 
 export type PrepareLineStoryboardVideoDraftDeps = Readonly<{
   draftStore: LineVideoDraftStore;
-  resolveApiKey: () => Promise<string | undefined>;
-  /** Account-scoped config; `videoGeneration.maxEstimatedCostUsd` is the budget. */
-  cfg: Pick<OpenClawConfig, never> & { videoGeneration?: { maxEstimatedCostUsd?: number } };
-  fetchImpl?: typeof fetch;
+  /**
+   * Proves fal credentials exist BEFORE a payable code is minted.
+   *
+   * A code the owner cannot actually spend is worse than a refusal: it looks
+   * confirmable, and the failure only surfaces after they have committed.
+   */
+  resolveFalAuth: () => Promise<boolean>;
+  cfg: Pick<OpenClawConfig, never> & {
+    videoGeneration?: { maxEstimatedCostUsd?: number };
+  } & FalVideoPricingConfig &
+    FalVideoModelConfig;
   now?: () => number;
   randomDraftCode?: () => number;
-  /** Test seam only: substitutes the live catalog fetch. */
-  loadModels?: (params: { apiKey: string }) => Promise<OpenRouterVideoModel[]>;
-  /**
-   * The conversation's video-model preference, read at quote time.
-   *
-   * Absent, the draft binds the default model, which is the pre-preference
-   * behaviour; the plugin always supplies it in production.
-   */
-  preferenceStore?: LineVideoModelPreferenceStore;
 }>;
 
 /**
- * A catalog list that constrains the request, or undefined when the model
- * declares none.
+ * Requirements the frozen storyboard imposes on any model.
  *
- * An empty list means "the catalog does not say", which must not be read as
- * "nothing is supported" — that would refuse every request for a model whose
- * catalog row omits the field.
+ * Exported because the pickers judge candidates against exactly this, so the
+ * list the owner is shown and the draft that gets allocated agree by
+ * construction rather than by two similar-looking derivations.
  */
-function violatesCatalogChoice(supported: readonly string[], requested: string): boolean {
-  return supported.length > 0 && !supported.includes(requested);
+export function deriveFalRequirements(
+  request: LineStoryboardVideoDraftRequest,
+): FalVideoRequirements {
+  return Object.freeze({
+    durationSeconds: request.durationSeconds,
+    aspectRatio: request.aspectRatio,
+    resolution: request.resolution,
+    audio: request.audio,
+    spokenDialogue: request.spokenDialogue,
+    identityReferenceCount: request.referenceAssets.filter((asset) => asset.kind === "identity")
+      .length,
+  });
 }
 
 /**
- * Prepares a pending paid draft for one storyboard version.
+ * References in submission order, carrying the names their markers will use.
+ *
+ * Built from the frozen character locks so marker N, image URL N and character
+ * N are one ordering with one source, not three that happen to agree.
+ */
+export function orderFalReferenceBindings(
+  request: LineStoryboardVideoDraftRequest,
+): FalBoundReference[] {
+  return request.referenceAssets
+    .filter((asset) => asset.kind === "identity")
+    .map((asset, index) =>
+      Object.freeze({
+        index,
+        ...(asset.characterCode ? { characterCode: asset.characterCode } : {}),
+        ...(asset.displayName ? { displayName: asset.displayName } : {}),
+      }),
+    );
+}
+
+/** The chosen model, or the rejection that stops the draft from existing. */
+type ModelChoice =
+  | Readonly<{
+      model: FalVideoModel;
+      displaced?: Readonly<{ modelName: string; reasons: readonly FalIncompatibility[] }>;
+    }>
+  | Readonly<LineStoryboardVideoDraftRejection>;
+
+function chooseModel(
+  request: LineStoryboardVideoDraftRequest,
+  requirements: FalVideoRequirements,
+  cfg: PrepareLineStoryboardVideoDraftDeps["cfg"],
+): ModelChoice {
+  if (request.requestedModelId) {
+    const model = resolveFalVideoModel(cfg, request.requestedModelId);
+    if (!model) {
+      return { kind: "rejected", reason: "model_unavailable", model: request.requestedModelId };
+    }
+    // An explicitly named model is judged exactly like a defaulted one. The
+    // owner choosing it is not evidence that it can run their storyboard.
+    const evaluation = evaluateFalModel(model, requirements);
+    return evaluation.compatible
+      ? { model }
+      : {
+          kind: "rejected",
+          reason: "model_incompatible",
+          model: model.modelId,
+          incompatibilities: evaluation.reasons,
+        };
+  }
+  const selection = selectDefaultFalModel(cfg, requirements);
+  if (selection.kind === "none_compatible") {
+    return { kind: "rejected", reason: "no_compatible_model" };
+  }
+  return {
+    model: selection.model,
+    ...(selection.preferredUnavailable
+      ? {
+          displaced: {
+            modelName: selection.preferredUnavailable.model.displayName,
+            reasons: selection.preferredUnavailable.reasons,
+          },
+        }
+      : {}),
+  };
+}
+
+function isRejection(choice: ModelChoice): choice is Readonly<LineStoryboardVideoDraftRejection> {
+  return "kind" in choice && choice.kind === "rejected";
+}
+
+/**
+ * Prepares a pending paid draft for one frozen storyboard version.
  *
  * Returns a rejection rather than throwing, so the storyboard flow can tell the
  * owner exactly why nothing was drafted; every rejection path allocates no code
@@ -185,21 +271,10 @@ export async function prepareLineStoryboardVideoDraft(
   request: LineStoryboardVideoDraftRequest,
   deps: PrepareLineStoryboardVideoDraftDeps,
 ): Promise<LineStoryboardVideoDraftResult> {
-  const apiKey = (await deps.resolveApiKey())?.trim();
-  if (!apiKey) {
+  // Auth first: everything below builds toward a payable code, and a code the
+  // owner cannot spend must never exist. No provider call is made either way.
+  if (!(await deps.resolveFalAuth())) {
     return { kind: "rejected", reason: "provider_auth_unavailable" };
-  }
-
-  let models: OpenRouterVideoModel[];
-  try {
-    models = deps.loadModels
-      ? await deps.loadModels({ apiKey })
-      : await loadOpenRouterVideoModels({
-          apiKey,
-          ...(deps.fetchImpl ? { fetchImpl: deps.fetchImpl } : {}),
-        });
-  } catch {
-    return { kind: "rejected", reason: "catalog_unavailable" };
   }
 
   const conversationKey = buildLineVideoConversationKey({
@@ -210,81 +285,47 @@ export async function prepareLineStoryboardVideoDraft(
     return { kind: "rejected", reason: "invalid_conversation" };
   }
 
-  // The conversation's chosen video model, not a hardcoded one. Seedance stays
-  // the DEFAULT that `resolveLineVideoModelPreference` falls back to when the
-  // owner has never picked, so an unset conversation behaves exactly as before.
-  const modelId = deps.preferenceStore
-    ? await resolveLineVideoModelPreference({
-        store: deps.preferenceStore,
-        key: conversationKey,
-      })
-    : LINE_STORYBOARD_VIDEO_MODEL_ID;
-
-  const model = models.find((entry) => entry.id === modelId);
-  if (!model) {
-    return { kind: "rejected", reason: "model_unavailable", model: modelId };
+  const requirements = deriveFalRequirements(request);
+  const choice = chooseModel(request, requirements, deps.cfg);
+  if (isRejection(choice)) {
+    return choice;
   }
+  const model = choice.model;
 
-  if (
-    model.supportedDurationSeconds.length > 0 &&
-    !model.supportedDurationSeconds.includes(request.durationSeconds)
-  ) {
-    return {
-      kind: "rejected",
-      reason: "unsupported_duration",
-      requested: request.durationSeconds,
-      supported: model.supportedDurationSeconds.toSorted((left, right) => left - right),
-    };
-  }
-  if (violatesCatalogChoice(model.supportedResolutions, request.resolution)) {
-    return {
-      kind: "rejected",
-      reason: "unsupported_resolution",
-      requested: request.resolution,
-      supported: model.supportedResolutions,
-    };
-  }
-  if (violatesCatalogChoice(model.supportedAspectRatios, request.aspectRatio)) {
-    return {
-      kind: "rejected",
-      reason: "unsupported_aspect_ratio",
-      requested: request.aspectRatio,
-      supported: model.supportedAspectRatios,
-    };
-  }
-
-  // Audio is never invented: the request may ask for it, but only the live
-  // catalog can grant it. `supportsAudio === undefined` means the row does not
-  // declare the field, which is not permission.
-  const audio = request.audio && model.supportsAudio === true;
-
-  // Token-priced models bill by output pixel area, so the concrete size — not
-  // the "720p" label — is what the estimate needs.
-  const outputSize = resolveLineVideoOutputSize({
-    supportedSizes: model.supportedSizes,
-    resolution: request.resolution,
-    aspectRatio: request.aspectRatio,
-  });
-  const costGuard = evaluateLineVideoCostGuard({
-    model,
-    selector: {
-      durationSeconds: request.durationSeconds,
-      ...(outputSize ? { size: outputSize } : {}),
-      resolution: request.resolution,
-      audio,
-    },
+  // The size this endpoint will really produce, which is what gets quoted,
+  // frozen and displayed -- never the requested one when they differ.
+  const resolution = resolveFalOutputResolution(model, request.resolution);
+  const referenceImageCount = requirements.identityReferenceCount;
+  const price = estimateFalVideoCostUsd({
     cfg: deps.cfg,
+    model,
+    durationSeconds: request.durationSeconds,
+    resolution,
+    referenceImageCount,
   });
-  if (!costGuard.allowed) {
-    return costGuard.reason === "unknown_cost"
-      ? { kind: "rejected", reason: "unknown_cost", model: model.id }
-      : {
-          kind: "rejected",
-          reason: "over_limit",
-          estimatedCostUsd: costGuard.estimatedCostUsd,
-          maxAllowedUsd: costGuard.maxAllowedUsd,
-        };
+  if (price.kind !== "available") {
+    return { kind: "rejected", reason: "unknown_cost", model: model.modelId };
   }
+  const maxAllowedUsd = resolveLineVideoMaxEstimatedCostUsd(deps.cfg);
+  if (price.amountUsd > maxAllowedUsd) {
+    return {
+      kind: "rejected",
+      reason: "over_limit",
+      estimatedCostUsd: price.amountUsd,
+      maxAllowedUsd,
+    };
+  }
+
+  // The prompt is compiled ONCE, here, and frozen into the draft: the marker
+  // dialect depends on the chosen model, so it cannot be re-derived later
+  // without risking a prompt that differs from the one that was quoted.
+  const references = orderFalReferenceBindings(request);
+  const prompt = compileFalProviderPrompt({
+    storyboardPrompt: request.prompt,
+    model,
+    references,
+  });
+  const audio = requirements.audio !== "off";
 
   // The one collision-safe allocator, against LINE's own draft store.
   const draft = await createLineVideoDraft({
@@ -292,13 +333,15 @@ export async function prepareLineStoryboardVideoDraft(
     accountId: request.accountId,
     conversationKey,
     ownerSenderId: request.ownerSenderId,
-    model: model.id,
-    prompt: request.prompt,
+    model: model.modelId,
+    providerRoute: Object.freeze({ provider: "fal", modelId: model.modelId }),
+    prompt,
     durationSeconds: request.durationSeconds,
     aspectRatio: request.aspectRatio,
-    resolution: request.resolution,
+    resolution,
     audio,
-    estimatedCostUsd: costGuard.estimatedCostUsd,
+    referenceImageCount,
+    estimatedCostUsd: price.amountUsd,
     storyboardId: request.storyboardId,
     ...(request.deliveryTo ? { deliveryTo: request.deliveryTo } : {}),
     ...(deps.now ? { now: deps.now } : {}),
@@ -322,17 +365,37 @@ export async function prepareLineStoryboardVideoDraft(
     kind: "created",
     ...(superseded.length > 0 ? { supersededDraftIds: superseded } : {}),
     draftId: draft.draftId,
-    modelId: model.id,
-    modelName: model.name,
+    modelId: model.modelId,
+    modelName: model.displayName,
+    familyId: model.familyId,
     durationSeconds: request.durationSeconds,
-    resolution: request.resolution,
+    resolution,
     aspectRatio: request.aspectRatio,
     audio,
-    estimatedCostUsd: costGuard.estimatedCostUsd,
-    // The guard's own resolver, so the snapshotted ceiling is by construction
-    // the one the guard just compared against.
-    maxAllowedUsd: resolveLineVideoMaxEstimatedCostUsd(deps.cfg),
-    pricingSource: `openrouter:${model.id}`,
-    ...(outputSize ? { outputSize } : {}),
+    estimatedCostUsd: price.amountUsd,
+    maxAllowedUsd,
+    pricingSource: `fal:${price.source.modelId}`,
+    ...(choice.displaced ? { displacedPreferred: choice.displaced } : {}),
   };
+}
+
+/** Compatible endpoints for a frozen storyboard, for the pickers. */
+export function listStoryboardCompatibleModels(
+  request: LineStoryboardVideoDraftRequest,
+  cfg: FalVideoModelConfig & FalVideoPricingConfig,
+): FalVideoModel[] {
+  // Priced-only, at the size each endpoint will actually produce: an unpriced
+  // model cannot be billed, so offering it would dead-end the owner at the
+  // Final Video Draft.
+  const requirements = deriveFalRequirements(request);
+  return listCompatibleFalModels(cfg, requirements).filter(
+    (model) =>
+      estimateFalVideoCostUsd({
+        cfg,
+        model,
+        durationSeconds: requirements.durationSeconds,
+        resolution: resolveFalOutputResolution(model, requirements.resolution),
+        referenceImageCount: requirements.identityReferenceCount,
+      }).kind === "available",
+  );
 }

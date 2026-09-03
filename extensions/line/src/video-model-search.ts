@@ -102,7 +102,13 @@ function boundedEditDistance(left: string, right: string, limit: number): number
   return previous[right.length]!;
 }
 
-function fuzzyHit(queryCollapsed: string, candidate: string): boolean {
+/**
+ * Near-miss match for a typo'd query.
+ *
+ * Exported so the fal picker ranks against the same edit-distance rule this
+ * one does, instead of growing a second Levenshtein with its own threshold.
+ */
+export function videoModelFuzzyHit(queryCollapsed: string, candidate: string): boolean {
   if (!queryCollapsed || !candidate) {
     return false;
   }
@@ -110,6 +116,11 @@ function fuzzyHit(queryCollapsed: string, candidate: string): boolean {
     Math.max(queryCollapsed.length, candidate.length) * MAX_FUZZY_DISTANCE_RATIO,
   );
   return limit >= 1 && boundedEditDistance(queryCollapsed, candidate, limit) <= limit;
+}
+
+/** Spacing-insensitive normalization, shared with the fal picker. */
+export function collapseVideoModelText(value: string): string {
+  return collapse(value);
 }
 
 export type RankedVideoModel = Readonly<{
@@ -146,7 +157,7 @@ function scoreModel(
   const brandHit =
     brand.length > 0 &&
     (query.collapsed.startsWith(brand) ||
-      query.tokens.some((token) => token === brand || fuzzyHit(token, brand)));
+      query.tokens.some((token) => token === brand || videoModelFuzzyHit(token, brand)));
   if (brandHit) {
     return { model, tier: VIDEO_MODEL_MATCH_TIER.brand, matchedTokens };
   }
@@ -157,10 +168,10 @@ function scoreModel(
     return { model, tier: VIDEO_MODEL_MATCH_TIER.substring, matchedTokens };
   }
   const fuzzy =
-    fuzzyHit(query.collapsed, collapse(modelSlug(model))) ||
-    fuzzyHit(query.collapsed, collapse(model.name)) ||
+    videoModelFuzzyHit(query.collapsed, collapse(modelSlug(model))) ||
+    videoModelFuzzyHit(query.collapsed, collapse(model.name)) ||
     query.tokens.some((token) =>
-      videoModelTokens(model.name).some((candidate) => fuzzyHit(token, candidate)),
+      videoModelTokens(model.name).some((candidate) => videoModelFuzzyHit(token, candidate)),
     );
   return fuzzy ? { model, tier: VIDEO_MODEL_MATCH_TIER.fuzzy, matchedTokens } : undefined;
 }

@@ -13,7 +13,15 @@
  */
 
 import type { PrevisProjectResolver } from "./previs-line-router.js";
+import { parseStoryboardAudioIntent } from "./storyboard-audio.js";
 import { compileStoryboardDocument } from "./storyboard-compiler.js";
+import {
+  isStoryboardConfirmation,
+  parseStoryboardModelAnswer,
+  storyboardModelSelectionKey,
+  type StoryboardModelSelectionState,
+  type StoryboardModelSelectionStore,
+} from "./storyboard-confirmation.js";
 import {
   applyDirectorAnswer,
   closeDirectorSession,
@@ -29,7 +37,19 @@ import {
 import { buildStoryboardDraftScope } from "./storyboard-draft-scope.js";
 import { formatFinalVideoDraftForLine, formatStoryboardForLine } from "./storyboard-format.js";
 import { parseStoryboardIntent, type StoryboardIntent } from "./storyboard-intent.js";
-import type { StoryboardPaidDraftRuntime } from "./storyboard-paid-draft-runtime.js";
+import {
+  formatStoryboardModelCandidates,
+  formatStoryboardModelDefault,
+  formatStoryboardModelFamilies,
+  formatStoryboardModelVersions,
+  type StoryboardModelFamilyOption,
+  type StoryboardModelOption,
+} from "./storyboard-model-reply.js";
+import {
+  tryGetStoryboardPaidDraftRuntime,
+  type StoryboardPaidDraftRuntime,
+  type StoryboardVideoRequirements,
+} from "./storyboard-paid-draft-runtime.js";
 import type { StoryboardLlmPlanner } from "./storyboard-planner.js";
 import {
   isDurationTooLong,
@@ -135,8 +155,34 @@ export type StoryboardLineRouterDeps = Readonly<{
    */
   draftScopes?: AsyncKeyedStore<FrozenUgcVideoScope>;
   ugcCapabilities?: Readonly<Record<UgcCapabilityId, NotionTarget>>;
+  /**
+   * Where the post-freeze model conversation keeps its step. Absent, the
+   * storyboard still renders but confirming it is not offered.
+   */
+  modelSelection?: StoryboardModelSelectionStore;
   logger?: { warn: (event: string, fields?: Record<string, unknown>) => void };
 }>;
+
+/**
+ * What a frozen version needs from an endpoint.
+ *
+ * Derived once, here, so the default, both pickers and the eventual paid
+ * request all judge the same scene rather than three similar derivations.
+ */
+function storyboardVideoRequirements(version: StoryboardVersion): StoryboardVideoRequirements {
+  const document = version.document;
+  return Object.freeze({
+    durationSeconds: document.durationSeconds,
+    aspectRatio: document.aspectRatio,
+    resolution: document.resolution,
+    audio: document.audio,
+    spokenDialogue: document.beats.some((beat) => Boolean(beat.dialogue?.trim())),
+    identityReferenceCount: version.characterLocks.reduce(
+      (total, lock) => total + lock.identityReferences.length,
+      0,
+    ),
+  });
+}
 
 const REPLY = {
   engineDown: "สร้าง Storyboard ไม่สำเร็จ กรุณาลองอีกครั้ง",
@@ -145,10 +191,25 @@ const REPLY = {
   missingVersion: "ไม่พบ Storyboard ล่าสุด กรุณาสร้างใหม่",
   directorCancelled: "ยกเลิกคำขอวิดีโอแล้ว",
   directorUnavailable: "ยังไม่สามารถรับคำขอแบบสนทนาได้ กรุณาระบุความยาว เช่น 10 วิ",
+  noCompatibleModel:
+    "ยังไม่มีโมเดลที่รองรับ Storyboard นี้ได้ (ความยาว/เสียง/ตัวละครอ้างอิง) กรุณาปรับ Storyboard",
 } as const;
 
-/** Only the newest code is confirmable; an older one describes a stale plan. */
-const SUPERSEDED_NOTE = "หมายเหตุ: ใช้รหัส VIDEO ล่าสุดนี้เท่านั้น รหัสก่อนหน้าถือว่ายกเลิก";
+/**
+ * Families in registry order, deduplicated.
+ *
+ * Derived from the compatible models themselves, so a family with nothing this
+ * storyboard can run never appears as a choice that dead-ends.
+ */
+function uniqueFamilies(models: readonly StoryboardModelOption[]): StoryboardModelFamilyOption[] {
+  const seen = new Map<string, StoryboardModelFamilyOption>();
+  for (const model of models) {
+    if (!seen.has(model.familyId)) {
+      seen.set(model.familyId, { id: model.familyId, displayName: model.familyDisplayName });
+    }
+  }
+  return [...seen.values()];
+}
 
 function castAddedReply(names: readonly string[]): string {
   return `"${names.join(", ")}" ยังไม่อยู่ในโปรเจกต์นี้ จึงเริ่มงานใหม่ให้แทน (โปรเจกต์เดิมยังอยู่)`;
@@ -265,6 +326,22 @@ export class CloudbathStoryboardLineRouter {
       if (answered) {
         return { handled: true, text: answered };
       }
+    }
+
+    // Content confirmation and the model question that follows it are exact,
+    // owner-scoped commands. They are claimed before intent parsing for the
+    // same reason a pending director answer is: "ใช้ Default" and "2" are far
+    // too weak to survive classification as intents.
+    const modelStep = await this.readModelSelection(claim);
+    if (modelStep) {
+      const answered = await this.answerModelSelection(event, claim, modelStep);
+      if (answered) {
+        return { handled: true, text: answered };
+      }
+    }
+    if (isStoryboardConfirmation(event.content ?? "")) {
+      const confirmed = await this.confirmStoryboard(claim);
+      return confirmed ? { handled: true, text: confirmed } : undefined;
     }
 
     const knownCharacterNames = await this.deps.resolver
@@ -388,6 +465,12 @@ export class CloudbathStoryboardLineRouter {
         aspectRatio: toAspectRatio(intent.aspectRatio),
         resolution: toResolution(intent.resolution),
         environment: intent.environment,
+        // Read from the owner's own words, by the one parser that separates
+        // SOUND from SPEECH. Absent, the compiler falls back to whether the
+        // scene has a spoken line, which is the pre-audio-mode behaviour.
+        ...((mode) => (mode ? { audio: mode } : {}))(
+          parseStoryboardAudioIntent(intent.scenePrompt),
+        ),
         ...(planned ? { plannedBeats: planned.beats } : {}),
       });
       const created = await this.deps.store.createStoryboard({
@@ -481,18 +564,18 @@ export class CloudbathStoryboardLineRouter {
   }
 
   /**
-   * Turns a complete session into a storyboard AND its Final Video Draft.
+   * Turns a complete session into a storyboard, and nothing else.
    *
-   * Both in one reply because the owner asked for a video, not a storyboard:
-   * the draft is where the quote and the confirmable code live. The draft is
-   * prepared through the SAME path `สร้างวิดีโอ` uses, so the paid gate sees
-   * nothing new.
+   * Deliberately NOT quoted or coded here. The gathered answers are still
+   * content, so they follow the same order every other scene does: the owner
+   * reads the storyboard, revises it freely, and only "ยืนยัน Storyboard"
+   * opens the model conversation that mints a payable code.
    */
   private async completeDirector(
     session: StoryboardDirectorSession,
     claim: StoryboardAccessClaim,
   ): Promise<string> {
-    const created = await this.create(
+    return await this.create(
       {
         kind: "create",
         characterNames: session.characterNames,
@@ -508,11 +591,6 @@ export class CloudbathStoryboardLineRouter {
       },
       claim,
     );
-    const active = await this.readActive(claim);
-    if (!active) {
-      return created;
-    }
-    return `${created}\n\n${await this.prepareDraft(claim, active)}`;
   }
 
   /**
@@ -566,10 +644,10 @@ export class CloudbathStoryboardLineRouter {
         versionNumber: version.versionNumber,
         document: version.document,
       });
-      // Re-quoted here: a revision changes length, audio or framing, so the
-      // previous draft's price and code no longer describe this plan.
-      const draft = await this.prepareDraft(claim, active);
-      return `${storyboard}\n\n${draft}\n${SUPERSEDED_NOTE}`;
+      // Deliberately NOT re-quoted. A revision changes the scene, and the
+      // scene must be confirmed before any model is chosen or priced, so this
+      // returns the new version and waits for "ยืนยัน Storyboard".
+      return storyboard;
     } catch (error) {
       if (error instanceof Error && error.message.includes("concurrently")) {
         return REPLY.conflict;
@@ -743,9 +821,226 @@ export class CloudbathStoryboardLineRouter {
     return ids.length > 0 ? { characterIds: ids } : {};
   }
 
+  /**
+   * The plugin that owns fal's registry, injected or installed.
+   *
+   * The SAME object the paid handoff uses, so the model a picker offers and
+   * the model a draft allocates can never come from two different registries.
+   */
+  private videoRuntime(): StoryboardPaidDraftRuntime | undefined {
+    return this.deps.paidDraftRuntime === undefined
+      ? (tryGetStoryboardPaidDraftRuntime() ?? undefined)
+      : (this.deps.paidDraftRuntime ?? undefined);
+  }
+
+  /** The open model question for this owner, if the storyboard is frozen. */
+  private async readModelSelection(
+    claim: StoryboardAccessClaim,
+  ): Promise<StoryboardModelSelectionState | undefined> {
+    return await this.deps.modelSelection?.lookup(storyboardModelSelectionKey(claim));
+  }
+
+  /**
+   * Freezes the active storyboard and opens the model conversation.
+   *
+   * Nothing is quoted and no code is minted here: freezing is a CONTENT
+   * decision, and the paid side does not begin until a model is settled.
+   */
+  private async confirmStoryboard(claim: StoryboardAccessClaim): Promise<string | undefined> {
+    const active = await this.readActive(claim);
+    if (!active || !this.deps.modelSelection) {
+      return undefined;
+    }
+    const latest = await this.deps.store
+      .readLatest({ storyboardId: active.storyboardId, claim })
+      .catch(() => undefined);
+    if (!latest) {
+      return REPLY.missingVersion;
+    }
+    const offer = await this.videoRuntime()?.offerDefaultVideoModel?.(
+      claim.accountId,
+      storyboardVideoRequirements(latest),
+    );
+    if (!offer || offer.kind !== "offered") {
+      return REPLY.noCompatibleModel;
+    }
+    await this.deps.modelSelection.register(storyboardModelSelectionKey(claim), {
+      version: 1,
+      storyboardId: active.storyboardId,
+      frozenVersionNumber: latest.versionNumber,
+      step: "default",
+      offeredModelIds: Object.freeze([offer.model.modelId]),
+      updatedAt: new Date(this.deps.now()).toISOString(),
+    });
+    return formatStoryboardModelDefault({
+      model: offer.model,
+      ...(offer.estimatedCostUsd === undefined ? {} : { estimatedCostUsd: offer.estimatedCostUsd }),
+      ...(offer.displacedReason ? { displacedReason: offer.displacedReason } : {}),
+    });
+  }
+
+  /**
+   * Advances the family -> version conversation, or drafts on "use default".
+   *
+   * A revision between freezing and choosing invalidates the step: the frozen
+   * version number is compared, so a selection can never be applied to content
+   * the owner has since changed.
+   */
+  private async answerModelSelection(
+    event: StoryboardDispatchEvent,
+    claim: StoryboardAccessClaim,
+    step: StoryboardModelSelectionState,
+  ): Promise<string | undefined> {
+    const answer = parseStoryboardModelAnswer(event.content ?? "");
+    if (!answer || !this.deps.modelSelection) {
+      return undefined;
+    }
+    const active = await this.readActive(claim);
+    const latest = active
+      ? await this.deps.store
+          .readLatest({ storyboardId: active.storyboardId, claim })
+          .catch(() => undefined)
+      : undefined;
+    if (!latest || latest.versionNumber !== step.frozenVersionNumber) {
+      // The scene moved on. Drop the stale step rather than binding a model to
+      // content the owner did not confirm.
+      await this.clearModelSelection(claim, step);
+      return undefined;
+    }
+    const compatible =
+      (await this.videoRuntime()?.listCompatibleVideoModels?.(
+        claim.accountId,
+        storyboardVideoRequirements(latest),
+      )) ?? [];
+    if (answer.kind === "use_default" && step.step === "default") {
+      const chosen = step.offeredModelIds?.[0];
+      return chosen ? await this.draftWithModel(claim, chosen, step) : undefined;
+    }
+    if (answer.kind === "change_model") {
+      const families = uniqueFamilies(compatible);
+      await this.deps.modelSelection.register(storyboardModelSelectionKey(claim), {
+        ...step,
+        step: "family",
+        offeredModelIds: Object.freeze(families.map((family) => family.id)),
+        updatedAt: new Date(this.deps.now()).toISOString(),
+      });
+      return formatStoryboardModelFamilies(families);
+    }
+    if (answer.kind === "choice") {
+      return await this.applyNumberedChoice(claim, step, compatible, answer.index);
+    }
+    return answer.kind === "query"
+      ? await this.applyModelQuery(claim, step, latest, compatible, answer.text)
+      : undefined;
+  }
+
+  /** Resolves a numbered pick against whatever menu is currently on screen. */
+  private async applyNumberedChoice(
+    claim: StoryboardAccessClaim,
+    step: StoryboardModelSelectionState,
+    compatible: readonly StoryboardModelOption[],
+    index: number,
+  ): Promise<string | undefined> {
+    const offered = step.offeredModelIds ?? [];
+    const picked = offered[index];
+    if (!picked) {
+      return undefined;
+    }
+    if (step.step !== "family") {
+      return await this.draftWithModel(claim, picked, step);
+    }
+    return await this.showFamilyVersions(claim, step, compatible, picked);
+  }
+
+  /** Narrows to one family and lists only its compatible versions. */
+  private async showFamilyVersions(
+    claim: StoryboardAccessClaim,
+    step: StoryboardModelSelectionState,
+    compatible: readonly StoryboardModelOption[],
+    familyId: string,
+  ): Promise<string | undefined> {
+    const models = compatible.filter((model) => model.familyId === familyId);
+    const family = uniqueFamilies(compatible).find((entry) => entry.id === familyId);
+    if (models.length === 0 || !family) {
+      return undefined;
+    }
+    await this.deps.modelSelection?.register(storyboardModelSelectionKey(claim), {
+      ...step,
+      step: "version",
+      familyId,
+      offeredModelIds: Object.freeze(models.map((model) => model.modelId)),
+      updatedAt: new Date(this.deps.now()).toISOString(),
+    });
+    return formatStoryboardModelVersions({ familyName: family.displayName, models });
+  }
+
+  /**
+   * Applies a typed model query.
+   *
+   * A confident single match applies; a family name narrows; anything weaker
+   * renders choices. A guess is never billed.
+   */
+  private async applyModelQuery(
+    claim: StoryboardAccessClaim,
+    step: StoryboardModelSelectionState,
+    version: StoryboardVersion,
+    compatible: readonly StoryboardModelOption[],
+    text: string,
+  ): Promise<string | undefined> {
+    const matched = await this.videoRuntime()?.matchVideoModelQuery?.(
+      claim.accountId,
+      storyboardVideoRequirements(version),
+      text,
+    );
+    if (!matched) {
+      return undefined;
+    }
+    if (matched.kind === "model") {
+      return await this.draftWithModel(claim, matched.modelId, step);
+    }
+    if (matched.kind === "family") {
+      return await this.showFamilyVersions(claim, step, compatible, matched.familyId);
+    }
+    await this.deps.modelSelection?.register(storyboardModelSelectionKey(claim), {
+      ...step,
+      step: "version",
+      offeredModelIds: Object.freeze(matched.models.map((model) => model.modelId)),
+      updatedAt: new Date(this.deps.now()).toISOString(),
+    });
+    return formatStoryboardModelCandidates(matched.models);
+  }
+
+  /** Retires the model step in place; the shared store offers no delete. */
+  private async clearModelSelection(
+    claim: StoryboardAccessClaim,
+    step: StoryboardModelSelectionState,
+  ): Promise<void> {
+    await this.deps.modelSelection?.register(storyboardModelSelectionKey(claim), {
+      ...step,
+      step: "default",
+      offeredModelIds: Object.freeze([]),
+      updatedAt: new Date(this.deps.now()).toISOString(),
+    });
+  }
+
+  /** Quotes and allocates the Final Video Draft for one chosen endpoint. */
+  private async draftWithModel(
+    claim: StoryboardAccessClaim,
+    modelId: string,
+    step: StoryboardModelSelectionState,
+  ): Promise<string | undefined> {
+    const active = await this.readActive(claim);
+    if (!active) {
+      return undefined;
+    }
+    await this.clearModelSelection(claim, step);
+    return await this.prepareDraft(claim, active, modelId);
+  }
+
   private async prepareDraft(
     claim: StoryboardAccessClaim,
     active: ActiveStoryboardContext,
+    requestedModelId?: string,
   ): Promise<string> {
     const latest = await this.deps.store
       .readLatest({ storyboardId: active.storyboardId, claim })
@@ -759,6 +1054,7 @@ export class CloudbathStoryboardLineRouter {
         drafts: this.deps.drafts,
         now: this.deps.now,
         ...(this.deps.randomId ? { randomId: this.deps.randomId } : {}),
+        ...(requestedModelId ? { requestedModelId } : {}),
         // The paid draft is scoped to the conversation that may confirm it, in
         // the SAME shape the LINE paid flow already uses, so a code minted here
         // is resolvable by the existing gate and by nothing else.
