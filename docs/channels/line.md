@@ -250,25 +250,66 @@ The owner conversation runs in this order, and money enters at the very end:
 ### Model registry
 
 Every selectable endpoint, and its capabilities, lives in one place
-(`extensions/line/src/fal-video-registry.ts`), transcribed from fal's own
-published schema in `@fal-ai/client`. Capabilities carry their provenance:
-`fal_schema` for facts fal states, and `operator_declared` for facts its schema
-leaves open. **An unproven capability is never treated as permission** — a model
-that cannot be shown to execute the confirmed storyboard is never offered,
-defaulted to, or given a payable code.
+(`extensions/line/src/fal-video-registry.ts`). Nothing is fetched or scraped at
+runtime.
 
-Two consequences worth knowing:
+Each capability records **where it came from**, and that order is a precedence
+order — strongest first:
 
-- fal publishes **no Seedance 2.5** endpoint of any kind. Its Seedance
-  reference-to-video endpoints are `seedance-2.0` plus `fast`/`mini` variants.
-- MiniMax H3's schema declares `duration` as an unbounded number and exposes no
-  audio field, so both must be declared before H3 can be selected.
+| Provenance          | Source                                                | Notes                                                                                               |
+| ------------------- | ----------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| `fal_api_page`      | fal's current official API reference for the endpoint | The deployed contract; wins over everything below.                                                  |
+| `fal_model_page`    | fal's current official model page                     | Product-level limits the API reference does not spell out.                                          |
+| `fal_client_schema` | generated types in `@fal-ai/client`                   | **Lags fal's live catalog**, so never sufficient on its own and never overrides a current API page. |
+| `operator_declared` | your config (`falModels`)                             | For facts none of the above establish.                                                              |
+
+**An unproven capability is never treated as permission** — a model that cannot
+be shown to execute the confirmed storyboard is never offered, defaulted to, or
+given a payable code.
+
+Endpoints, all reference-to-video (this flow always casts Character Library
+identities, so a text-to-video or first-frame endpoint cannot execute its
+storyboard):
+
+| Endpoint                                                       | Duration | Resolutions | Audio            | Reference field        | Prompt marker |
+| -------------------------------------------------------------- | -------- | ----------- | ---------------- | ---------------------- | ------------- |
+| `minimax/h3/reference-to-video`                                | 5–15s    | 768P, 1080P | always on        | `reference_image_urls` | `Image 1`     |
+| `minimax/h3-max/reference-to-video`                            | 5–15s    | 480P, 768P  | always on        | `reference_image_urls` | `Image 1`     |
+| `bytedance/seedance-2.5/reference-to-video`                    | 4–30s    | 480p, 720p  | `generate_audio` | `image_urls`           | `[Image1]`    |
+| `bytedance/seedance-2.0/reference-to-video` (+ `fast`, `mini`) | 4–15s    | up to 4k    | `generate_audio` | `image_urls`           | `@Image1`     |
+| `fal-ai/veo3.1/reference-to-video`                             | 8s       | 720p–4k     | `generate_audio` | `image_urls`           | none          |
+
+Consequences worth knowing:
+
+- **H3 and H3 Max are distinct models**, never aliases of each other: different
+  endpoints and different output sizes. Naming one when you meant the other
+  would bill something you did not choose, so an ambiguous name asks rather
+  than picking.
+- **Seedance 2.5 is not Seedance 2.0.** Same vendor, different endpoint,
+  different marker dialect, and different duration ceiling. A prompt written in
+  the wrong dialect does not error — the references are simply ignored and you
+  pay for a video without your character in it.
+- **A 30-second scene resolves to Seedance 2.5.** H3 tops out at 15 seconds, so
+  it is displaced with an explanation rather than the flow dead-ending on "no
+  compatible endpoint".
+- **Audio is a capability, not a preference.** The H3 endpoints produce native
+  synchronized audio on every generation and publish no proven off switch, so
+  they can serve a scene that wants sound and are filtered out of one that must
+  be silent.
 
 ### Configuration
 
-fal publishes no machine-readable price, so rates are declared **per endpoint** —
-there is no blended fallback rate, and an endpoint with no rate is simply not
-payable. `falModels` supplies what fal's schema leaves open.
+Rates are per endpoint. There is no blended fallback rate, and an endpoint with
+no usable rate is simply not payable.
+
+Seedance 2.5 needs no operator rate: fal publishes a token price of
+**$0.0214 / 1000 tokens** at both 480p and 720p, and tokens are estimated from
+the output pixel area, the duration and 24 FPS. That estimate covers the proven
+image-reference case; a shape it cannot prove (reference video or audio inputs)
+falls back to your endpoint rate, and without one the endpoint is not offered.
+
+`falModels` supplies only what fal's own pages leave open — H3's duration range
+and audio behaviour are read from fal's model page and need no declaration.
 
 ```jsonc
 {
@@ -288,16 +329,13 @@ payable. `falModels` supplies what fal's schema leaves open.
           },
         },
       },
-      "falModels": {
-        "minimax/h3/reference-to-video": {
-          "durationSeconds": [5, 10, 15],
-          "audio": "always_on",
-        },
-      },
     },
   },
 }
 ```
+
+An operator rate always wins over the published token price, so you can pin a
+negotiated rate without editing code.
 
 Credentials come from the standard `fal` provider (`FAL_KEY`) and are verified
 **before** a payable code is minted, so a code is never handed out that cannot
