@@ -1,9 +1,11 @@
 // Line tests cover auto reply delivery plugin behavior.
+import type { messagingApi } from "@line/bot-sdk";
 import { describe, expect, it, vi } from "vitest";
 import type { LineAutoReplyDeps } from "./auto-reply-delivery.js";
 import { deliverLineAutoReply } from "./auto-reply-delivery.js";
 import { sendLineReplyChunks } from "./reply-chunks.js";
 import { createLineSendReceipt } from "./send-receipt.js";
+import type { LineQuickReplyItem } from "./types.js";
 
 const createFlexMessage = (altText: string, contents: unknown) => ({
   type: "flex" as const,
@@ -46,7 +48,11 @@ describe("deliverLineAutoReply", () => {
       type: "text" as const,
       text,
     }));
-    const createQuickReplyItems = vi.fn((labels: string[]) => ({ items: labels }));
+    // Echoes the chips it was handed, so the assertions below can read exactly
+    // what reached the message. The SDK's own item shape is not what they check.
+    const createQuickReplyItems = vi.fn(
+      (items: readonly LineQuickReplyItem[]) => ({ items }) as unknown as messagingApi.QuickReply,
+    );
     const pushMessagesLine = vi.fn(async () => ({
       messageId: "push",
       chatId: "u1",
@@ -62,7 +68,7 @@ describe("deliverLineAutoReply", () => {
       pushMessageLine,
       pushTextMessageWithQuickReplies,
       createTextMessageWithQuickReplies,
-      createQuickReplyItems: createQuickReplyItems as LineAutoReplyDeps["createQuickReplyItems"],
+      createQuickReplyItems,
       pushMessagesLine,
       createFlexMessage: createFlexMessage as LineAutoReplyDeps["createFlexMessage"],
       createImageMessage,
@@ -169,11 +175,13 @@ describe("deliverLineAutoReply", () => {
   });
 
   it("uses fallback text for quick-reply-only payloads", async () => {
-    const createTextMessageWithQuickReplies = vi.fn((text: string, _quickReplies: string[]) => ({
-      type: "text" as const,
-      text,
-      quickReply: { items: ["A", "B"] },
-    }));
+    const createTextMessageWithQuickReplies = vi.fn(
+      (text: string, _quickReplies: readonly LineQuickReplyItem[]) => ({
+        type: "text" as const,
+        text,
+        quickReply: { items: ["A", "B"] },
+      }),
+    );
     const lineData = {
       quickReplies: ["A", "B"],
     };
@@ -205,11 +213,13 @@ describe("deliverLineAutoReply", () => {
   });
 
   it("sends rich messages before quick-reply text so quick replies remain visible", async () => {
-    const createTextMessageWithQuickReplies = vi.fn((text: string, _quickReplies: string[]) => ({
-      type: "text" as const,
-      text,
-      quickReply: { items: ["A"] },
-    }));
+    const createTextMessageWithQuickReplies = vi.fn(
+      (text: string, _quickReplies: readonly LineQuickReplyItem[]) => ({
+        type: "text" as const,
+        text,
+        quickReply: { items: ["A"] },
+      }),
+    );
 
     const lineData = {
       flexMessage: { altText: "Card", contents: { type: "bubble" } },

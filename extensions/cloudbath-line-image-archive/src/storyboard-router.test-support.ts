@@ -1,4 +1,11 @@
+import type { MessagePresentation } from "openclaw/plugin-sdk/interactive-runtime";
 import { expect, vi } from "vitest";
+import type { ActiveConversationContext } from "./conversation-context.js";
+import {
+  CloudbathConversationRouter,
+  type ConversationTurnResolution,
+} from "./conversation-router.js";
+import type { ConversationSemanticResolver } from "./conversation-semantic-resolver.js";
 import {
   CloudbathPrevisLineRouter,
   type PrevisDedupeStore,
@@ -105,9 +112,13 @@ export function resolver(
 }
 
 type DispatchOutcome = {
-  source: "storyboard" | "previs" | "model";
+  source: "conversation" | "storyboard" | "previs" | "model";
   handled: boolean;
   text?: string;
+  /** How arbitration read the turn, for suites that assert the ladder itself. */
+  conversation?: ConversationTurnResolution;
+  /** Controls attached to the reply, when the handler left a question open. */
+  presentation?: MessagePresentation;
 };
 
 export function harness(
@@ -132,6 +143,10 @@ export function harness(
     modelSelection?: StoryboardModelSelectionStore;
     ugcCapabilities?: Readonly<Record<UgcCapabilityId, NotionTarget>>;
     planner?: StoryboardLlmPlanner;
+    /** Absent, arbitration stops after its deterministic steps. */
+    semanticResolver?: ConversationSemanticResolver;
+    /** `null` models a LINE conversation this workspace policy does not bind. */
+    binding?: { policyId: string; boundByOwnerId: string } | null;
   } = {},
 ) {
   const shared = options.resolver ?? resolver();
@@ -208,6 +223,23 @@ export function harness(
     ...(options.logger ? { logger: options.logger } : {}),
   });
 
+  const binding =
+    options.binding === undefined ? { policyId: "UGC", boundByOwnerId: OWNER } : options.binding;
+  const conversationContext = mem<ActiveConversationContext>();
+  let nextNonce = 0;
+  const conversationRouter = new CloudbathConversationRouter({
+    context: conversationContext,
+    registry: { lookup: async () => binding },
+    active,
+    director,
+    resolver: shared,
+    paidDraftRuntime: options.paidDraftRuntime ?? null,
+    now: () => Date.parse("2026-08-30T10:00:00.000Z"),
+    randomId: () => `nonce${(nextNonce += 1)}0000`,
+    ...(options.modelSelection ? { modelSelection: options.modelSelection } : {}),
+    ...(options.semanticResolver ? { semanticResolver: options.semanticResolver } : {}),
+  });
+
   /** The plugin's real before_dispatch order. */
   const dispatch = async (
     content: string,
@@ -221,9 +253,21 @@ export function harness(
       ...(over.messageId ? { messageId: over.messageId } : {}),
     };
     const ctx = { channelId: "line", accountId: ACCOUNT, conversationId: GROUP };
-    const storyboardResult = await storyboardRouter.handleBeforeDispatch(event, ctx);
+    const conversation = await conversationRouter.resolveTurn(event, ctx);
+    if (conversation.kind === "answer" || conversation.kind === "clarify") {
+      return { source: "conversation", handled: true, text: conversation.text, conversation };
+    }
+    const routedEvent =
+      conversation.kind === "rewrite" ? { ...event, content: conversation.canonicalText } : event;
+    const storyboardResult = await storyboardRouter.handleBeforeDispatch(routedEvent, ctx);
     if (storyboardResult) {
-      return { source: "storyboard", ...storyboardResult };
+      const presentation = await conversationRouter.observeHandledTurn(routedEvent, ctx);
+      return {
+        source: "storyboard",
+        ...storyboardResult,
+        conversation,
+        ...(presentation ? { presentation } : {}),
+      };
     }
     // Mirrors index.ts: previs answers an explicit request, or anything at all
     // while no storyboard is active. Calling it unconditionally would let the
@@ -234,9 +278,9 @@ export function harness(
       ? await previsRouter.handleBeforeDispatch(event, ctx)
       : undefined;
     if (previsResult) {
-      return { source: "previs", ...previsResult };
+      return { source: "previs", ...previsResult, conversation };
     }
-    return { source: "model", handled: false };
+    return { source: "model", handled: false, conversation };
   };
 
   const latest = async (): Promise<StoryboardVersion> => {
@@ -260,6 +304,8 @@ export function harness(
   return {
     dedupe,
     dispatch,
+    conversationRouter,
+    conversationContext,
     latest,
     versionAt,
     store,

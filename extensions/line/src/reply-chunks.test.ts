@@ -1,6 +1,7 @@
 // Line tests cover reply chunks plugin behavior.
 import { describe, expect, it, vi } from "vitest";
 import { sendLineReplyChunks } from "./reply-chunks.js";
+import type { LineQuickReplyItem } from "./types.js";
 
 const LINE_TEST_CFG = { channels: { line: { channelAccessToken: "line-token" } } };
 
@@ -8,10 +9,12 @@ function createReplyChunksHarness() {
   const replyMessageLine = vi.fn(async () => ({}));
   const pushMessageLine = vi.fn(async () => ({}));
   const pushTextMessageWithQuickReplies = vi.fn(async () => ({}));
-  const createTextMessageWithQuickReplies = vi.fn((text: string, _quickReplies: string[]) => ({
-    type: "text" as const,
-    text,
-  }));
+  const createTextMessageWithQuickReplies = vi.fn(
+    (text: string, _quickReplies: readonly LineQuickReplyItem[]) => ({
+      type: "text" as const,
+      text,
+    }),
+  );
 
   return {
     replyMessageLine,
@@ -63,11 +66,13 @@ describe("sendLineReplyChunks", () => {
   it("attaches quick replies to a single reply chunk", async () => {
     const { replyMessageLine, pushMessageLine, pushTextMessageWithQuickReplies } =
       createReplyChunksHarness();
-    const createTextMessageWithQuickReplies = vi.fn((text: string, _quickReplies: string[]) => ({
-      type: "text" as const,
-      text,
-      quickReply: { items: [] },
-    }));
+    const createTextMessageWithQuickReplies = vi.fn(
+      (text: string, _quickReplies: readonly LineQuickReplyItem[]) => ({
+        type: "text" as const,
+        text,
+        quickReply: { items: [] },
+      }),
+    );
 
     const result = await sendLineReplyChunks({
       to: "line:user:1",

@@ -246,6 +246,27 @@ function nativeGroupId(conversationId: string | undefined): string | undefined {
   return /^[CR][0-9a-f]{32}$|^C[0-9A-Za-z]{5,}$/u.test(native) ? native : undefined;
 }
 
+/**
+ * The trusted LINE identity triple, or undefined when the turn is not the
+ * bound owner speaking in a bound conversation.
+ *
+ * Exported so the conversation layer scopes its context to exactly the same
+ * triple the storyboard flow scopes its work to; a second derivation would be a
+ * second answer to "whose conversation is this?".
+ */
+export function resolveStoryboardAccessClaim(
+  event: StoryboardDispatchEvent,
+  context: StoryboardDispatchContext,
+): StoryboardAccessClaim | undefined {
+  const lineGroupId = nativeGroupId(context.conversationId);
+  const accountId = context.accountId?.trim();
+  const ownerSenderId = event.senderId?.trim();
+  if (!lineGroupId || !accountId || !ownerSenderId || event.senderIsOwner !== true) {
+    return undefined;
+  }
+  return { accountId, lineGroupId, ownerSenderId };
+}
+
 function toAspectRatio(value: string | undefined): StoryboardAspectRatio {
   return (
     STORYBOARD_ASPECT_RATIOS.find((candidate) => candidate === value) ??
@@ -1112,13 +1133,7 @@ export class CloudbathStoryboardLineRouter {
     event: StoryboardDispatchEvent,
     context: StoryboardDispatchContext,
   ): StoryboardAccessClaim | undefined {
-    const lineGroupId = nativeGroupId(context.conversationId);
-    const accountId = context.accountId?.trim();
-    const ownerSenderId = event.senderId?.trim();
-    if (!lineGroupId || !accountId || !ownerSenderId || event.senderIsOwner !== true) {
-      return undefined;
-    }
-    return { accountId, lineGroupId, ownerSenderId };
+    return resolveStoryboardAccessClaim(event, context);
   }
 
   /** Stable per-inbound-message key, scoped to the owner so it cannot collide. */

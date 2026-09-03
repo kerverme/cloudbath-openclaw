@@ -6,12 +6,12 @@ import { requireRuntimeConfig } from "openclaw/plugin-sdk/plugin-config-runtime"
 import { logVerbose } from "openclaw/plugin-sdk/runtime-env";
 import { truncateUtf16Safe } from "openclaw/plugin-sdk/text-utility-runtime";
 import { resolveLineAccount } from "./accounts.js";
-import { messageAction } from "./actions.js";
+import { messageAction, postbackAction } from "./actions.js";
 import { resolveLineChannelAccessToken } from "./channel-access-token.js";
 import { stageLineOutboundMessageImages } from "./outbound-media-staging.js";
 import { validateLineMediaUrl } from "./outbound-media.js";
 import { createLineSendReceipt } from "./send-receipt.js";
-import type { LineSendResult } from "./types.js";
+import type { LineQuickReplyItem, LineSendResult } from "./types.js";
 
 type Message = messagingApi.Message;
 type TextMessage = messagingApi.TextMessage;
@@ -438,32 +438,48 @@ export async function pushTemplateMessage(
 export async function pushTextMessageWithQuickReplies(
   to: string,
   text: string,
-  quickReplyLabels: string[],
+  quickReplies: readonly LineQuickReplyItem[],
   opts: LinePushOpts,
 ): Promise<LineSendResult> {
-  const message = createTextMessageWithQuickReplies(text, quickReplyLabels);
+  const message = createTextMessageWithQuickReplies(text, quickReplies);
 
   return pushLineMessages(to, [message], opts, {
     verboseMessage: (chatId) => `line: pushed message with quick replies to ${chatId}`,
   });
 }
 
-export function createQuickReplyItems(labels: string[]): QuickReply {
-  const items: QuickReplyItem[] = labels.slice(0, 13).map((label) => ({
-    type: "action",
-    action: messageAction(label, label),
-  }));
-  return { items };
+/**
+ * LINE caps a quick reply at 13 chips, so the extras are dropped rather than
+ * rejected: a decision the owner can still type is worth showing partly.
+ */
+const QUICK_REPLY_LIMIT = 13;
+
+/**
+ * Chips for one message.
+ *
+ * A postback chip carries `data` the webhook receives verbatim, so the handler
+ * that offered the decision resolves it exactly. `displayText` is the label, so
+ * the transcript still reads like the owner said it.
+ */
+export function createQuickReplyItems(items: readonly LineQuickReplyItem[]): QuickReply {
+  return {
+    items: items.slice(0, QUICK_REPLY_LIMIT).map((item): QuickReplyItem => {
+      if (typeof item === "string") {
+        return { type: "action", action: messageAction(item, item) };
+      }
+      return { type: "action", action: postbackAction(item.label, item.data, item.label) };
+    }),
+  };
 }
 
 export function createTextMessageWithQuickReplies(
   text: string,
-  quickReplyLabels: string[],
+  quickReplies: readonly LineQuickReplyItem[],
 ): TextMessage & { quickReply: QuickReply } {
   return {
     type: "text",
     text,
-    quickReply: createQuickReplyItems(quickReplyLabels),
+    quickReply: createQuickReplyItems(quickReplies),
   };
 }
 

@@ -60,6 +60,31 @@ export type LineStoryboardModelMatch =
   | Readonly<{ kind: "family"; familyId: string }>
   | Readonly<{ kind: "candidates"; models: readonly LineStoryboardModelOption[] }>;
 
+/**
+ * A paid job as the conversation layer needs to describe it.
+ *
+ * Declared structurally on both halves of this seam, like the rest of the
+ * contract. Only what a status sentence needs: no prompt, no cost, no provider
+ * identifiers, and a failure reason the owning plugin has already made safe to
+ * repeat back.
+ */
+export type LineStoryboardVideoJobSnapshot = Readonly<{
+  jobId: string;
+  /** The `VIDEO ####` code the owner confirmed this job with. */
+  draftId: string;
+  status: "running" | "completed" | "failed" | "delivery_failed";
+  /** Last stage the record proves completed. Absent before the provider answers. */
+  stage?:
+    | "provider_submission"
+    | "provider_generation_completed"
+    | "artifact_retrieval"
+    | "r2_archive"
+    | "line_delivery";
+  /** Already-sanitized; never raw provider output. */
+  failureReason?: string;
+  submittedAt: number;
+}>;
+
 export type LineStoryboardVideoRuntime = {
   /** The capability-aware default for a frozen storyboard, with its quote. */
   offerDefaultVideoModel?(
@@ -77,6 +102,18 @@ export type LineStoryboardVideoRuntime = {
     requirements: LineStoryboardVideoRequirements,
     text: string,
   ): Promise<LineStoryboardModelMatch | undefined>;
+  /**
+   * The job this conversation is waiting on, if any.
+   *
+   * Bounded to the ACTIVE job on purpose: the owning plugin releases its
+   * per-conversation lock the moment a job reaches a terminal state, and
+   * scanning history for "the last one" would answer "เสร็จยัง" about work the owner
+   * already saw finish.
+   */
+  readActiveVideoJob?(params: {
+    accountId: string;
+    conversationId: string;
+  }): Promise<LineStoryboardVideoJobSnapshot | undefined>;
   /** Allocates a pending paid draft. Never submits; never charges. */
   prepareStoryboardVideoDraft(
     request: LineStoryboardVideoDraftRequest,

@@ -10,6 +10,7 @@ import type { ChatType } from "../channels/chat-type.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import type { TtsAutoMode } from "../config/types.tts.js";
 import type { DiagnosticTraceContext } from "../infra/diagnostic-trace-context.js";
+import type { MessagePresentation } from "../interactive/payload.js";
 import type {
   PluginHookBeforeAgentStartEvent,
   PluginHookBeforeAgentStartResult,
@@ -508,6 +509,14 @@ export type PluginHookBeforeDispatchContext = {
 export type PluginHookBeforeDispatchResult = {
   handled: boolean;
   text?: string;
+  /**
+   * Portable controls for a bounded decision the reply is asking about, e.g.
+   * the two lengths a video may be. Declared as typed actions so each channel
+   * maps them to its own native affordance (LINE renders quick-reply postbacks)
+   * instead of the handler emitting transport-specific markup, and so a channel
+   * with no affordance simply shows the text.
+   */
+  presentation?: MessagePresentation;
 };
 
 export type PluginHookReplyDispatchEvent = {

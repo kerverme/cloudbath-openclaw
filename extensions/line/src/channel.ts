@@ -15,6 +15,7 @@ import { lineGatewayAdapter } from "./gateway.js";
 import { resolveLineGroupRequireMention } from "./group-policy.js";
 import { inferLineTargetChatType, normalizeLineMessagingTarget } from "./messaging-target.js";
 import { lineMessageAdapter, lineOutboundAdapter } from "./outbound.js";
+import { applyLinePresentationQuickReplies } from "./presentation-quick-reply.js";
 import { hasLineDirectives, parseLineDirectives } from "./reply-payload-transform.js";
 import { getLineRuntime } from "./runtime.js";
 import { lineSetupAdapter } from "./setup-core.js";
@@ -76,10 +77,9 @@ export const linePlugin: ChannelPlugin<ResolvedLineAccount> = createChatChannelP
       },
       resolveInboundConversation: lineBindingsAdapter.resolveInboundConversation,
       transformReplyPayload: ({ payload }) => {
-        if (!payload.text || !hasLineDirectives(payload.text)) {
-          return payload;
-        }
-        return parseLineDirectives(payload);
+        const withDirectives =
+          payload.text && hasLineDirectives(payload.text) ? parseLineDirectives(payload) : payload;
+        return applyLinePresentationQuickReplies(withDirectives);
       },
       targetResolver: {
         looksLikeId: (id) => {

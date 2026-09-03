@@ -8,7 +8,7 @@ import type { FlexContainer } from "./flex-templates.js";
 import type { ProcessedLineMessage } from "./markdown-to-line.js";
 import { buildLineQuickReplyFallbackText } from "./quick-reply-fallback.js";
 import type { SendLineReplyChunksParams } from "./reply-chunks.js";
-import type { LineChannelData, LineTemplateMessagePayload } from "./types.js";
+import type { LineChannelData, LineQuickReplyItem, LineTemplateMessagePayload } from "./types.js";
 
 export type LineAutoReplyDeps = {
   buildTemplateMessageFromPayload: (
@@ -17,7 +17,7 @@ export type LineAutoReplyDeps = {
   processLineMessage: (text: string) => ProcessedLineMessage;
   chunkMarkdownText: (text: string, limit: number) => string[];
   sendLineReplyChunks: (params: SendLineReplyChunksParams) => Promise<{ replyTokenUsed: boolean }>;
-  createQuickReplyItems: (labels: string[]) => messagingApi.QuickReply;
+  createQuickReplyItems: (items: readonly LineQuickReplyItem[]) => messagingApi.QuickReply;
   pushMessagesLine: (
     to: string,
     messages: messagingApi.Message[],

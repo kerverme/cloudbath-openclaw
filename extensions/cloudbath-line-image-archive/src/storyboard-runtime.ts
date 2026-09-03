@@ -56,6 +56,53 @@ export type StoryboardStateApi = Readonly<{
   }): AsyncKeyedStore<T>;
 }>;
 
+/**
+ * The three stores that say where a conversation currently stands: the
+ * half-answered request, the post-freeze model step, and which storyboard is
+ * being worked on.
+ *
+ * Extracted because the conversation layer derives its open question from
+ * exactly these rows. Re-declaring their namespaces and expiry there would make
+ * "what is open?" answerable two ways, which is the one thing arbitration
+ * cannot tolerate.
+ */
+export function openStoryboardConversationStores(state: StoryboardStateApi): Readonly<{
+  active: AsyncKeyedStore<ActiveStoryboardContext>;
+  director: AsyncKeyedStore<StoryboardDirectorSession>;
+  modelSelection: AsyncKeyedStore<StoryboardModelSelectionState>;
+}> {
+  return {
+    // Bounded on purpose. "สร้างวิดีโอ" and bare time-range edits are only
+    // claimed while a storyboard is active, so an active record that never
+    // expired would intercept those phrases forever and leave the owner with
+    // no route back to the existing paid flow. Versions themselves are durable
+    // and unaffected; only the "what am I editing right now" pointer ages out.
+    active: state.openKeyedStore<ActiveStoryboardContext>({
+      namespace: CLOUDBATH_STORYBOARD_ACTIVE_NAMESPACE,
+      maxEntries: CLOUDBATH_STORYBOARD_MAX_ENTRIES,
+      overflowPolicy: "evict-oldest",
+      defaultTtlMs: CLOUDBATH_STORYBOARD_ACTIVE_TTL_MS,
+    }),
+    // An unanswered request is a conversation, not a record: it must age out
+    // quickly so a stale question cannot claim a reply the owner meant for
+    // something else, and it must never refuse new rows and wedge the flow.
+    director: state.openKeyedStore<StoryboardDirectorSession>({
+      namespace: CLOUDBATH_STORYBOARD_DIRECTOR_NAMESPACE,
+      maxEntries: CLOUDBATH_STORYBOARD_MAX_ENTRIES,
+      overflowPolicy: "evict-oldest",
+      defaultTtlMs: CLOUDBATH_STORYBOARD_DIRECTOR_TTL_MS,
+    }),
+    // The post-freeze model conversation. Transient like the director's: a
+    // stale step must never claim a reply the owner meant for something else.
+    modelSelection: state.openKeyedStore<StoryboardModelSelectionState>({
+      namespace: STORYBOARD_CONFIRMATION_NAMESPACE,
+      maxEntries: CLOUDBATH_STORYBOARD_MAX_ENTRIES,
+      overflowPolicy: "evict-oldest",
+      defaultTtlMs: STORYBOARD_CONFIRMATION_TTL_MS,
+    }),
+  };
+}
+
 export function createCloudbathStoryboardLineRouter(deps: {
   state: StoryboardStateApi;
   resolver: StoryboardProjectResolver;
@@ -93,17 +140,7 @@ export function createCloudbathStoryboardLineRouter(deps: {
       now,
     }),
     resolver: deps.resolver,
-    // Bounded on purpose. "สร้างวิดีโอ" and bare time-range edits are only
-    // claimed while a storyboard is active, so an active record that never
-    // expired would intercept those phrases forever and leave the owner with
-    // no route back to the existing paid flow. Versions themselves are durable
-    // and unaffected; only the "what am I editing right now" pointer ages out.
-    active: deps.state.openKeyedStore<ActiveStoryboardContext>({
-      namespace: CLOUDBATH_STORYBOARD_ACTIVE_NAMESPACE,
-      maxEntries: CLOUDBATH_STORYBOARD_MAX_ENTRIES,
-      overflowPolicy: "evict-oldest",
-      defaultTtlMs: CLOUDBATH_STORYBOARD_ACTIVE_TTL_MS,
-    }),
+    ...openStoryboardConversationStores(deps.state),
     // A prepared draft is a transient review artifact, not history: it can be
     // re-prepared from the storyboard at any time. Evicting the oldest is
     // therefore correct, and unlike the version chain it must never be able to
@@ -112,23 +149,6 @@ export function createCloudbathStoryboardLineRouter(deps: {
       namespace: CLOUDBATH_STORYBOARD_DRAFT_NAMESPACE,
       maxEntries: CLOUDBATH_STORYBOARD_MAX_ENTRIES,
       overflowPolicy: "evict-oldest",
-    }),
-    // An unanswered request is a conversation, not a record: it must age out
-    // quickly so a stale question cannot claim a reply the owner meant for
-    // something else, and it must never refuse new rows and wedge the flow.
-    director: deps.state.openKeyedStore<StoryboardDirectorSession>({
-      namespace: CLOUDBATH_STORYBOARD_DIRECTOR_NAMESPACE,
-      maxEntries: CLOUDBATH_STORYBOARD_MAX_ENTRIES,
-      overflowPolicy: "evict-oldest",
-      defaultTtlMs: CLOUDBATH_STORYBOARD_DIRECTOR_TTL_MS,
-    }),
-    // The post-freeze model conversation. Transient like the director's: a
-    // stale step must never claim a reply the owner meant for something else.
-    modelSelection: deps.state.openKeyedStore<StoryboardModelSelectionState>({
-      namespace: STORYBOARD_CONFIRMATION_NAMESPACE,
-      maxEntries: CLOUDBATH_STORYBOARD_MAX_ENTRIES,
-      overflowPolicy: "evict-oldest",
-      defaultTtlMs: STORYBOARD_CONFIRMATION_TTL_MS,
     }),
     dedupe: deps.state.openKeyedStore<{ reply: string }>({
       namespace: CLOUDBATH_STORYBOARD_DEDUPE_NAMESPACE,

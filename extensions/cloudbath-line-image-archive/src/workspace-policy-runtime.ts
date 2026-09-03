@@ -1,5 +1,6 @@
 import { createPluginRuntimeStore } from "openclaw/plugin-sdk/runtime-store";
 import type { CharacterAssetViewRuntime } from "./character-view-route.js";
+import type { CloudbathConversationRouter } from "./conversation-router.js";
 import type { LineGroupWorkspacePolicyRegistry } from "./group-workspace-policy.js";
 import type { KeepWatchingPipeline } from "./keep-watching.js";
 import type { ArchivePipeline } from "./pipeline.js";
@@ -30,6 +31,8 @@ export type CloudbathWorkspacePolicyRuntime = {
    * ahead of `previsLineRouter`, which now serves explicit legacy requests.
    */
   storyboardLineRouter?: CloudbathStoryboardLineRouter;
+  /** Referent arbitration; runs ahead of every handler in before_dispatch. */
+  conversationRouter?: CloudbathConversationRouter;
   keepWatchingPipeline?: KeepWatchingPipeline;
   pipeline?: ArchivePipeline;
   activeConfig?: ArchiveConfig;

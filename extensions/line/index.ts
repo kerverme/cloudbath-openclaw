@@ -295,6 +295,15 @@ export default defineBundledChannelEntry({
         const { matchFalStoryboardQuery } = await import("./src/fal-storyboard-seam.js");
         return matchFalStoryboardQuery(await falStoryboardConfig(accountId), requirements, text);
       },
+      readActiveVideoJob: async ({ accountId, conversationId }) => {
+        const { readLineActiveVideoJobSnapshot } = await import("./src/video-job-snapshot.js");
+        return await readLineActiveVideoJobSnapshot({
+          jobStore: videoJobStore,
+          activeJobLockStore: videoActiveJobLockStore,
+          accountId,
+          conversationId,
+        });
+      },
       prepareStoryboardVideoDraft: async (request) => {
         const [{ prepareLineStoryboardVideoDraft }, { resolveLineAccount }, { getRuntimeConfig }] =
           await Promise.all([
