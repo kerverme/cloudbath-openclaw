@@ -272,6 +272,39 @@ export function parseStoryboardIntent(params: {
   if (matched.length > 0 && !range && activeEditMarker(text) && !SCENE_NOUNS.test(text)) {
     return { kind: "natural_edit", request: text };
   }
+  // A second storyboard needs an explicit cast list, OR a self-contained
+  // request: an action plus a dimension the owner actually named.
+  const explicitCasting =
+    casting ||
+    naturalSequence ||
+    (hasAction && (durationSeconds !== undefined || aspectRatio !== undefined));
+  const directorRequest = matched.length > 0 && hasAction && DIRECTOR_REQUEST_MARKER.test(text);
+  const directorOpen = (): StoryboardIntent =>
+    ({
+      kind: "director_open",
+      characterNames: matched,
+      unknownNames: explicitUnknownNames,
+      environment: readStoryboardEnvironment(text),
+      scenePrompt: text,
+    }) as const;
+  // "เอา F99 ทำวิดีโอ เดินอยู่ในสวน ..." asks FOR a video; it does not specify
+  // one. The scene noun alone satisfied `looksLikeScene`, so a request the
+  // owner had pinned nothing down in went straight to project + storyboard
+  // creation: it defaulted a length nobody chose, and against a project frozen
+  // to another cast it died on the cast-lock guard. Naming a video is the ASK,
+  // so unless the owner also pinned the cast or a dimension it belongs to the
+  // director, which asks 15 or 30 first and writes no Notion work until the
+  // answer arrives.
+  //
+  // Deliberately ahead of the revision parse below, and deliberately narrower
+  // than `directorRequest` alone. The production message ends
+  // "มีเสียงบรรยากาศ ไม่มีเสียงพูด", which reads as an audio revision in
+  // isolation — describing the sound of a video you are asking for is not a
+  // rewrite of an existing one. The scene noun is what separates the two:
+  // "เอา F99 ไม่ต้องมีเสียงพูด" names no video and stays a revision.
+  if (directorRequest && !explicitCasting && SCENE_NOUNS.test(text)) {
+    return directorOpen();
+  }
   const looksLikeScene =
     durationSeconds !== undefined ||
     aspectRatio !== undefined ||
@@ -290,14 +323,8 @@ export function parseStoryboardIntent(params: {
     if (revision) {
       return { kind: "revision", revision };
     }
-    if (matched.length > 0 && hasAction && DIRECTOR_REQUEST_MARKER.test(text)) {
-      return {
-        kind: "director_open",
-        characterNames: matched,
-        unknownNames: explicitUnknownNames,
-        environment: readStoryboardEnvironment(text),
-        scenePrompt: text,
-      };
+    if (directorRequest) {
+      return directorOpen();
     }
     return undefined;
   }
@@ -305,12 +332,7 @@ export function parseStoryboardIntent(params: {
     kind: "create",
     characterNames: matched,
     unknownNames,
-    // A second storyboard needs an explicit cast list, OR a self-contained
-    // request: an action plus a dimension the owner actually named.
-    explicitCasting:
-      casting ||
-      naturalSequence ||
-      (hasAction && (durationSeconds !== undefined || aspectRatio !== undefined)),
+    explicitCasting,
     ...(durationSeconds === undefined
       ? allRanges.length > 1
         ? { durationSeconds: Math.max(...allRanges.map((entry) => Number(entry[2]))) }

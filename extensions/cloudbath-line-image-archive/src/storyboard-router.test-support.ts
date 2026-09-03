@@ -8,6 +8,7 @@ import {
 import { CloudbathPrevisService } from "./previs-service.js";
 import { PrevisStore, type PrevisArtifactSink, type PrevisEngine } from "./previs-store.js";
 import type { PrevisProjectHead, PrevisVersion } from "./previs-types.js";
+import type { StoryboardModelSelectionStore } from "./storyboard-confirmation.js";
 import type { StoryboardDirectorSession } from "./storyboard-director.js";
 import { isExplicitPrevisRequest } from "./storyboard-intent.js";
 import {
@@ -123,6 +124,12 @@ export function harness(
     paidDraftRuntime?: StoryboardPaidDraftRuntime | null;
     /** Enables the workspace-scope freeze the LINE confirmation gate reads. */
     draftScopes?: AsyncKeyedStore<FrozenUgcVideoScope>;
+    /**
+     * Enables the post-freeze model conversation. Opt-in like `draftScopes`:
+     * without it `ยืนยัน Storyboard` resolves no store and stays unclaimed,
+     * which is what the suites that never reach model selection assert.
+     */
+    modelSelection?: StoryboardModelSelectionStore;
     ugcCapabilities?: Readonly<Record<UgcCapabilityId, NotionTarget>>;
     planner?: StoryboardLlmPlanner;
   } = {},
@@ -196,6 +203,7 @@ export function harness(
     paidDraftRuntime: options.paidDraftRuntime ?? null,
     ...(options.planner ? { planner: options.planner } : {}),
     ...(options.draftScopes ? { draftScopes: options.draftScopes } : {}),
+    ...(options.modelSelection ? { modelSelection: options.modelSelection } : {}),
     ...(options.ugcCapabilities ? { ugcCapabilities: options.ugcCapabilities } : {}),
     ...(options.logger ? { logger: options.logger } : {}),
   });
