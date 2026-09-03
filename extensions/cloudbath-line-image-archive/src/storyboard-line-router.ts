@@ -444,10 +444,15 @@ export class CloudbathStoryboardLineRouter {
         claim,
         characterNames: intent.characterNames,
         scenePrompt: intent.scenePrompt,
-        // "ใช้ X กับ Y" is the owner casting this scene. If that cast differs
-        // from the active project's frozen one they are starting new work, and
-        // the storyboard flow has no other way to open a project.
-        ...(intent.explicitCasting ? { startNewProjectOnCastChange: true } : {}),
+        // A cast that ADDS someone the active project never froze is new work,
+        // whatever phrasing named it, and the storyboard flow has no other way
+        // to open a project. The workflow owns that judgement: it opens a new
+        // project only when the request names someone new, and a strict subset
+        // still fails loudly on the cast-lock guard. Gating this on
+        // `explicitCasting` meant only "ใช้ X กับ Y" phrasing qualified, so
+        // "เอา F99 ทำวิดีโอ ..." tried to CONTINUE a project frozen to another
+        // cast and died on that guard instead of starting F99's own project.
+        startNewProjectOnCastChange: true,
       });
       const cast = buildCast(resolved.characterLocks, resolved.displayNames);
       const durationSeconds = intent.durationSeconds ?? STORYBOARD_DEFAULT_DURATION_SECONDS;
