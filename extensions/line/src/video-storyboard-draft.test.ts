@@ -22,6 +22,7 @@ const ACCOUNT = "acct-1";
 const GROUP = "C1234567890abcdef";
 const OWNER = "U0987654321";
 const H3 = "minimax/h3/reference-to-video";
+const H3_MAX = "minimax/h3-max/reference-to-video";
 const SEEDANCE_25 = "bytedance/seedance-2.5/reference-to-video";
 const SEEDANCE = "bytedance/seedance-2.0/reference-to-video";
 
@@ -202,11 +203,17 @@ describe("K. no VIDEO code before model, price, auth and compatibility all pass"
   });
 
   it("mints nothing when the chosen endpoint has no declared price", async () => {
+    // The two endpoints fal publishes a price for are disabled, so the ones
+    // that remain need an operator rate and none is configured.
     const h = harness({
       cfg: {
         videoGeneration: {
           maxEstimatedCostUsd: 20,
-          falModels: fullyConfigured().videoGeneration.falModels,
+          falModels: {
+            ...fullyConfigured().videoGeneration.falModels,
+            [H3]: { enabled: false },
+            [SEEDANCE_25]: { enabled: false },
+          },
           falPricing: { models: {} },
         },
       },
@@ -358,11 +365,12 @@ describe("compatible-model listing for the pickers", () => {
         falPricing: { models: { [SEEDANCE]: { usdPerSecond: 0.05 } } },
       },
     };
-    const models = listStoryboardCompatibleModels(request(), cfg);
-    // Seedance 2.5 remains payable on fal's published token price even with no
-    // operator rate; H3 without one drops out.
-    expect(models.map((model) => model.modelId)).not.toContain(H3);
-    expect(models.map((model) => model.modelId)).toContain(SEEDANCE);
+    const models = listStoryboardCompatibleModels(request(), cfg).map((model) => model.modelId);
+    // H3 and Seedance 2.5 carry fal's own published prices, so they stay
+    // payable with no operator rate; H3 Max publishes none and drops out.
+    expect(models).toContain(H3);
+    expect(models).toContain(SEEDANCE);
+    expect(models).not.toContain(H3_MAX);
   });
 });
 

@@ -271,13 +271,13 @@ Endpoints, all reference-to-video (this flow always casts Character Library
 identities, so a text-to-video or first-frame endpoint cannot execute its
 storyboard):
 
-| Endpoint                                                       | Duration | Resolutions | Audio            | Reference field        | Prompt marker |
-| -------------------------------------------------------------- | -------- | ----------- | ---------------- | ---------------------- | ------------- |
-| `minimax/h3/reference-to-video`                                | 5–15s    | 2K          | always on        | `reference_image_urls` | `Image 1`     |
-| `minimax/h3-max/reference-to-video`                            | 5–15s    | 480P, 768P  | always on        | `reference_image_urls` | `Image 1`     |
-| `bytedance/seedance-2.5/reference-to-video`                    | 4–30s    | 480p, 720p  | `generate_audio` | `image_urls`           | `[Image1]`    |
-| `bytedance/seedance-2.0/reference-to-video` (+ `fast`, `mini`) | 4–15s    | up to 4k    | `generate_audio` | `image_urls`           | `@Image1`     |
-| `fal-ai/veo3.1/reference-to-video`                             | 8s       | 720p–4k     | `generate_audio` | `image_urls`           | none          |
+| Endpoint                                                       | Duration | Resolutions      | Audio            | Reference field        | Prompt marker |
+| -------------------------------------------------------------- | -------- | ---------------- | ---------------- | ---------------------- | ------------- |
+| `minimax/h3/reference-to-video`                                | 5–15s    | 768P, **2K**, 4K | always on        | `reference_image_urls` | `Image 1`     |
+| `minimax/h3-max/reference-to-video`                            | 5–15s    | 480P, 768P       | always on        | `reference_image_urls` | `Image 1`     |
+| `bytedance/seedance-2.5/reference-to-video`                    | 4–30s    | 480p, 720p       | `generate_audio` | `image_urls`           | `[Image1]`    |
+| `bytedance/seedance-2.0/reference-to-video` (+ `fast`, `mini`) | 4–15s    | up to 4k         | `generate_audio` | `image_urls`           | `@Image1`     |
+| `fal-ai/veo3.1/reference-to-video`                             | 8s       | 720p–4k          | `generate_audio` | `image_urls`           | none          |
 
 Consequences worth knowing:
 
@@ -296,13 +296,13 @@ Consequences worth knowing:
   synchronized audio on every generation and publish no proven off switch, so
   they can serve a scene that wants sound and are filtered out of one that must
   be silent.
-- **H3 offers one output size, 2K.** Its endpoint documents a single
-  `resolution` and describes itself as generating 2K video. fal's H3 comparison
-  articles list a 480p/768p/2K/4K rate ladder, but a rate table is not an input
-  enum and does not outrank the endpoint's own contract — so only 2K is
-  offered, and the request serializer omits any other value rather than
-  submitting an enum the endpoint never listed. H3 Max's 480P/768P are **its**
-  sizes and are never copied onto H3.
+- **A default is not a ceiling.** H3's `ResolutionEnum` is 768P | 2K | 4K with
+  a documented default of 2K, so a scene asking for a size H3 does not offer
+  resolves to **2K** — the endpoint's own default, never the largest (and
+  dearest) listed size. 480P and 1080P are in neither H3 list, and the request
+  serializer omits an unlisted value rather than submitting an enum the
+  endpoint never published. H3 Max's 480P/768P are **its** sizes and are never
+  copied onto H3.
 
 ### Configuration
 
@@ -315,16 +315,29 @@ the output pixel area, the duration and 24 FPS. That estimate covers the proven
 image-reference case; a shape it cannot prove (reference video or audio inputs)
 falls back to your endpoint rate, and without one the endpoint is not offered.
 
-**MiniMax H3 requires an operator rate.** fal's own current material disagrees
-with itself: the reference-to-video endpoint is quoted at $0.13 per 2K second in
-one place and about $0.26 per generated second in another. A roughly 2x spread
-is not a rounding difference, so no H3 rate is compiled in — declare one with
-your own `source`, or H3 is capability-compatible but never offered. When that
-happens the bot says so rather than switching models quietly:
-`งานนี้ MiniMax H3 Reference-to-Video ทำได้ แต่ยังไม่มีราคาที่ยืนยันได้`.
+**MiniMax H3 needs no operator rate either.** Its own model page publishes a
+per-second rate by output size, plus a reference-image allowance:
 
-`falModels` supplies only what fal's own pages leave open — H3's duration range
-and audio behaviour are read from fal's model page and need no declaration.
+| H3 output | Rate                     |
+| --------- | ------------------------ |
+| 768P      | $0.08 / generated second |
+| 2K        | $0.13 / generated second |
+| 4K        | $0.16 / generated second |
+
+The first 5 reference images are free; each one after adds $0.08. A 15-second
+2K clip with one Character reference quotes **$1.95**, and the same clip with
+six references quotes **$2.03**. Reference **video** and **audio** inputs are
+deliberately not priced: the page publishes rates for output seconds and
+reference images and says nothing about the other two, so that shape falls back
+to your operator rate and is refused without one.
+
+An endpoint whose price is neither published nor declared — H3 Max, for
+instance — is simply not offered, and the bot says why rather than switching
+models quietly:
+`งานนี้ MiniMax H3 Max Reference-to-Video ทำได้ แต่ยังไม่มีราคาที่ยืนยันได้`.
+
+`falModels` supplies only what fal's own pages leave open — H3's duration range,
+resolution enum and audio behaviour all come from fal and need no declaration.
 
 ```jsonc
 {
@@ -333,9 +346,10 @@ and audio behaviour are read from fal's model page and need no declaration.
       "maxEstimatedCostUsd": 5,
       "falPricing": {
         "models": {
-          // H3 produces 2K only, so this rate is a 2K second.
+          // Only needed to OVERRIDE fal's published H3 rate, e.g. a
+          // negotiated price. Omit it and the published rate applies.
           "minimax/h3/reference-to-video": {
-            "usdPerSecond": 0.13,
+            "byResolution": { "768P": 0.08, "2K": 0.13, "4K": 0.16 },
             "source": "https://fal.ai/models/minimax/h3/reference-to-video",
           },
           "bytedance/seedance-2.0/reference-to-video": {

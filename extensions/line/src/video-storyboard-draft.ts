@@ -295,11 +295,13 @@ export async function prepareLineStoryboardVideoDraft(
   // The size this endpoint will really produce, which is what gets quoted,
   // frozen and displayed -- never the requested one when they differ.
   const resolution = resolveFalOutputResolution(model, request.resolution);
+  const referenceImageCount = requirements.identityReferenceCount;
   const price = estimateFalVideoCostUsd({
     cfg: deps.cfg,
     model,
     durationSeconds: request.durationSeconds,
     resolution,
+    referenceImageCount,
   });
   if (price.kind !== "available") {
     return { kind: "rejected", reason: "unknown_cost", model: model.modelId };
@@ -338,6 +340,7 @@ export async function prepareLineStoryboardVideoDraft(
     aspectRatio: request.aspectRatio,
     resolution,
     audio,
+    referenceImageCount,
     estimatedCostUsd: price.amountUsd,
     storyboardId: request.storyboardId,
     ...(request.deliveryTo ? { deliveryTo: request.deliveryTo } : {}),
@@ -392,6 +395,7 @@ export function listStoryboardCompatibleModels(
         model,
         durationSeconds: requirements.durationSeconds,
         resolution: resolveFalOutputResolution(model, requirements.resolution),
+        referenceImageCount: requirements.identityReferenceCount,
       }).kind === "available",
   );
 }

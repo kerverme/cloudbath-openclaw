@@ -2,19 +2,22 @@ import { describe, expect, it } from "vitest";
 import { estimateFalVideoCostUsd, isFalModelPriced } from "./fal-video-pricing.js";
 
 const H3 = { modelId: "minimax/h3/reference-to-video" };
+/** A DIFFERENT endpoint with its own page: never priced from H3's numbers. */
+const H3_MAX = { modelId: "minimax/h3-max/reference-to-video" };
 const SEEDANCE = { modelId: "bytedance/seedance-2.0/reference-to-video" };
 const SEEDANCE_25 = { modelId: "bytedance/seedance-2.5/reference-to-video" };
 
 describe("per-model fal pricing", () => {
   it("reports unavailable when the operator has declared no rate for the endpoint", () => {
+    // H3 Max publishes no price we have read, so it needs an operator rate.
     expect(
-      estimateFalVideoCostUsd({ cfg: {}, model: H3, durationSeconds: 15, resolution: "2K" }),
+      estimateFalVideoCostUsd({ cfg: {}, model: H3_MAX, durationSeconds: 15, resolution: "768P" }),
     ).toEqual({
       kind: "unavailable",
       reason: "fal_model_rate_not_configured",
-      modelId: H3.modelId,
+      modelId: H3_MAX.modelId,
     });
-    expect(isFalModelPriced({}, H3.modelId)).toBe(false);
+    expect(isFalModelPriced({}, H3_MAX.modelId)).toBe(false);
   });
 
   it("does NOT price one endpoint from another endpoint's rate", () => {
@@ -22,10 +25,10 @@ describe("per-model fal pricing", () => {
       videoGeneration: { falPricing: { models: { [SEEDANCE.modelId]: { usdPerSecond: 0.1 } } } },
     };
     expect(isFalModelPriced(cfg, SEEDANCE.modelId)).toBe(true);
-    // A Seedance rate says nothing about H3, so H3 stays unpriced and unpayable.
-    expect(isFalModelPriced(cfg, H3.modelId)).toBe(false);
+    // A Seedance rate says nothing about H3 Max, which stays unpayable.
+    expect(isFalModelPriced(cfg, H3_MAX.modelId)).toBe(false);
     expect(
-      estimateFalVideoCostUsd({ cfg, model: H3, durationSeconds: 15, resolution: "2K" }).kind,
+      estimateFalVideoCostUsd({ cfg, model: H3_MAX, durationSeconds: 15, resolution: "768P" }).kind,
     ).toBe("unavailable");
   });
 
@@ -83,11 +86,12 @@ describe("per-model fal pricing", () => {
   it("never returns a zero or negative quote from a bad rate", () => {
     for (const usdPerSecond of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
       const cfg = {
-        videoGeneration: { falPricing: { models: { [H3.modelId]: { usdPerSecond } } } },
+        videoGeneration: { falPricing: { models: { [H3_MAX.modelId]: { usdPerSecond } } } },
       };
-      expect(isFalModelPriced(cfg, H3.modelId)).toBe(false);
+      expect(isFalModelPriced(cfg, H3_MAX.modelId)).toBe(false);
       expect(
-        estimateFalVideoCostUsd({ cfg, model: H3, durationSeconds: 15, resolution: "2K" }).kind,
+        estimateFalVideoCostUsd({ cfg, model: H3_MAX, durationSeconds: 15, resolution: "768P" })
+          .kind,
       ).toBe("unavailable");
     }
   });
@@ -143,7 +147,7 @@ describe("per-model fal pricing", () => {
     it("is payable with no operator rate, unlike every other endpoint", () => {
       expect(isFalModelPriced({}, SEEDANCE_25.modelId)).toBe(true);
       expect(isFalModelPriced({}, SEEDANCE.modelId)).toBe(false);
-      expect(isFalModelPriced({}, H3.modelId)).toBe(false);
+      expect(isFalModelPriced({}, H3_MAX.modelId)).toBe(false);
     });
 
     it("lets an operator rate for the same endpoint win over the list price", () => {
@@ -182,39 +186,110 @@ describe("per-model fal pricing", () => {
       ).toBe("unavailable");
     });
 
-    it("never lets Seedance 2.5's published price reach H3", () => {
-      expect(
-        estimateFalVideoCostUsd({ cfg: {}, model: H3, durationSeconds: 10, resolution: "2K" }).kind,
-      ).toBe("unavailable");
-    });
-
-    it("C: H3 stays operator-priced while fal's own numbers disagree", () => {
-      // fal quotes H3 reference-to-video at $0.13/2K-second in one place and
-      // ~$0.26/generated-second in another. A 2x spread is not a rounding
-      // difference, so no rate is compiled in: an operator must declare one,
-      // with their own citation, or H3 is not payable at all.
-      expect(isFalModelPriced({}, H3.modelId)).toBe(false);
-
-      const cfg = {
-        videoGeneration: {
-          falPricing: {
-            models: { [H3.modelId]: { usdPerSecond: 0.13, source: "https://fal.ai/pricing" } },
-          },
-        },
-      };
+    it("never lets Seedance 2.5's token formula reach another endpoint", () => {
+      // H3 is priced, but by its OWN per-second rate, not Seedance's tokens.
       const quote = estimateFalVideoCostUsd({
-        cfg,
+        cfg: {},
         model: H3,
-        durationSeconds: 15,
-        // The size the endpoint really produces, which is what gets billed.
+        durationSeconds: 10,
         resolution: "2K",
       });
-      expect(quote.kind).toBe("available");
-      expect(quote.kind === "available" && quote.amountUsd).toBeCloseTo(1.95, 6);
-      expect(quote.kind === "available" && quote.source).toMatchObject({
-        kind: "operator_configured",
-        modelId: H3.modelId,
+      expect(quote.kind === "available" && quote.source.kind).toBe("fal_published_rate");
+    });
+  });
+
+  describe("MiniMax H3 carries fal's own published per-second rate", () => {
+    /** One Character Library reference: the ordinary production shape. */
+    function h3Quote(resolution: string, referenceImageCount = 1) {
+      return estimateFalVideoCostUsd({
+        cfg: {},
+        model: H3,
+        durationSeconds: 15,
+        resolution,
+        referenceImageCount,
       });
+    }
+
+    it.each([
+      ["768P", 1.2],
+      ["2K", 1.95],
+      ["4K", 2.4],
+    ])("H/I/J: prices 15 seconds at %s as $%s", (resolution, expected) => {
+      const quote = h3Quote(resolution);
+      expect(quote.kind).toBe("available");
+      expect(quote.kind === "available" && quote.amountUsd).toBeCloseTo(expected, 6);
+      expect(quote.kind === "available" && quote.source).toMatchObject({
+        kind: "fal_published_rate",
+        modelId: H3.modelId,
+        resolution,
+      });
+    });
+
+    it("K: the first five reference images cost nothing", () => {
+      for (const count of [0, 1, 2, 3, 4, 5]) {
+        const quote = h3Quote("2K", count);
+        expect(quote.kind === "available" && quote.amountUsd, `${count} images`).toBeCloseTo(
+          1.95,
+          6,
+        );
+      }
+    });
+
+    it("L: each reference image past the fifth adds $0.08", () => {
+      expect(h3Quote("2K", 6).kind === "available" && h3Quote("2K", 6).amountUsd).toBeCloseTo(
+        2.03,
+        6,
+      );
+      expect(h3Quote("2K", 9).kind === "available" && h3Quote("2K", 9).amountUsd).toBeCloseTo(
+        1.95 + 4 * 0.08,
+        6,
+      );
+    });
+
+    it("is payable with no operator rate, and an operator rate still wins", () => {
+      expect(isFalModelPriced({}, H3.modelId)).toBe(true);
+      const cfg = {
+        videoGeneration: { falPricing: { models: { [H3.modelId]: { usdPerSecond: 1 } } } },
+      };
+      expect(
+        estimateFalVideoCostUsd({ cfg, model: H3, durationSeconds: 15, resolution: "2K" }),
+      ).toMatchObject({
+        kind: "available",
+        amountUsd: 15,
+        source: { kind: "operator_configured" },
+      });
+    });
+
+    it("fails closed on shapes fal's H3 page does not price", () => {
+      // Reference video/audio: the page publishes output seconds and reference
+      // images, and says nothing about charging for the other two.
+      expect(
+        estimateFalVideoCostUsd({
+          cfg: {},
+          model: H3,
+          durationSeconds: 15,
+          resolution: "2K",
+          referenceImageCount: 1,
+          hasNonImageReferences: true,
+        }).kind,
+      ).toBe("unavailable");
+      // Sizes outside H3's own enum have no published rate.
+      for (const resolution of ["480P", "1080P"]) {
+        expect(h3Quote(resolution).kind, resolution).toBe("unavailable");
+      }
+    });
+
+    it("G: never prices H3 Max from H3's rate", () => {
+      expect(isFalModelPriced({}, H3_MAX.modelId)).toBe(false);
+      expect(
+        estimateFalVideoCostUsd({
+          cfg: {},
+          model: H3_MAX,
+          durationSeconds: 15,
+          resolution: "768P",
+          referenceImageCount: 1,
+        }).kind,
+      ).toBe("unavailable");
     });
   });
 });

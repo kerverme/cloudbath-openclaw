@@ -149,15 +149,18 @@ function referenceReasons(
 /**
  * The output size this endpoint will actually produce for the request.
  *
- * The requested size when the endpoint offers it; otherwise the endpoint's
- * last listed size, which its schema orders from smallest to largest. The
- * result is what the Final Video Draft displays and what the draft freezes, so
- * the owner is quoted and billed for the size that will really be produced.
+ * The requested size when the endpoint offers it; otherwise the endpoint's own
+ * documented default, and only failing that its last listed size. The default
+ * comes first because it is what the endpoint really does when the caller says
+ * nothing, and because the largest size is also the dearest: falling to it
+ * would quote H3 at 4K for a scene its endpoint would have rendered at 2K.
+ * The result is what the Final Video Draft displays, what the draft freezes,
+ * and what the quote is computed from.
  */
 export function resolveFalOutputResolution(model: FalVideoModel, requested: string): string {
   const values = model.resolutions.values;
   const exact = values.find((value) => value.toLowerCase() === requested.trim().toLowerCase());
-  return exact ?? values.at(-1) ?? requested;
+  return exact ?? model.resolutions.defaultValue ?? values.at(-1) ?? requested;
 }
 
 /** Judges one model against the frozen storyboard. Pure; no network call. */

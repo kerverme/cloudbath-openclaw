@@ -144,6 +144,11 @@ function revalidateFalDraft(
     model,
     durationSeconds: draft.durationSeconds,
     resolution: draft.resolution,
+    // Re-quoted from the SAME frozen inputs the owner confirmed, reference
+    // count included, so this check cannot drift from the number they saw.
+    ...(draft.referenceImageCount === undefined
+      ? {}
+      : { referenceImageCount: draft.referenceImageCount }),
   });
   if (price.kind !== "available") {
     return {

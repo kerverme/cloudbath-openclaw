@@ -64,6 +64,7 @@ function pricedCompatibleModels(
         // The size the endpoint will really produce, which is the one that
         // gets quoted, frozen and charged.
         resolution: resolveFalOutputResolution(model, requirements.resolution),
+        referenceImageCount: requirements.identityReferenceCount,
       }).kind === "available",
   );
 }
@@ -163,6 +164,9 @@ export function offerFalStoryboardDefault(
     model: priced,
     durationSeconds: requirements.durationSeconds,
     resolution: outputResolution,
+    // Some endpoints charge past a free reference-image allowance, so the
+    // count is part of the quote, not just of the request.
+    referenceImageCount: requirements.identityReferenceCount,
   });
   const displaced = selection.preferredUnavailable;
   // Two different ways the preferred endpoint can lose, and the owner is owed

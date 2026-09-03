@@ -321,6 +321,10 @@ export async function prepareStoryboardFinalVideoDraftWithOutcome(
           source: paid.pricingSource,
         })
       : estimateStoryboardCost(model);
+  // The size the endpoint will REALLY produce, as the paid side resolved it
+  // against that endpoint's own contract. The scene's requested size is only a
+  // request: displaying it while billing another is the mismatch this avoids.
+  const resolution = paid?.kind === "created" ? paid.resolution : version.document.resolution;
   const confirmation: StoryboardDraftConfirmation =
     paid?.kind === "created"
       ? Object.freeze({ kind: "ready" as const, code: paid.draftId })
@@ -344,7 +348,7 @@ export async function prepareStoryboardFinalVideoDraftWithOutcome(
     characterLocks: version.characterLocks,
     durationSeconds: version.document.durationSeconds,
     aspectRatio: version.document.aspectRatio,
-    resolution: version.document.resolution,
+    resolution,
     model,
     estimatedCost,
     plan,

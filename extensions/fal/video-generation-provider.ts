@@ -63,14 +63,15 @@ const MINIMAX_H3_MAX_AUDIOS = 3;
 const MINIMAX_H3_MAX_FILES = 12;
 const MINIMAX_H3_DURATION_SECONDS = [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15] as const;
 /**
- * Each H3 endpoint's OWN documented `resolution` enum.
+ * Each H3 endpoint's OWN documented `ResolutionEnum`.
  *
- * H3 documents a single "2K"; H3 Max documents 480P/768P. They are separate
- * entries because copying one endpoint's sizes onto the other is exactly the
- * mistake that submits an enum value the endpoint never accepted.
+ * H3 documents 768P | 2K | 4K (default 2K); H3 Max documents 480P | 768P.
+ * They are separate entries because copying one endpoint's sizes onto the
+ * other is exactly the mistake that submits an enum value the endpoint never
+ * accepted — and 480P and 1080P belong to neither list.
  */
 const MINIMAX_H3_RESOLUTIONS: Readonly<Record<string, readonly string[]>> = Object.freeze({
-  "minimax/h3/reference-to-video": Object.freeze(["2K"]),
+  "minimax/h3/reference-to-video": Object.freeze(["768P", "2K", "4K"]),
   "minimax/h3-max/reference-to-video": Object.freeze(["480P", "768P"]),
 });
 const SEEDANCE_2_VIDEO_MODELS = [

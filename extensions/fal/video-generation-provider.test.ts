@@ -239,10 +239,10 @@ describe("fal video generation provider", () => {
       expect(body.generate_audio).toBeUndefined();
     });
 
-    it("B: H3 sends only its own resolution enum, and omits anything else", async () => {
+    it.each(["768P", "2K", "4K"])("C/D/E: H3 sends its own enum value %s", async (resolution) => {
       mockFalProviderRuntime();
       mockCompletedFalVideoJob({
-        requestId: "req-4b",
+        requestId: `req-4b-${resolution}`,
         statusUrl: "https://queue.fal.run/status/req-4b",
         responseUrl: "https://queue.fal.run/response/req-4b",
         videoUrl: "https://v3.fal.media/out.mp4",
@@ -250,17 +250,38 @@ describe("fal video generation provider", () => {
       });
       const provider = buildFalVideoGenerationProvider();
 
-      // 720p is H3 Max's neighbourhood, not H3's. Sending an enum value the
-      // endpoint never listed would be rejected outright, so it is dropped and
-      // the endpoint applies its own documented default instead.
       await provider.generateVideo(
-        referenceRequest({ model: "minimax/h3/reference-to-video", resolution: "720p" }),
+        referenceRequest({ model: "minimax/h3/reference-to-video", resolution }),
       );
 
-      expect(getSubmitBody().resolution).toBeUndefined();
+      expect(getSubmitBody().resolution).toBe(resolution);
     });
 
-    it("D: H3 Max keeps its OWN sizes, which never leak onto H3", async () => {
+    it.each(["480P", "1080P"])(
+      "F: H3 never submits %s, which is not in its enum",
+      async (resolution) => {
+        mockFalProviderRuntime();
+        mockCompletedFalVideoJob({
+          requestId: `req-4c-${resolution}`,
+          statusUrl: "https://queue.fal.run/status/req-4c",
+          responseUrl: "https://queue.fal.run/response/req-4c",
+          videoUrl: "https://v3.fal.media/out.mp4",
+          bytes: "video-bytes",
+        });
+        const provider = buildFalVideoGenerationProvider();
+
+        // 480P is H3 Max's, 1080P is nobody's. Submitting an enum value the
+        // endpoint never listed would be rejected outright, so it is dropped and
+        // the endpoint applies its own documented default (2K) instead.
+        await provider.generateVideo(
+          referenceRequest({ model: "minimax/h3/reference-to-video", resolution }),
+        );
+
+        expect(getSubmitBody().resolution).toBeUndefined();
+      },
+    );
+
+    it("G: H3 Max keeps its OWN sizes, which never leak onto H3", async () => {
       mockFalProviderRuntime();
       mockCompletedFalVideoJob({
         requestId: "req-4c",

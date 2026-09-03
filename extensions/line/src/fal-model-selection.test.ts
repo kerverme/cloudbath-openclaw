@@ -202,18 +202,29 @@ describe("output resolution is resolved, not required", () => {
   });
 
   it("falls to the endpoint's own size when it cannot produce the requested one", () => {
-    // H3's endpoint documents one size, 2K, so any other request resolves to
-    // it — and the Final Video Draft shows the size that will really arrive.
+    // 720p is not in H3's enum, so it resolves to the endpoint's own default
+    // — and the Final Video Draft shows the size that will really arrive.
     expect(resolveFalOutputResolution(resolveFalVideoModel({}, H3)!, "720p")).toBe("2K");
+    // Never the largest listed size, which is also the dearest.
+    expect(resolveFalOutputResolution(resolveFalVideoModel({}, H3)!, "720p")).not.toBe("4K");
   });
 });
 
 describe("each H3 endpoint keeps its own resolution contract", () => {
-  it("A: H3 offers exactly the size its endpoint documents", () => {
-    // 2K, and nothing else. fal's H3 comparison articles list a
-    // 480p/768p/2K/4K rate ladder, but a rate table is not an input enum: the
-    // endpoint contract documents one `resolution`, so only that is offered.
-    expect(resolveFalVideoModel({}, H3)?.resolutions.values).toEqual(["2K"]);
+  it("A/B: H3 offers exactly its endpoint's enum, and defaults to 2K", () => {
+    const h3 = resolveFalVideoModel({}, H3)!;
+    // The endpoint's ResolutionEnum is 768P | 2K | 4K with default 2K. A
+    // DEFAULT IS NOT A CEILING: reading "default: 2K" as "2K only" is what an
+    // earlier revision got wrong, and 480P/1080P are in neither list.
+    expect(h3.resolutions.values).toEqual(["768P", "2K", "4K"]);
+    expect(h3.resolutions.defaultValue).toBe("2K");
+    expect(h3.resolutions.values).not.toContain("480P");
+    expect(h3.resolutions.values).not.toContain("1080P");
+    // An unoffered size falls to the endpoint's documented default, never to
+    // the dearest listed one.
+    expect(resolveFalOutputResolution(h3, "1080p")).toBe("2K");
+    expect(resolveFalOutputResolution(h3, "768P")).toBe("768P");
+    expect(resolveFalOutputResolution(h3, "4K")).toBe("4K");
   });
 
   it("D: H3 Max's sizes never leak onto H3, in either direction", () => {
@@ -221,12 +232,11 @@ describe("each H3 endpoint keeps its own resolution contract", () => {
     const h3Max = resolveFalVideoModel({}, H3_MAX)!.resolutions.values;
 
     expect(h3Max).toEqual(["480P", "768P"]);
-    // Two endpoints, two contracts. Sharing a size list would let a pick of
-    // one bill the other's shape.
-    for (const size of h3Max) {
-      expect(h3).not.toContain(size);
-    }
+    // Two endpoints, two contracts. They overlap at 768P and diverge
+    // everywhere else, so neither list may be substituted for the other.
+    expect(h3).not.toContain("480P");
     expect(h3Max).not.toContain("2K");
+    expect(h3Max).not.toContain("4K");
   });
 
   it("keeps H3's proven duration and aspect enums alongside the narrowed size", () => {

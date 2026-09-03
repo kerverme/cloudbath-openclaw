@@ -62,6 +62,15 @@ export type LineVideoDraft = {
   aspectRatio: string;
   resolution: string;
   audio: boolean;
+  /**
+   * Reference images this draft was quoted with.
+   *
+   * Frozen because some endpoints charge past a free allowance, so the
+   * confirmation gate's re-quote needs the same count the owner was shown.
+   * Absent on drafts minted before any endpoint charged per image, where zero
+   * and undefined price identically.
+   */
+  referenceImageCount?: number;
   estimatedCostUsd: number;
   createdAt: number;
   expiresAt: number;
@@ -116,6 +125,7 @@ export async function createLineVideoDraft(params: {
   aspectRatio: string;
   resolution: string;
   audio: boolean;
+  referenceImageCount?: number;
   estimatedCostUsd: number;
   deliveryTo?: string;
   storyboardId?: string;
@@ -140,6 +150,9 @@ export async function createLineVideoDraft(params: {
     aspectRatio: params.aspectRatio,
     resolution: params.resolution,
     audio: params.audio,
+    ...(params.referenceImageCount === undefined
+      ? {}
+      : { referenceImageCount: params.referenceImageCount }),
     estimatedCostUsd: params.estimatedCostUsd,
     createdAt: now,
     expiresAt: now + LINE_VIDEO_DRAFT_TTL_MS,

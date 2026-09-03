@@ -20,11 +20,13 @@ export const STORYBOARD_ASPECT_RATIOS = ["16:9", "9:16", "1:1", "4:3", "2.39:1"]
 export type StoryboardAspectRatio = (typeof STORYBOARD_ASPECT_RATIOS)[number];
 
 /**
- * Target output resolutions a request may name.
+ * Target output resolutions a REQUEST may name.
  *
- * "2K" is here because a provider endpoint requires it: MiniMax H3's
- * reference-to-video documents 2K as its only output size, so without this the
- * storyboard vocabulary could not describe a scene that endpoint can execute.
+ * "2K" and "4K" are here because provider endpoints offer them: MiniMax H3's
+ * reference-to-video enumerates 768P/2K/4K, so without them the storyboard
+ * vocabulary could not describe a scene that endpoint can execute. What the
+ * endpoint actually produces is a separate, provider-owned value — see the
+ * Final Video Draft's own `resolution`.
  */
 export const STORYBOARD_RESOLUTIONS = ["480p", "720p", "1080p", "2K", "4K"] as const;
 export type StoryboardResolution = (typeof STORYBOARD_RESOLUTIONS)[number];
@@ -262,7 +264,17 @@ export type StoryboardFinalVideoDraft = Readonly<{
   characterLocks: readonly UgcCharacterLock[];
   durationSeconds: number;
   aspectRatio: StoryboardAspectRatio;
-  resolution: StoryboardResolution;
+  /**
+   * The size the chosen endpoint will REALLY produce, in that endpoint's own
+   * spelling ("2K", "768P", "720p").
+   *
+   * Deliberately not `StoryboardResolution`: this is a provider answer, not
+   * the owner's request, and the two differ whenever the endpoint cannot
+   * produce what was asked for. It is what the draft displays and what the
+   * quote was computed from, so it must not be re-narrowed to the request
+   * vocabulary.
+   */
+  resolution: string;
   model: StoryboardVideoModelSelection;
   estimatedCost: StoryboardCostEstimate;
   plan: StoryboardVideoPlan;

@@ -14,14 +14,11 @@
  * price is simply not payable, which is the same fail-closed exit the cost
  * guard already takes on an unknown estimate.
  *
- * MiniMax H3 stays operator-priced ON PURPOSE. fal's own current material
- * disagrees with itself about it: the reference-to-video endpoint is quoted at
- * $0.13 per 2K second in one place and ~$0.26 per generated second in another,
- * and a third lists a 480p/768p/2K/4K rate ladder the endpoint's own input
- * contract does not offer. A ~2x spread is not a rounding difference, and
- * hardcoding either number would bill the owner a figure we cannot stand
- * behind. Until ONE current H3 endpoint page settles it, an H3 quote requires
- * an operator rate with its own citation, and without one H3 is not offered.
+ * Two endpoints carry fal's OWN published price and need no operator rate:
+ * Seedance 2.5 (token-priced) and MiniMax H3 (per-second by output size, plus
+ * a per-reference-image surcharge). Both are taken from that endpoint's own
+ * current fal model page, and both fail closed on a request shape their
+ * published formula does not cover rather than extrapolating.
  */
 import type { FalVideoModel } from "./fal-video-registry.js";
 
@@ -47,7 +44,7 @@ const SEEDANCE_2_5_PIXELS: Readonly<Record<string, number>> = Object.freeze({
 
 /** Where a quote's rate came from. Carried into the draft, never inferred. */
 export type FalVideoPricingSource = Readonly<{
-  kind: "operator_configured" | "fal_published_tokens";
+  kind: "operator_configured" | "fal_published_tokens" | "fal_published_rate";
   /** The endpoint the rate was declared for. */
   modelId: string;
   /** Resolution the rate applies to, when the operator priced them apart. */
@@ -86,6 +83,55 @@ export function estimateSeedance25TokenCostUsd(params: {
   return (tokens / 1000) * SEEDANCE_2_5_USD_PER_1K_TOKENS;
 }
 
+/**
+ * MiniMax H3 reference-to-video, priced from fal's current model page for that
+ * exact endpoint: $0.08 per 768P second, $0.13 per 2K second, $0.16 per 4K
+ * second, with the first 5 reference images free and $0.08 for each one after.
+ *
+ * Scoped to `minimax/h3/reference-to-video` alone. H3 Max is a DIFFERENT
+ * endpoint with its own page, so it is not priced from here — inferring one
+ * endpoint's rate from a sibling is the mistake this whole module exists to
+ * prevent.
+ */
+const MINIMAX_H3_MODEL_ID = "minimax/h3/reference-to-video";
+const MINIMAX_H3_USD_PER_SECOND: Readonly<Record<string, number>> = Object.freeze({
+  "768P": 0.08,
+  "2K": 0.13,
+  "4K": 0.16,
+});
+const MINIMAX_H3_FREE_REFERENCE_IMAGES = 5;
+const MINIMAX_H3_USD_PER_EXTRA_REFERENCE_IMAGE = 0.08;
+
+/**
+ * fal's published H3 price for a request its page actually covers.
+ *
+ * Reference VIDEO and AUDIO inputs are deliberately not priced: the endpoint
+ * page publishes a rate for output seconds and for reference images, and says
+ * nothing about charging for the other two. Inventing a charge, or assuming
+ * none, would both be guesses about someone's bill, so that shape returns
+ * undefined and the operator rate (or a refusal) takes over.
+ */
+export function estimateMiniMaxH3CostUsd(params: {
+  modelId: string;
+  durationSeconds: number;
+  resolution: string;
+  referenceImageCount?: number;
+  hasNonImageReferences?: boolean;
+}): number | undefined {
+  if (params.modelId !== MINIMAX_H3_MODEL_ID || params.hasNonImageReferences) {
+    return undefined;
+  }
+  const perSecond = MINIMAX_H3_USD_PER_SECOND[params.resolution.trim().toUpperCase()];
+  if (!perSecond || !Number.isFinite(params.durationSeconds) || params.durationSeconds <= 0) {
+    return undefined;
+  }
+  const images = Math.max(0, Math.trunc(params.referenceImageCount ?? 0));
+  const billableImages = Math.max(0, images - MINIMAX_H3_FREE_REFERENCE_IMAGES);
+  return (
+    perSecond * params.durationSeconds + billableImages * MINIMAX_H3_USD_PER_EXTRA_REFERENCE_IMAGE
+  );
+}
+
 export type FalVideoPricingConfig = {
   videoGeneration?: {
     falPricing?: {
@@ -113,9 +159,9 @@ function positiveRate(value: unknown): number | undefined {
 
 /** True when this endpoint has a usable declared rate. Gates payability. */
 export function isFalModelPriced(cfg: FalVideoPricingConfig, modelId: string): boolean {
-  // Seedance 2.5 carries fal's own published token price, so it is payable
-  // without an operator rate. Every other endpoint still needs one.
-  if (modelId === SEEDANCE_2_5_MODEL_ID) {
+  // These two carry fal's own published price for their exact endpoint, so
+  // they are payable without an operator rate. Every other endpoint needs one.
+  if (modelId === SEEDANCE_2_5_MODEL_ID || modelId === MINIMAX_H3_MODEL_ID) {
     return true;
   }
   const declared = cfg.videoGeneration?.falPricing?.models?.[modelId];
@@ -141,6 +187,8 @@ export function estimateFalVideoCostUsd(params: {
   model: Pick<FalVideoModel, "modelId">;
   durationSeconds: number;
   resolution: string;
+  /** Reference IMAGES on the request; some endpoints charge past a free allowance. */
+  referenceImageCount?: number;
   /** True when the request carries reference video/audio, a shape the published formula does not cover. */
   hasNonImageReferences?: boolean;
 }): FalVideoPriceEstimate {
@@ -157,21 +205,33 @@ export function estimateFalVideoCostUsd(params: {
   // An operator rate for THIS endpoint wins: it is a statement about the
   // account's own billing, which fal's list price cannot override.
   if (!declared) {
-    const published = estimateSeedance25TokenCostUsd({
+    const nonImage =
+      params.hasNonImageReferences === undefined
+        ? {}
+        : { hasNonImageReferences: params.hasNonImageReferences };
+    const tokens = estimateSeedance25TokenCostUsd({
       modelId,
       durationSeconds: params.durationSeconds,
       resolution: params.resolution,
-      ...(params.hasNonImageReferences === undefined
-        ? {}
-        : { hasNonImageReferences: params.hasNonImageReferences }),
+      ...nonImage,
     });
+    const perSecond = estimateMiniMaxH3CostUsd({
+      modelId,
+      durationSeconds: params.durationSeconds,
+      resolution: params.resolution,
+      ...(params.referenceImageCount === undefined
+        ? {}
+        : { referenceImageCount: params.referenceImageCount }),
+      ...nonImage,
+    });
+    const published = tokens ?? perSecond;
     return published === undefined
       ? unavailable
       : Object.freeze({
           kind: "available",
           amountUsd: published,
           source: Object.freeze({
-            kind: "fal_published_tokens",
+            kind: tokens === undefined ? "fal_published_rate" : "fal_published_tokens",
             modelId,
             resolution: params.resolution,
           }),

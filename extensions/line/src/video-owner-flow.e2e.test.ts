@@ -115,15 +115,12 @@ const DIALOGUE_TEXT_QUESTION = "ให้พูดว่าอะไร?";
 /**
  * One fal configuration, shared by allocation and the confirmation gate.
  *
- * Seedance 2.5 needs no operator rate: fal publishes a token price for it.
- * H3 does, and its 5-15s range and native audio come from fal's product
- * documentation rather than a declaration.
+ * Deliberately declares NO rates: H3 and Seedance 2.5 both carry fal's own
+ * published price for their exact endpoint, so this is the shape a real
+ * operator ships with, and the quotes below are the ones production computes.
  */
 function falVideoGeneration() {
-  return {
-    maxEstimatedCostUsd: 50,
-    falPricing: { models: { [H3_MODEL]: { usdPerSecond: 0.1 } } },
-  };
+  return { maxEstimatedCostUsd: 50 };
 }
 
 function mem<T>(): PluginStateKeyedStore<T> {
@@ -390,7 +387,7 @@ describe("A-D. the owner conversation before any money", () => {
 });
 
 describe("E-J. model selection and the Final Video Draft", () => {
-  it("E/J: a 15-second scene defaults to MiniMax H3 and names the real endpoint", async () => {
+  it("M: a 15-second scene defaults to H3 at 2K, quoted from fal's own price", async () => {
     const flow = buildFlow();
     const { draftText, code } = await driveToDraft(flow, "1");
 
@@ -398,12 +395,20 @@ describe("E-J. model selection and the Final Video Draft", () => {
     // The ACTUAL fal endpoint that will receive the paid request.
     expect(draftText).toContain("fal.ai");
     expect(draftText).toContain(H3_MODEL);
-    expect(draftText).toMatch(/ราคาโดยประมาณ: ~\$\d/u);
+    // The endpoint's documented default size, and its published rate:
+    // 15s x $0.13 at 2K, one Character reference inside the free five.
+    expect(draftText).toContain("2K");
+    expect(draftText).toContain("~$1.95");
     const stored = await flow.draftStore.lookup(code);
-    expect(stored?.providerRoute).toEqual({ provider: "fal", modelId: H3_MODEL });
+    expect(stored).toMatchObject({
+      providerRoute: { provider: "fal", modelId: H3_MODEL },
+      resolution: "2K",
+      durationSeconds: 15,
+    });
+    expect(stored?.estimatedCostUsd).toBeCloseTo(1.95, 6);
   });
 
-  it("F: a 30-second scene defaults to Seedance 2.5 and explains why, not 'none'", async () => {
+  it("N: a 30-second scene defaults to Seedance 2.5 and explains why, not 'none'", async () => {
     const flow = buildFlow();
     // With sound wanted, H3 clears every requirement except the length, so the
     // displacement this asserts is about duration and nothing else.
@@ -425,7 +430,7 @@ describe("E-J. model selection and the Final Video Draft", () => {
     });
   });
 
-  it("a silent scene never defaults to an endpoint that always makes sound", async () => {
+  it("O: a silent scene never defaults to an endpoint that always makes sound", async () => {
     const flow = buildFlow();
     // fal publishes no proven "generate_audio: false" for H3, so an owner who
     // asked for no sound must not be handed one. Seedance 2.5 can turn it off.
