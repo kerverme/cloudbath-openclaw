@@ -125,6 +125,17 @@ const CATALOG_ROWS = [
     generate_audio: true,
     pricing_skus: { "per-video-second": "0.2312" },
   },
+  {
+    id: "minimax/hailuo-h3",
+    name: "MiniMax: Hailuo H3",
+    supported_durations: [6, 10, 15],
+    supported_aspect_ratios: ["16:9", "9:16"],
+    supported_resolutions: ["720p"],
+    supported_sizes: ["1280x720", "720x1280"],
+    supported_frame_images: [],
+    generate_audio: false,
+    pricing_skus: { "per-video-second": "0.1000" },
+  },
 ];
 
 /** Serves the catalog fixture as an OpenRouter HTTP response. */
@@ -180,7 +191,14 @@ function notionLibraryStub() {
 }
 
 /** Wires both plugins together the way the two plugin entrypoints do. */
-function harness(options: { maxEstimatedCostUsd?: number; draftCodes?: readonly number[] } = {}) {
+function harness(
+  options: {
+    maxEstimatedCostUsd?: number;
+    draftCodes?: readonly number[];
+    /** The conversation's chosen video model, as the picker would have saved it. */
+    preferredModel?: string;
+  } = {},
+) {
   // Deterministic codes so a supersede assertion can name the exact code that
   // died, rather than matching whatever the allocator happened to pick.
   const codes = [...(options.draftCodes ?? [])];
@@ -208,6 +226,13 @@ function harness(options: { maxEstimatedCostUsd?: number; draftCodes?: readonly 
     prepareStoryboardVideoDraft: async (request: never) =>
       await prepareLineStoryboardVideoDraft(request, {
         draftStore: draftStore as never,
+        ...(options.preferredModel
+          ? {
+              preferenceStore: {
+                lookup: async () => ({ model: options.preferredModel, updatedAt: NOW }),
+              } as never,
+            }
+          : {}),
         resolveApiKey: async () => "sk-test",
         cfg: {
           videoGeneration: { maxEstimatedCostUsd: options.maxEstimatedCostUsd ?? 5 },
@@ -636,5 +661,53 @@ describe("superseded VIDEO codes", () => {
     await h.drainBackground();
     expect(generateVideoMock).toHaveBeenCalledTimes(1);
     expect(generateVideoMock.mock.calls[0]![0].durationSeconds).toBe(15);
+  });
+});
+
+describe("storyboard drafts bind the conversation's selected video model", () => {
+  it("F: a selected model is what the Final Video Draft quotes, not the default", async () => {
+    const h = harness({ preferredModel: "minimax/hailuo-h3" });
+    await h.storyboard(CREATE_MESSAGE, "m1");
+
+    const drafted = await h.storyboard("สร้างวิดีโอ", "m2");
+
+    const code = /ยืนยัน VIDEO (\d{4})/u.exec(drafted?.text ?? "")?.[1];
+    expect(code).toMatch(/^\d{4}$/u);
+    const stored = await h.draftStore.lookup(code!);
+    // The real allocator wrote the SELECTED model, and priced it at that
+    // model's live rate rather than the default's.
+    expect(stored).toMatchObject({ model: "minimax/hailuo-h3", status: "pending" });
+    expect((stored as unknown as { estimatedCostUsd: number }).estimatedCostUsd).toBeCloseTo(
+      1.5,
+      3,
+    );
+    expect(generateVideoMock).not.toHaveBeenCalled();
+  });
+
+  it("falls back to the default model when no preference has been selected", async () => {
+    const h = harness();
+    await h.storyboard(CREATE_MESSAGE, "m1");
+
+    const drafted = await h.storyboard("สร้างวิดีโอ", "m2");
+
+    const code = /ยืนยัน VIDEO (\d{4})/u.exec(drafted?.text ?? "")![1]!;
+    expect(await h.draftStore.lookup(code)).toMatchObject({ model: "bytedance/seedance-2.5" });
+  });
+
+  it("M/N: the exact confirmation still submits the selected model exactly once", async () => {
+    const h = harness({ preferredModel: "minimax/hailuo-h3" });
+    await h.storyboard(CREATE_MESSAGE, "m1");
+    const drafted = await h.storyboard("สร้างวิดีโอ", "m2");
+    const code = /ยืนยัน VIDEO (\d{4})/u.exec(drafted?.text ?? "")![1]!;
+
+    await h.confirm(`ยืนยัน VIDEO ${code}`);
+    await h.drainBackground();
+
+    expect(generateVideoMock).toHaveBeenCalledTimes(1);
+    expect(generateVideoMock.mock.calls[0]![0].modelOverride).toBe("openrouter/minimax/hailuo-h3");
+    // Replay is still refused by the unchanged exactly-once consume.
+    await h.confirm(`ยืนยัน VIDEO ${code}`);
+    await h.drainBackground();
+    expect(generateVideoMock).toHaveBeenCalledTimes(1);
   });
 });

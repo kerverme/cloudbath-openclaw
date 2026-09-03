@@ -260,3 +260,91 @@ describe("natural draft revision", () => {
     expect(paid.calls.length).toBeGreaterThan(0);
   });
 });
+
+/**
+ * The seam the LINE model picker calls. Nothing here mints or retires a code:
+ * allocation and supersede both belong to the LINE allocator, which the stub
+ * below stands in for.
+ */
+describe("requoteActiveStoryboardDraft seam", () => {
+  const NATURAL = "เอา Twong ไปเดินในสวน";
+  const CLAIM = {
+    accountId: "acct-1",
+    conversationId: "C1234567890abcdef",
+    ownerSenderId: "U0987654321",
+  };
+
+  async function withActiveStoryboard(paid: StoryboardPaidDraftRuntime) {
+    const h = harness({ paidDraftRuntime: paid });
+    await h.dispatch(NATURAL);
+    await h.dispatch("10 วิ");
+    await h.dispatch("ไม่มี");
+    return h;
+  }
+
+  it("G: re-quotes the SAME storyboard and returns the new code", async () => {
+    const paid = stubPaidRuntime();
+    const h = await withActiveStoryboard(paid);
+    const before = await h.latest();
+
+    const result = await h.storyboardRouter.requoteActiveDraft(CLAIM);
+
+    expect(result.kind).toBe("created");
+    // Same storyboard, re-prepared — not new work.
+    expect(result.kind === "created" && result.draft.storyboardId).toBe(before.storyboardId);
+    expect(paid.calls.length).toBeGreaterThan(1);
+  });
+
+  it("passes the owner's answer through as an override", async () => {
+    const paid = stubPaidRuntime();
+    const h = await withActiveStoryboard(paid);
+
+    await h.storyboardRouter.requoteActiveDraft({ ...CLAIM, overrides: { durationSeconds: 6 } });
+
+    expect(paid.calls.at(-1)?.durationSeconds).toBe(6);
+  });
+
+  it("O: reports no active storyboard instead of creating one", async () => {
+    const h = harness({ paidDraftRuntime: stubPaidRuntime() });
+
+    expect((await h.storyboardRouter.requoteActiveDraft(CLAIM)).kind).toBe("no_active_storyboard");
+  });
+
+  it("N: another owner or group never re-quotes this storyboard", async () => {
+    const h = await withActiveStoryboard(stubPaidRuntime());
+
+    const otherOwner = await h.storyboardRouter.requoteActiveDraft({
+      ...CLAIM,
+      ownerSenderId: "U-someone-else",
+    });
+    const otherGroup = await h.storyboardRouter.requoteActiveDraft({
+      ...CLAIM,
+      conversationId: "C0000000000000000",
+    });
+
+    expect(otherOwner.kind).toBe("no_active_storyboard");
+    expect(otherGroup.kind).toBe("no_active_storyboard");
+  });
+
+  it("surfaces a capability refusal rather than quoting something unsupported", async () => {
+    const refusing: StoryboardPaidDraftRuntime = {
+      prepareStoryboardVideoDraft: async () => ({
+        kind: "rejected",
+        reason: "unsupported_duration",
+        requested: 15,
+        supported: [6, 10],
+      }),
+    };
+    const h = harness({ paidDraftRuntime: refusing });
+    await h.dispatch(NATURAL);
+    await h.dispatch("10 วิ");
+    await h.dispatch("ไม่มี");
+
+    const result = await h.storyboardRouter.requoteActiveDraft(CLAIM);
+
+    expect(result).toMatchObject({
+      kind: "incompatible",
+      incompatibility: { kind: "duration", requested: "15", supported: ["6", "10"] },
+    });
+  });
+});

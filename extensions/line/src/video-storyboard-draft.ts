@@ -32,6 +32,8 @@ import { loadOpenRouterVideoModels, type OpenRouterVideoModel } from "./video-mo
 import {
   buildLineVideoConversationKey,
   DEFAULT_LINE_VIDEO_MODEL,
+  resolveLineVideoModelPreference,
+  type LineVideoModelPreferenceStore,
 } from "./video-model-preference.js";
 
 /**
@@ -151,6 +153,13 @@ export type PrepareLineStoryboardVideoDraftDeps = Readonly<{
   randomDraftCode?: () => number;
   /** Test seam only: substitutes the live catalog fetch. */
   loadModels?: (params: { apiKey: string }) => Promise<OpenRouterVideoModel[]>;
+  /**
+   * The conversation's video-model preference, read at quote time.
+   *
+   * Absent, the draft binds the default model, which is the pre-preference
+   * behaviour; the plugin always supplies it in production.
+   */
+  preferenceStore?: LineVideoModelPreferenceStore;
 }>;
 
 /**
@@ -201,9 +210,19 @@ export async function prepareLineStoryboardVideoDraft(
     return { kind: "rejected", reason: "invalid_conversation" };
   }
 
-  const model = models.find((entry) => entry.id === LINE_STORYBOARD_VIDEO_MODEL_ID);
+  // The conversation's chosen video model, not a hardcoded one. Seedance stays
+  // the DEFAULT that `resolveLineVideoModelPreference` falls back to when the
+  // owner has never picked, so an unset conversation behaves exactly as before.
+  const modelId = deps.preferenceStore
+    ? await resolveLineVideoModelPreference({
+        store: deps.preferenceStore,
+        key: conversationKey,
+      })
+    : LINE_STORYBOARD_VIDEO_MODEL_ID;
+
+  const model = models.find((entry) => entry.id === modelId);
   if (!model) {
-    return { kind: "rejected", reason: "model_unavailable", model: LINE_STORYBOARD_VIDEO_MODEL_ID };
+    return { kind: "rejected", reason: "model_unavailable", model: modelId };
   }
 
   if (

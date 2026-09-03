@@ -25,6 +25,21 @@ import {
   setLineVideoModelPreference,
   type LineVideoModelPreferenceStore,
 } from "./video-model-preference.js";
+import {
+  formatIncompatibilityQuestion,
+  formatRequotedDraft,
+  parseRequoteAnswer,
+  requotePendingKey,
+  type LinePendingRequoteStore,
+  type LineRequoteOverrides,
+  type LineRequoteResult,
+  LINE_VIDEO_REQUOTE_PENDING_TTL_MS,
+} from "./video-model-requote.js";
+import {
+  formatVideoModelCapabilities,
+  searchVideoModels,
+  type RankedVideoModel,
+} from "./video-model-search.js";
 
 export const LINE_VIDEO_MODEL_SELECTION_NAMESPACE = "video-model-selection-v1";
 export const LINE_VIDEO_MODEL_SELECTION_TTL_MS = 10 * 60 * 1000;
@@ -34,7 +49,7 @@ export type LinePendingVideoModelSelection = {
   version: 1;
   scopeKey: string;
   query: string;
-  candidates: Array<{ id: string; name: string }>;
+  candidates: Array<{ id: string; name: string; capabilities?: string }>;
   createdAt: number;
 };
 
@@ -162,18 +177,44 @@ function normalizeSearchText(value: string): string {
     .replace(/\s+/gu, " ");
 }
 
-function isExactMatch(model: OpenRouterVideoModel, normalizedQuery: string): boolean {
-  if (!normalizedQuery) {
-    return false;
-  }
-  const slug = model.id.slice(model.id.indexOf("/") + 1);
-  return [model.id, slug, model.name].some(
-    (value) => normalizeSearchText(value) === normalizedQuery,
-  );
+/** One candidate per line; the capability summary is indented under its name. */
+function formatCandidateList(candidates: Array<{ name: string; capabilities?: string }>): string {
+  return candidates
+    .map((entry, index) =>
+      entry.capabilities
+        ? `${index + 1}. ${entry.name}\n   ${entry.capabilities}`
+        : `${index + 1}. ${entry.name}`,
+    )
+    .join("\n");
 }
 
-function formatCandidateList(candidates: Array<{ name: string }>): string {
-  return candidates.map((entry, index) => `${index + 1}. ${entry.name}`).join("\n");
+/**
+ * A failure while refining leaves the picker open and the turn unclaimed: the
+ * owner was answering a question, not issuing a video-model command, so an
+ * error reply here would swallow ordinary chat.
+ */
+function refinementAware(
+  isRefinement: boolean,
+  result: LineBeforeDispatchResult,
+): LineBeforeDispatchResult | undefined {
+  return isRefinement ? undefined : result;
+}
+
+/**
+ * The exact paid confirmation, mirrored here only to REFUSE it.
+ *
+ * A pending picker or capability question must never swallow "ยืนยัน VIDEO
+ * ####": that turn belongs to the confirmation gate and nothing else.
+ */
+const PAID_CONFIRMATION_PATTERN = /^ยืนยัน\s+VIDEO\s+\d{4}$/iu;
+
+function toCandidate(entry: RankedVideoModel): { id: string; name: string; capabilities?: string } {
+  const capabilities = formatVideoModelCapabilities(entry.model);
+  return {
+    id: entry.model.id,
+    name: entry.model.name,
+    ...(capabilities ? { capabilities } : {}),
+  };
 }
 
 type FetchLike = typeof fetch;
@@ -187,6 +228,21 @@ type FetchLike = typeof fetch;
 export function createLineVideoModelControlRouter(params: {
   preferenceStore: LineVideoModelPreferenceStore;
   pendingStore: LinePendingVideoModelSelectionStore;
+  /**
+   * Holds the ONE open capability question while the owner answers it. Absent,
+   * a model change simply never re-quotes, which is the pre-seam behaviour.
+   */
+  requotePendingStore?: LinePendingRequoteStore;
+  /**
+   * The archive seam. Absent (or with no storyboard flow installed) a model
+   * change is a preference change only.
+   */
+  requoteActiveDraft?: (request: {
+    accountId: string;
+    conversationId: string;
+    ownerSenderId: string;
+    overrides?: LineRequoteOverrides;
+  }) => Promise<LineRequoteResult>;
   resolveApiKey?: () => Promise<string | undefined>;
   fetchImpl?: FetchLike;
   now?: () => number;
@@ -207,8 +263,14 @@ export function createLineVideoModelControlRouter(params: {
       return undefined;
     }
 
-    const intent = classifyLineVideoModelControlIntent(event.body ?? event.content ?? "");
-    if (intent.kind === "none") {
+    const rawText = (event.body ?? event.content ?? "").trim();
+    const intent = classifyLineVideoModelControlIntent(rawText);
+    // "none" is not necessarily the end: while THIS conversation has a picker
+    // open, untriggered wording ("MiniMax: H3") is a refinement of the question
+    // the bot just asked. The pending lookup below is what scopes that, so with
+    // no picker open the message still falls through to ordinary chat.
+    const mayRefine = intent.kind === "none";
+    if (mayRefine && !rawText) {
       return undefined;
     }
 
@@ -225,6 +287,101 @@ export function createLineVideoModelControlRouter(params: {
       return undefined;
     }
     const pendingKey = resolvePendingKey(scopeKey);
+    const requoteKey = requotePendingKey(scopeKey);
+
+    /**
+     * Saves the chosen model, then tries to re-quote the active storyboard.
+     *
+     * Order matters: the preference is persisted FIRST, so it holds even when
+     * there is nothing to re-quote or the re-quote is refused. Nothing here
+     * retires the previous code — only a successfully allocated replacement
+     * does, inside the allocator.
+     */
+    const applySelectedModel = async (
+      selected: { id: string; name: string },
+      overrides?: LineRequoteOverrides,
+    ): Promise<string> => {
+      await setLineVideoModelPreference({
+        store: params.preferenceStore,
+        key: scopeKey,
+        model: selected.id,
+        now,
+      });
+      await params.pendingStore.delete(pendingKey);
+      const changed = `เปลี่ยน Video Model เป็น ${selected.name} แล้ว`;
+      if (!params.requoteActiveDraft) {
+        return changed;
+      }
+      const result = await params
+        .requoteActiveDraft({
+          accountId,
+          conversationId,
+          ownerSenderId: event.senderId?.trim() ?? "",
+          ...(overrides ? { overrides } : {}),
+        })
+        .catch((): LineRequoteResult => ({ kind: "unavailable", reason: "seam_unavailable" }));
+
+      if (result.kind === "created") {
+        await params.requotePendingStore?.delete(requoteKey);
+        return `${changed}\n\n${formatRequotedDraft({
+          modelName: selected.name,
+          result,
+          overrides: overrides ?? {},
+        })}`;
+      }
+      if (result.kind === "incompatible") {
+        // The previous code stays valid: nothing was allocated and nothing was
+        // superseded. Only the one unusable field is put to the owner.
+        await params.requotePendingStore?.register(requoteKey, {
+          version: 1,
+          modelId: selected.id,
+          modelName: selected.name,
+          field: result.incompatibility.kind,
+          supported: result.incompatibility.supported,
+          overrides: overrides ?? {},
+          createdAt: now(),
+        });
+        return `${changed}\n\n${formatIncompatibilityQuestion({
+          modelName: selected.name,
+          incompatibility: result.incompatibility,
+        })}`;
+      }
+      if (result.kind === "no_active_storyboard") {
+        return changed;
+      }
+      return `${changed}\n(ยังคำนวณราคาสำหรับ Storyboard ปัจจุบันไม่ได้ รหัส VIDEO เดิมยังใช้ได้อยู่)`;
+    };
+
+    // An open capability question is the most recent thing asked, so it is
+    // answered before the picker. The exact paid confirmation is never taken.
+    const requotePending = PAID_CONFIRMATION_PATTERN.test(rawText)
+      ? undefined
+      : await params.requotePendingStore?.lookup(requoteKey);
+    if (requotePending) {
+      if (requotePending.createdAt + LINE_VIDEO_REQUOTE_PENDING_TTL_MS <= now()) {
+        await params.requotePendingStore?.delete(requoteKey);
+      } else {
+        const answer = parseRequoteAnswer({
+          field: requotePending.field,
+          supported: requotePending.supported,
+          text: rawText,
+        });
+        if (answer) {
+          return {
+            handled: true,
+            text: await applySelectedModel(
+              { id: requotePending.modelId, name: requotePending.modelName },
+              { ...requotePending.overrides, ...answer },
+            ),
+          };
+        }
+        // Not an answer: leave the question open and let the turn fall through
+        // to ordinary chat rather than swallowing it.
+        if (intent.kind === "none") {
+          return undefined;
+        }
+      }
+    }
 
     if (intent.kind === "status") {
       // Read-only: never mutates the preference store, never touches
@@ -269,71 +426,93 @@ export function createLineVideoModelControlRouter(params: {
           text: `หมายเลขนี้ไม่อยู่ในตัวเลือก:\n${formatCandidateList(pending.candidates)}\nต้องการใช้รุ่นไหน?`,
         };
       }
-      await setLineVideoModelPreference({
-        store: params.preferenceStore,
-        key: scopeKey,
-        model: selected.id,
-        now,
-      });
-      await params.pendingStore.delete(pendingKey);
-      return { handled: true, text: `เปลี่ยน video model เป็น ${selected.name} แล้ว` };
+      return { handled: true, text: await applySelectedModel(selected) };
     }
+
+    // A refinement only means something while THIS conversation has a picker
+    // open. With none open the turn is not ours, so it falls through to chat.
+    const pendingForRefinement = mayRefine
+      ? await params.pendingStore.lookup(pendingKey)
+      : undefined;
+    const isRefinement = mayRefine && pendingForRefinement !== undefined;
+    if (mayRefine) {
+      if (
+        !pendingForRefinement ||
+        pendingForRefinement.createdAt + LINE_VIDEO_MODEL_SELECTION_TTL_MS <= now()
+      ) {
+        return undefined;
+      }
+      // An exact candidate name answers the open question directly, without
+      // needing the catalog at all.
+      const named = pendingForRefinement.candidates.find(
+        (candidate) =>
+          normalizeSearchText(candidate.name) === normalizeSearchText(rawText) ||
+          normalizeSearchText(candidate.id) === normalizeSearchText(rawText),
+      );
+      if (named) {
+        return {
+          handled: true,
+          text: await applySelectedModel({ id: named.id, name: named.name }),
+        };
+      }
+    }
+
+    const query = intent.kind === "switch" ? intent.query : rawText;
 
     let apiKey: string | undefined;
     try {
       apiKey = await resolveApiKey();
     } catch {
-      return { handled: true, text: "ขอโทษค่ะ เชื่อมต่อ OpenRouter ไม่ได้ตอนนี้ ลองใหม่อีกครั้งได้ไหม?" };
+      return refinementAware(isRefinement, {
+        handled: true,
+        text: "ขอโทษค่ะ เชื่อมต่อ OpenRouter ไม่ได้ตอนนี้ ลองใหม่อีกครั้งได้ไหม?",
+      });
     }
     if (!apiKey?.trim()) {
-      return { handled: true, text: "ยังไม่ได้ตั้งค่า OpenRouter API key" };
+      return refinementAware(isRefinement, {
+        handled: true,
+        text: "ยังไม่ได้ตั้งค่า OpenRouter API key",
+      });
     }
 
     let models: OpenRouterVideoModel[];
     try {
       models = await loadOpenRouterVideoModels({ apiKey, fetchImpl: params.fetchImpl });
     } catch {
-      return { handled: true, text: "ดึงรายการ video model ไม่สำเร็จ ลองใหม่อีกครั้งได้ไหม?" };
-    }
-
-    const normalizedQuery = normalizeSearchText(intent.query);
-    const matching = normalizedQuery
-      ? models.filter((model) =>
-          normalizeSearchText(`${model.id} ${model.name}`).includes(normalizedQuery),
-        )
-      : models;
-
-    if (matching.length === 0) {
-      return { handled: true, text: `ไม่เจอ video model ที่ตรงกับ "${intent.query}"` };
-    }
-
-    const exactMatches = matching.filter((model) => isExactMatch(model, normalizedQuery));
-    const directMatch =
-      exactMatches.length === 1 ? exactMatches[0] : matching.length === 1 ? matching[0] : undefined;
-    if (directMatch) {
-      await setLineVideoModelPreference({
-        store: params.preferenceStore,
-        key: scopeKey,
-        model: directMatch.id,
-        now,
+      return refinementAware(isRefinement, {
+        handled: true,
+        text: "ดึงรายการ video model ไม่สำเร็จ ลองใหม่อีกครั้งได้ไหม?",
       });
-      await params.pendingStore.delete(pendingKey);
-      return { handled: true, text: `เปลี่ยน video model เป็น ${directMatch.name} แล้ว` };
     }
 
-    const candidates = matching
-      .slice(0, MAX_LISTED_CANDIDATES)
-      .map((model) => ({ id: model.id, name: model.name }));
+    const result = searchVideoModels(models, query);
+
+    if (result.candidates.length === 0) {
+      // A refinement that matches nothing is probably not about models at all,
+      // so the picker stays open and the message goes back to ordinary chat.
+      return isRefinement
+        ? undefined
+        : { handled: true, text: `ไม่เจอ video model ที่ตรงกับ "${query}"` };
+    }
+
+    if (result.autoApply) {
+      const selected = result.autoApply.model;
+      return { handled: true, text: await applySelectedModel(selected) };
+    }
+
+    // Ambiguous: never auto-apply a guess onto a paid path. Show the numbered
+    // choices and keep the picker open for a number or a further refinement.
+    const candidates = result.candidates.slice(0, MAX_LISTED_CANDIDATES).map(toCandidate);
     await params.pendingStore.register(pendingKey, {
       version: 1,
       scopeKey: pendingKey,
-      query: intent.query,
+      query,
       candidates,
       createdAt: now(),
     });
     return {
       handled: true,
-      text: `เจอ video model หลายรุ่น:\n${formatCandidateList(candidates)}\nต้องการใช้รุ่นไหน?`,
+      text: `เจอรุ่นที่ใกล้เคียงกับ "${query}":\n${formatCandidateList(candidates)}\nตอบหมายเลขที่ต้องการใช้`,
     };
   };
 }

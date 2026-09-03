@@ -9,6 +9,7 @@ import {
   resolveLineVideoModelPreference,
   type LineVideoModelPreferenceState,
 } from "./video-model-preference.js";
+import type { LinePendingRequoteState } from "./video-model-requote.js";
 
 function createMemoryStore<T>(): PluginStateKeyedStore<T> {
   const values = new Map<string, T>();
@@ -390,5 +391,288 @@ describe("resolveLineVideoModelPreference reused by the router", () => {
     expect(await resolveLineVideoModelPreference({ store, key: "acct-1|grp-a" })).toBe(
       "bytedance/seedance-2.5",
     );
+  });
+});
+
+/**
+ * Live-catalog picker: fuzzy candidates, refinement while the picker is open,
+ * and the isolation guarantees that keep this disjoint from chat-model switching.
+ */
+describe("createLineVideoModelControlRouter — live fuzzy picker", () => {
+  const MINIMAX = [
+    seedanceModel({ id: "minimax/hailuo-h3", name: "MiniMax: Hailuo H3" }),
+    seedanceModel({ id: "minimax/hailuo-h3-fast", name: "MiniMax: Hailuo H3 Fast" }),
+    seedanceModel({ id: "minimax/hailuo-02", name: "MiniMax: Hailuo 02" }),
+    seedanceModel(),
+    seedanceModel({ id: "kuaishou/kling-2.1", name: "Kling 2.1" }),
+  ];
+
+  async function openPicker() {
+    const fixture = createRouterFixture({ models: MINIMAX });
+    const reply = await fixture.router(
+      baseEvent({ content: "เปลี่ยน video model เป็น minimax h3" }),
+      CTX,
+    );
+    return { ...fixture, reply };
+  }
+
+  it("A: offers only MiniMax candidates and applies nothing yet", async () => {
+    const { reply, preferenceStore } = await openPicker();
+
+    expect(reply?.handled).toBe(true);
+    expect(reply?.text).toContain("minimax h3");
+    expect(reply?.text).toContain("MiniMax: Hailuo H3");
+    expect(reply?.text).not.toContain("Kling");
+    expect(reply?.text).not.toContain("Seedance");
+    // Ambiguous never auto-applies onto the paid path.
+    expect(await preferenceStore.lookup("acct-1|grp-a")).toBeUndefined();
+  });
+
+  it("D: textual refinement while the picker is open stays inside the picker", async () => {
+    const { router, preferenceStore } = await openPicker();
+
+    // No "video model" wording at all — this used to fall through to chat.
+    const refined = await router(baseEvent({ content: "MiniMax: Hailuo H3" }), CTX);
+
+    expect(refined?.handled).toBe(true);
+    expect(refined?.text).toContain("MiniMax: Hailuo H3");
+    expect((await preferenceStore.lookup("acct-1|grp-a"))?.model).toBe("minimax/hailuo-h3");
+  });
+
+  it("E: a numeric reply persists the real OpenRouter id", async () => {
+    const { router, preferenceStore, pendingStore } = await openPicker();
+    const pending = (await pendingStore.entries())[0]?.value;
+    const expected = pending?.candidates[1]?.id;
+
+    const chosen = await router(baseEvent({ content: "2" }), CTX);
+
+    expect(chosen?.handled).toBe(true);
+    expect(expected).toMatch(/^minimax\//u);
+    expect((await preferenceStore.lookup("acct-1|grp-a"))?.model).toBe(expected);
+  });
+
+  it("K: another owner or group never sees this picker", async () => {
+    const { router, preferenceStore } = await openPicker();
+
+    const otherGroup = await router(baseEvent({ content: "MiniMax: Hailuo H3" }), {
+      accountId: "acct-1",
+      conversationId: "grp-b",
+    });
+    const nonOwner = await router(
+      baseEvent({ content: "MiniMax: Hailuo H3", senderIsOwner: false }),
+      CTX,
+    );
+
+    expect(otherGroup).toBeUndefined();
+    expect(nonOwner).toBeUndefined();
+    expect(await preferenceStore.lookup("acct-1|grp-b")).toBeUndefined();
+  });
+
+  it("L: ordinary chat is untouched, with and without a picker open", async () => {
+    const fresh = createRouterFixture({ models: MINIMAX });
+    expect(await fresh.router(baseEvent({ content: "สวัสดีครับ" }), CTX)).toBeUndefined();
+    expect(await fresh.router(baseEvent({ content: "เปลี่ยนเป็น gemini หน่อย" }), CTX)).toBeUndefined();
+
+    const { router } = await openPicker();
+    // A picker being open must not turn unrelated chat into a model answer.
+    expect(await router(baseEvent({ content: "วันนี้อากาศดีนะ" }), CTX)).toBeUndefined();
+    expect(await router(baseEvent({ content: "เปลี่ยนเป็น gemini หน่อย" }), CTX)).toBeUndefined();
+  });
+
+  it("applies a confident exact request without asking", async () => {
+    const { router, preferenceStore } = createRouterFixture({ models: MINIMAX });
+
+    const reply = await router(baseEvent({ content: "video model Seedance 2.5" }), CTX);
+
+    expect(reply?.text).toContain("Seedance 2.5");
+    expect((await preferenceStore.lookup("acct-1|grp-a"))?.model).toBe("bytedance/seedance-2.5");
+  });
+});
+
+/**
+ * Model change while a Final Video Draft is already open.
+ *
+ * The archive seam is stubbed so these stay LINE-side and provider-free; the
+ * seam's own behaviour is covered in the archive suite. The invariant under
+ * test throughout: the previous payable code is only ever retired by a
+ * replacement that actually got allocated.
+ */
+describe("createLineVideoModelControlRouter — active-draft re-quote", () => {
+  const MODELS = [
+    seedanceModel({ id: "minimax/hailuo-h3", name: "MiniMax: Hailuo H3" }),
+    seedanceModel({ id: "minimax/hailuo-h3-fast", name: "MiniMax: Hailuo H3 Fast" }),
+    seedanceModel(),
+  ];
+
+  type SeamCall = { overrides?: Record<string, unknown> };
+
+  function fixture(results: Array<Record<string, unknown>>) {
+    const calls: SeamCall[] = [];
+    const preferenceStore = createMemoryStore<LineVideoModelPreferenceState>();
+    const pendingStore = createMemoryStore<LinePendingVideoModelSelection>();
+    const requotePendingStore = createMemoryStore<LinePendingRequoteState>();
+    const queued = [...results];
+    const router = createLineVideoModelControlRouter({
+      preferenceStore,
+      pendingStore,
+      requotePendingStore,
+      resolveApiKey: async () => "sk-test",
+      fetchImpl: fakeCatalogFetch(MODELS),
+      requoteActiveDraft: async (request) => {
+        calls.push(request.overrides ? { overrides: request.overrides } : {});
+        return (queued.shift() ?? { kind: "no_active_storyboard" }) as never;
+      },
+    });
+    return { router, preferenceStore, requotePendingStore, calls };
+  }
+
+  const CREATED = { kind: "created", code: "8821", estimatedCostUsd: 1.5 };
+
+  it("G/H: selecting a model re-quotes the SAME storyboard and shows the new code", async () => {
+    const h = fixture([CREATED]);
+    await h.router(baseEvent({ content: "เปลี่ยน video model เป็น minimax h3" }), CTX);
+
+    const chosen = await h.router(baseEvent({ content: "1" }), CTX);
+
+    expect(h.calls).toHaveLength(1);
+    expect(chosen?.text).toContain("เปลี่ยน Video Model เป็น MiniMax: Hailuo H3 แล้ว");
+    expect(chosen?.text).toContain("ยืนยัน VIDEO 8821");
+    // Superseding the old code is the allocator's job, done as part of that
+    // allocation; this side only reports it.
+    expect(chosen?.text).toContain("รหัส VIDEO ก่อนหน้าถูกยกเลิกแล้ว");
+    expect((await h.preferenceStore.lookup("acct-1|grp-a"))?.model).toBe("minimax/hailuo-h3");
+  });
+
+  it("J: an unsupported duration asks, mints nothing, and keeps the old code", async () => {
+    const h = fixture([
+      {
+        kind: "incompatible",
+        incompatibility: { kind: "duration", requested: "15", supported: ["6", "10"] },
+      },
+    ]);
+    await h.router(baseEvent({ content: "เปลี่ยน video model เป็น minimax h3" }), CTX);
+
+    const asked = await h.router(baseEvent({ content: "1" }), CTX);
+
+    expect(asked?.text).toContain("ไม่รองรับ 15 วินาที");
+    expect(asked?.text).toContain("รองรับ 6 หรือ 10 วินาที");
+    // No replacement code anywhere in the reply: the old one is still the only
+    // payable draft and must stay that way.
+    expect(asked?.text).not.toMatch(/ยืนยัน VIDEO \d{4}/u);
+    expect(asked?.text).not.toContain("ยกเลิกแล้ว");
+    expect(await h.requotePendingStore.entries()).toHaveLength(1);
+  });
+
+  it("K: answering with a supported duration creates the replacement", async () => {
+    const h = fixture([
+      {
+        kind: "incompatible",
+        incompatibility: { kind: "duration", requested: "15", supported: ["6", "10"] },
+      },
+      CREATED,
+    ]);
+    await h.router(baseEvent({ content: "เปลี่ยน video model เป็น minimax h3" }), CTX);
+    await h.router(baseEvent({ content: "1" }), CTX);
+
+    const answered = await h.router(baseEvent({ content: "10 วิ" }), CTX);
+
+    expect(answered?.text).toContain("ยืนยัน VIDEO 8821");
+    expect(answered?.text).toContain("ยกเลิกแล้ว");
+    // The owner's answer reached the seam as an explicit override.
+    expect(h.calls[1]?.overrides).toEqual({ durationSeconds: 10 });
+    expect(await h.requotePendingStore.entries()).toHaveLength(0);
+  });
+
+  it("L: unsupported audio asks before anything is turned off", async () => {
+    const h = fixture([
+      { kind: "incompatible", incompatibility: { kind: "audio", requested: "on", supported: [] } },
+      CREATED,
+    ]);
+    await h.router(baseEvent({ content: "เปลี่ยน video model เป็น minimax h3" }), CTX);
+
+    const asked = await h.router(baseEvent({ content: "1" }), CTX);
+    expect(asked?.text).toContain("ไม่รองรับ Audio");
+    expect(asked?.text).toContain("ต้องการสร้างแบบไม่มีเสียงไหม?");
+    expect(asked?.text).not.toMatch(/ยืนยัน VIDEO \d{4}/u);
+
+    const agreed = await h.router(baseEvent({ content: "ไม่มีเสียง" }), CTX);
+    expect(agreed?.text).toContain("ยืนยัน VIDEO 8821");
+    // Audio is only dropped because the owner said so.
+    expect(h.calls[1]?.overrides).toEqual({ audio: false });
+  });
+
+  it("M: unrelated chat during a pending question is not swallowed", async () => {
+    const h = fixture([
+      {
+        kind: "incompatible",
+        incompatibility: { kind: "duration", requested: "15", supported: ["6", "10"] },
+      },
+    ]);
+    await h.router(baseEvent({ content: "เปลี่ยน video model เป็น minimax h3" }), CTX);
+    await h.router(baseEvent({ content: "1" }), CTX);
+
+    expect(await h.router(baseEvent({ content: "วันนี้อากาศดีนะ" }), CTX)).toBeUndefined();
+    // A length the model does not offer is not an answer either.
+    expect(await h.router(baseEvent({ content: "25 วิ" }), CTX)).toBeUndefined();
+    // The question is still open, so the old code is still the payable one.
+    expect(await h.requotePendingStore.entries()).toHaveLength(1);
+  });
+
+  it("Q: the exact paid confirmation is never taken by a pending question", async () => {
+    const h = fixture([
+      {
+        kind: "incompatible",
+        incompatibility: { kind: "duration", requested: "15", supported: ["6", "10"] },
+      },
+    ]);
+    await h.router(baseEvent({ content: "เปลี่ยน video model เป็น minimax h3" }), CTX);
+    await h.router(baseEvent({ content: "1" }), CTX);
+
+    // Must fall through to the confirmation gate, which owns this exact phrase.
+    expect(await h.router(baseEvent({ content: "ยืนยัน VIDEO 4716" }), CTX)).toBeUndefined();
+  });
+
+  it("N: a pending question never answers to another group or sender", async () => {
+    const h = fixture([
+      {
+        kind: "incompatible",
+        incompatibility: { kind: "duration", requested: "15", supported: ["6", "10"] },
+      },
+    ]);
+    await h.router(baseEvent({ content: "เปลี่ยน video model เป็น minimax h3" }), CTX);
+    await h.router(baseEvent({ content: "1" }), CTX);
+
+    expect(
+      await h.router(baseEvent({ content: "10 วิ" }), {
+        accountId: "acct-1",
+        conversationId: "grp-b",
+      }),
+    ).toBeUndefined();
+    expect(
+      await h.router(baseEvent({ content: "10 วิ", senderIsOwner: false }), CTX),
+    ).toBeUndefined();
+    expect(h.calls).toHaveLength(1);
+  });
+
+  it("O: with no active storyboard the model change is preference-only", async () => {
+    const h = fixture([{ kind: "no_active_storyboard" }]);
+    await h.router(baseEvent({ content: "เปลี่ยน video model เป็น minimax h3" }), CTX);
+
+    const chosen = await h.router(baseEvent({ content: "1" }), CTX);
+
+    expect(chosen?.text).toBe("เปลี่ยน Video Model เป็น MiniMax: Hailuo H3 แล้ว");
+    expect(chosen?.text).not.toMatch(/ยืนยัน VIDEO/u);
+    expect((await h.preferenceStore.lookup("acct-1|grp-a"))?.model).toBe("minimax/hailuo-h3");
+  });
+
+  it("a failed quote keeps the preference and says the old code still works", async () => {
+    const h = fixture([{ kind: "unavailable", reason: "catalog_unavailable" }]);
+    await h.router(baseEvent({ content: "เปลี่ยน video model เป็น minimax h3" }), CTX);
+
+    const chosen = await h.router(baseEvent({ content: "1" }), CTX);
+
+    expect(chosen?.text).toContain("รหัส VIDEO เดิมยังใช้ได้อยู่");
+    expect(chosen?.text).not.toMatch(/ยืนยัน VIDEO \d{4}/u);
+    expect((await h.preferenceStore.lookup("acct-1|grp-a"))?.model).toBe("minimax/hailuo-h3");
   });
 });
