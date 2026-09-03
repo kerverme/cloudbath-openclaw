@@ -155,9 +155,6 @@ function falVideoGeneration(maxEstimatedCostUsd: number) {
         [H3_MODEL]: { usdPerSecond: 0.1 },
       },
     },
-    falModels: {
-      [H3_MODEL]: { durationSeconds: [6, 10, 15], audio: "always_on" as const },
-    },
   };
 }
 
@@ -245,17 +242,17 @@ function harness(
     // and the model the draft allocates come from one registry.
     offerDefaultVideoModel: async (accountId: string, requirements: never) =>
       offerFalStoryboardDefault(
-        { videoGeneration: falVideoGeneration(options.maxEstimatedCostUsd ?? 5) },
+        { videoGeneration: falVideoGeneration(options.maxEstimatedCostUsd ?? 20) },
         requirements,
       ),
     listCompatibleVideoModels: async (accountId: string, requirements: never) =>
       listFalStoryboardModels(
-        { videoGeneration: falVideoGeneration(options.maxEstimatedCostUsd ?? 5) },
+        { videoGeneration: falVideoGeneration(options.maxEstimatedCostUsd ?? 20) },
         requirements,
       ),
     matchVideoModelQuery: async (accountId: string, requirements: never, text: string) =>
       matchFalStoryboardQuery(
-        { videoGeneration: falVideoGeneration(options.maxEstimatedCostUsd ?? 5) },
+        { videoGeneration: falVideoGeneration(options.maxEstimatedCostUsd ?? 20) },
         requirements,
         text,
       ),
@@ -271,20 +268,12 @@ function harness(
           resolveFalAuth: async () => true,
           cfg: {
             videoGeneration: {
-              maxEstimatedCostUsd: options.maxEstimatedCostUsd ?? 5,
+              maxEstimatedCostUsd: options.maxEstimatedCostUsd ?? 20,
               // Rates are per endpoint; an unpriced endpoint is not payable.
               falPricing: {
                 models: {
                   "bytedance/seedance-2.0/reference-to-video": { usdPerSecond: 0.2312 },
                   "minimax/h3/reference-to-video": { usdPerSecond: 0.1 },
-                },
-              },
-              // MiniMax H3's duration and audio are not stated by fal's schema,
-              // so the operator declares them, exactly as production requires.
-              falModels: {
-                "minimax/h3/reference-to-video": {
-                  durationSeconds: [6, 10, 15],
-                  audio: "always_on" as const,
                 },
               },
             },
@@ -330,8 +319,6 @@ function harness(
     jobStore: jobStore as never,
     activeJobLockStore: activeJobLockStore as never,
     resolveFalAuth: async () => true,
-    // The gate re-reads the catalog through its real client; this serves the
-    // same fixture bytes, so the production parser runs rather than a stub.
     workspaceRuntime: workspaceRuntime as never,
     createNotionLibrary: () => notionLibraryStub() as never,
     scheduleBackgroundWork: (run) => void background.push(run),
@@ -344,7 +331,9 @@ function harness(
       // The SAME fal configuration the allocation used: the gate re-quotes
       // against the operator's live config, so a rate or capability that has
       // moved since the draft was minted is what refuses it.
-      config: { videoGeneration: falVideoGeneration(options.maxEstimatedCostUsd ?? 5) },
+      // Seedance 2.5 at 720p runs ~$0.46/second on fal's published token
+      // price, so a 15-second scene needs a ceiling well above the $2 default.
+      config: { videoGeneration: falVideoGeneration(options.maxEstimatedCostUsd ?? 20) },
     })) as never,
     now: () => NOW,
   });
@@ -412,7 +401,7 @@ describe("Storyboard -> LINE draft -> real confirmation gate -> provider boundar
       ownerSenderId: OWNER,
       status: "pending",
       durationSeconds: 15,
-      resolution: "2K",
+      resolution: "1080P",
       aspectRatio: "9:16",
     });
     expect((stored as unknown as { estimatedCostUsd: number }).estimatedCostUsd).toBeCloseTo(
@@ -429,7 +418,7 @@ describe("Storyboard -> LINE draft -> real confirmation gate -> provider boundar
     const submitted = generateVideoMock.mock.calls[0]![0];
     expect(submitted.modelOverride).toBe(`fal/${H3_MODEL}`);
     expect(submitted.durationSeconds).toBe(15);
-    expect(submitted.resolution).toBe("2K");
+    expect(submitted.resolution).toBe("1080P");
     expect(submitted.aspectRatio).toBe("9:16");
     expect(submitted.autoProviderFallback).toBe(false);
 
@@ -464,7 +453,7 @@ describe("Storyboard -> LINE draft -> real confirmation gate -> provider boundar
     expect(job).toMatchObject({
       model: H3_MODEL,
       durationSeconds: 15,
-      resolution: "2K",
+      resolution: "1080P",
       aspectRatio: "9:16",
     });
     expect((job as unknown as { estimatedCostUsd: number }).estimatedCostUsd).toBeCloseTo(1.5, 3);

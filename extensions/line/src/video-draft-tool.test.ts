@@ -15,6 +15,9 @@ const FAL_CFG = {
   channels: {
     line: {
       videoGeneration: {
+        // Seedance 2.5 at 720p costs ~$0.46/second on fal's published token
+        // price, so the default $2 ceiling would refuse an 8-second clip.
+        maxEstimatedCostUsd: 10,
         falPricing: {
           models: { "bytedance/seedance-2.0/reference-to-video": { usdPerSecond: 0.1 } },
         },
@@ -142,9 +145,11 @@ describe("createLineVideoDraftTool", () => {
     });
     const text = (result as { content: Array<{ text: string }> }).content[0]?.text ?? "";
 
-    expect(text).toContain("Seedance 2.0 Reference-to-Video");
+    expect(text).toContain("Seedance 2.5 Reference-to-Video");
     expect(text).toContain("8 sec");
-    expect(text).toContain("Estimated cost: $0.80");
+    // fal's published Seedance 2.5 token price: 1280x720 x 8s x 24fps / 1024
+    // tokens at $0.0214/1000.
+    expect(text).toContain("Estimated cost: $3.70");
     expect(text).toMatch(/ยืนยัน VIDEO \d{4}/u);
   });
 
@@ -164,18 +169,19 @@ describe("createLineVideoDraftTool", () => {
 
   it("rejects a duration no fal endpoint accepts, instead of rounding or drafting", async () => {
     const { tool, draftStore, requestedUrls } = toolFixture();
-    // 30s: fal's Seedance schema tops out at 15, so no endpoint accepts it.
+    // 60s: Seedance 2.5 reaches 30 and every other endpoint stops sooner, so
+    // nothing on fal accepts this length.
     const result = await tool!.execute("call-unsupported-duration", {
       prompt: "a cat riding a skateboard",
-      durationSeconds: 30,
+      durationSeconds: 60,
     });
     const text = (result as { content: Array<{ text: string }> }).content[0]?.text ?? "";
 
     expect((result as { details?: { resolution?: string } }).details?.resolution).toBe(
       "unsupported_duration",
     );
-    expect(text).toContain("ความยาว 30 วินาที");
-    expect(text).toContain("4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15");
+    expect(text).toContain("ความยาว 60 วินาที");
+    expect(text).toContain("30");
     expect((await draftStore.entries()).length).toBe(0);
     expect(requestedUrls.some((url) => url.endsWith("/videos"))).toBe(false);
   });
@@ -212,7 +218,7 @@ describe("createLineVideoDraftTool", () => {
             videoGeneration: {
               maxEstimatedCostUsd: 1,
               falPricing: {
-                models: { "bytedance/seedance-2.0/reference-to-video": { usdPerSecond: 5 } },
+                models: { "bytedance/seedance-2.5/reference-to-video": { usdPerSecond: 5 } },
               },
             },
           },
@@ -236,10 +242,12 @@ describe("createLineVideoDraftTool", () => {
     await tool!.execute("call-1", { prompt: "a cat riding a skateboard" });
 
     const [entry] = await draftStore.entries();
-    expect(entry?.value.model).toBe("bytedance/seedance-2.0/reference-to-video");
+    // Seedance 2.5 is the capability-aware default here: the tool asks for no
+    // audio, which rules out H3's always-on native audio.
+    expect(entry?.value.model).toBe("bytedance/seedance-2.5/reference-to-video");
     expect(entry?.value.providerRoute).toEqual({
       provider: "fal",
-      modelId: "bytedance/seedance-2.0/reference-to-video",
+      modelId: "bytedance/seedance-2.5/reference-to-video",
     });
   });
 

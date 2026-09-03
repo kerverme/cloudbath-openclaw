@@ -13,18 +13,25 @@ import {
   selectDefaultFalModel,
   type FalVideoRequirements,
 } from "./fal-model-selection.js";
-import { listFalVideoModels, resolveFalVideoModel } from "./fal-video-registry.js";
+import {
+  FAL_PROVENANCE_RANK,
+  listFalVideoModels,
+  resolveFalVideoModel,
+} from "./fal-video-registry.js";
 
 const H3 = "minimax/h3/reference-to-video";
+const H3_MAX = "minimax/h3-max/reference-to-video";
+const SEEDANCE_25 = "bytedance/seedance-2.5/reference-to-video";
 const SEEDANCE = "bytedance/seedance-2.0/reference-to-video";
 const VEO = "fal-ai/veo3.1/reference-to-video";
 
-/** An operator who declared what fal's schema leaves unbounded. */
-const CFG = {
-  videoGeneration: {
-    falModels: { [H3]: { durationSeconds: [5, 10, 15], audio: "always_on" as const } },
-  },
-};
+/**
+ * No operator declarations at all.
+ *
+ * H3's 5-15s range and its native audio come from fal's current official
+ * product documentation, so nothing here needs declaring to be selectable.
+ */
+const CFG = {};
 
 function requirements(overrides: Partial<FalVideoRequirements> = {}): FalVideoRequirements {
   return {
@@ -38,79 +45,90 @@ function requirements(overrides: Partial<FalVideoRequirements> = {}): FalVideoRe
   };
 }
 
-describe("fal's published endpoint set", () => {
-  it("has NO Seedance 2.5 reference-to-video endpoint to route to", () => {
-    // Re-verified against @fal-ai/client 1.11.0-alpha.2, fal's newest release.
-    // Seedance 2.5 exists on OpenRouter; on fal it does not, and it is
-    // deliberately absent rather than aliased onto 2.0.
+describe("fal's currently deployed endpoint set", () => {
+  it("carries Seedance 2.5 as its own endpoint, never aliased onto 2.0", () => {
     const ids = listFalVideoModels({}).map((model) => model.modelId);
-    expect(ids.some((id) => id.includes("seedance-2.5"))).toBe(false);
+    expect(ids).toContain(SEEDANCE_25);
     expect(ids).toContain(SEEDANCE);
-    expect(resolveFalVideoModel({}, "bytedance/seedance-2.5/reference-to-video")).toBeUndefined();
-  });
-
-  it("ships MiniMax H3 with UNPROVEN duration and audio, not guessed ones", () => {
-    // fal types H3's `duration` as an unbounded number and gives it no audio
-    // field, so neither is provable; the registry says so rather than inventing.
-    const h3 = resolveFalVideoModel({}, H3);
-    expect(h3?.durations.kind).toBe("unknown");
-    expect(h3?.audio.kind).toBe("unknown");
-  });
-
-  it("lets an operator declaration FILL an unknown, never widen a schema fact", () => {
-    const declared = resolveFalVideoModel(
-      {
-        videoGeneration: {
-          falModels: {
-            [H3]: { durationSeconds: [15] },
-            // Seedance's durations are schema-proven, so this is ignored.
-            [SEEDANCE]: { durationSeconds: [99] },
-          },
-        },
-      },
-      H3,
-    );
-    expect(declared?.durations).toMatchObject({
-      kind: "enum",
-      seconds: [15],
-      provenance: "operator_declared",
+    const model = resolveFalVideoModel({}, SEEDANCE_25);
+    expect(model?.displayName).toContain("2.5");
+    // Same vendor, different dialect: 2.5 reads [Image1], 2.0 reads @Image1.
+    expect(model?.references).toMatchObject({ markerStyle: "bracket_image_n" });
+    expect(resolveFalVideoModel({}, SEEDANCE)?.references).toMatchObject({
+      markerStyle: "at_image_n",
     });
-    const seedance = resolveFalVideoModel(
-      {
-        videoGeneration: { falModels: { [SEEDANCE]: { durationSeconds: [99] } } },
-      },
-      SEEDANCE,
-    );
-    expect(seedance?.durations).toMatchObject({ provenance: "fal_schema" });
-    expect(seedance?.durations.kind === "enum" && seedance.durations.seconds.includes(99)).toBe(
-      false,
+  });
+
+  it("gives Seedance 2.5 the 4-30s range fal's API reference states", () => {
+    const durations = resolveFalVideoModel({}, SEEDANCE_25)?.durations;
+    expect(durations).toMatchObject({ kind: "enum", provenance: "fal_api_page" });
+    if (durations?.kind !== "enum") {
+      return;
+    }
+    expect(durations.seconds[0]).toBe(4);
+    expect(durations.seconds.at(-1)).toBe(30);
+  });
+
+  it("proves H3's 5-15s duration from fal's product documentation, not a declaration", () => {
+    const h3 = resolveFalVideoModel({}, H3);
+    expect(h3?.durations).toMatchObject({ kind: "enum", provenance: "fal_model_page" });
+    if (h3?.durations.kind !== "enum") {
+      return;
+    }
+    expect(h3.durations.seconds).toEqual([5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
+    // Native synchronized audio on every generation, with no proven off switch.
+    expect(h3?.audio).toMatchObject({ kind: "always_on" });
+  });
+
+  it("keeps H3 Max a DISTINCT model, never an alias of H3", () => {
+    const h3 = resolveFalVideoModel({}, H3);
+    const max = resolveFalVideoModel({}, H3_MAX);
+    expect(max).toBeDefined();
+    expect(max?.modelId).not.toBe(h3?.modelId);
+    // "MiniMax" itself contains "Max", so the guard is on the MODEL name.
+    expect(max?.displayName).toContain("H3 Max");
+    expect(h3?.displayName).not.toContain("H3 Max");
+    expect(max?.resolutions.values).not.toEqual(h3?.resolutions.values);
+  });
+
+  it("ranks a current API page above the lagging npm client schema", () => {
+    // The client package trails fal's deployed catalog, which is what hid
+    // Seedance 2.5 from this registry entirely.
+    expect(FAL_PROVENANCE_RANK.fal_api_page).toBeLessThan(FAL_PROVENANCE_RANK.fal_model_page);
+    expect(FAL_PROVENANCE_RANK.fal_model_page).toBeLessThan(FAL_PROVENANCE_RANK.fal_client_schema);
+    expect(FAL_PROVENANCE_RANK.fal_client_schema).toBeLessThan(
+      FAL_PROVENANCE_RANK.operator_declared,
     );
   });
 });
 
-describe("unproven is not permission", () => {
-  it("refuses H3 entirely until its duration and audio are declared", () => {
-    const result = evaluateFalModel(resolveFalVideoModel({}, H3)!, requirements());
-    expect(result.compatible).toBe(false);
-    if (result.compatible) {
-      return;
-    }
-    expect(result.reasons.map((reason) => reason.kind)).toEqual(
-      expect.arrayContaining(["duration_unknown", "audio_required"]),
-    );
-  });
-
-  it("refuses a model that cannot be proven able to stay silent", () => {
+describe("audio capability is judged in the direction asked for", () => {
+  it("refuses H3 for a scene that must be silent", () => {
+    // H3 produces native audio on every generation with no proven off switch,
+    // so it cannot be made to deliver a truly silent video.
     const result = evaluateFalModel(resolveFalVideoModel(CFG, H3)!, requirements({ audio: "off" }));
     expect(result.compatible).toBe(false);
     if (!result.compatible) {
       expect(result.reasons[0]).toEqual({ kind: "audio_must_be_silent" });
     }
   });
+
+  it("accepts H3 for a scene that wants sound", () => {
+    expect(evaluateFalModel(resolveFalVideoModel(CFG, H3)!, requirements()).compatible).toBe(true);
+  });
+
+  it("lets Seedance 2.5 satisfy both directions, because it controls audio", () => {
+    for (const audio of ["off", "ambient", "full"] as const) {
+      expect(
+        evaluateFalModel(resolveFalVideoModel(CFG, SEEDANCE_25)!, requirements({ audio }))
+          .compatible,
+      ).toBe(true);
+    }
+  });
 });
 
 describe("E/F. the capability-aware default", () => {
-  it("defaults to MiniMax H3 when it can execute the scene", () => {
+  it("defaults to MiniMax H3 on a 15-second scene it can execute", () => {
     const selection = selectDefaultFalModel(CFG, requirements());
     expect(selection.kind).toBe("selected");
     if (selection.kind !== "selected") {
@@ -120,27 +138,18 @@ describe("E/F. the capability-aware default", () => {
     expect(selection.preferredUnavailable).toBeUndefined();
   });
 
-  it("does NOT offer H3 for a 30-second scene, and finds nothing that can run it", () => {
-    // fal's Seedance schema tops out at 15s and H3 is declared to 15, so a
-    // 30-second reference-to-video has no endpoint at all on this provider.
+  it("F: a 30-second scene defaults to Seedance 2.5 and explains why, not 'none'", () => {
     const selection = selectDefaultFalModel(CFG, requirements({ durationSeconds: 30 }));
-    expect(selection.kind).toBe("none_compatible");
-  });
-
-  it("replaces H3 with a proven alternative and reports why", () => {
-    const selection = selectDefaultFalModel(
-      { videoGeneration: { falModels: { [H3]: { durationSeconds: [15], audio: "always_on" } } } },
-      requirements({ durationSeconds: 12 }),
-    );
     expect(selection.kind).toBe("selected");
     if (selection.kind !== "selected") {
       return;
     }
-    expect(selection.model.modelId).toBe(SEEDANCE);
+    // Seedance 2.5 is the only registry endpoint that reaches 30 seconds.
+    expect(selection.model.modelId).toBe(SEEDANCE_25);
     expect(selection.preferredUnavailable?.model.modelId).toBe(H3);
     expect(selection.preferredUnavailable?.reasons[0]).toMatchObject({
       kind: "duration",
-      requested: 12,
+      requested: 30,
     });
   });
 
@@ -153,6 +162,12 @@ describe("E/F. the capability-aware default", () => {
         ).toBe(true);
       }
     }
+  });
+
+  it("finds nothing for a length no fal endpoint reaches", () => {
+    expect(selectDefaultFalModel(CFG, requirements({ durationSeconds: 60 })).kind).toBe(
+      "none_compatible",
+    );
   });
 });
 
@@ -170,6 +185,7 @@ describe("reference semantics are never substituted", () => {
 
   it("keeps Veo out of a 15-second scene its schema cannot produce", () => {
     const compatible = listCompatibleFalModels(CFG, requirements()).map((m) => m.modelId);
+    expect(compatible).toContain(SEEDANCE_25);
     // Veo 3.1 documents a single "8s" duration.
     expect(compatible).not.toContain(VEO);
     const veoScene = listCompatibleFalModels(CFG, requirements({ durationSeconds: 8 })).map(
@@ -185,8 +201,8 @@ describe("output resolution is resolved, not required", () => {
   });
 
   it("falls to the endpoint's own size when it cannot produce the requested one", () => {
-    // H3 documents 2K as its only output size, so a 720p request produces 2K —
-    // and the Final Video Draft shows that, rather than the request.
-    expect(resolveFalOutputResolution(resolveFalVideoModel({}, H3)!, "720p")).toBe("2K");
+    // H3 lists 768P/1080P, so a lower-case "720p" request resolves to a size
+    // it really produces — and the Final Video Draft shows that.
+    expect(resolveFalOutputResolution(resolveFalVideoModel({}, H3)!, "720p")).toBe("1080P");
   });
 });

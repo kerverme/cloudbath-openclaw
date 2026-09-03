@@ -38,7 +38,9 @@ vi.mock("./accounts.js", () => ({
     tokenSource: "config" as const,
     config: {
       videoGeneration: {
-        // fal rates are per endpoint; an unpriced endpoint is not payable.
+        // Seedance 2.5 at 720p runs ~$0.46/second on fal's published token
+        // price, so the default $2 ceiling would refuse an ordinary clip.
+        maxEstimatedCostUsd: 10,
         falPricing: {
           models: { "bytedance/seedance-2.0/reference-to-video": { usdPerSecond: 0.1 } },
         },
@@ -173,7 +175,7 @@ describe("LINE video draft: canonical OpenRouter credential resolution", () => {
 
     expect(details?.resolution).toBe("draft_created");
     expect(text).toContain("🎬 Video draft");
-    expect(text).toContain("Seedance 2.0 Reference-to-Video");
+    expect(text).toContain("Seedance 2.5 Reference-to-Video");
     expect(text).toMatch(/ยืนยัน VIDEO \d{4}/u);
     expect((await draftStore.entries()).length).toBe(1);
     expect(paidVideoPosts()).toStrictEqual([]);
@@ -322,6 +324,7 @@ describe("LINE video draft: root-cause pin", () => {
       requesterSenderId: "U-owner-real",
       sessionId: "grp-real",
       accountId: "acct-1",
+      deliveryTo: "line:group:grp-real",
       cfg: {},
       draftStore: createMemoryStore<LineVideoDraft>(),
       preferenceStore: createMemoryStore<LineVideoModelPreferenceState>(),

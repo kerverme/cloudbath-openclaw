@@ -13,15 +13,12 @@ import { listCompatibleFalFamilies, matchFalFamily, searchFalModels } from "./fa
  */
 import {
   listCompatibleFalModels,
+  resolveFalOutputResolution,
   selectDefaultFalModel,
   type FalIncompatibility,
   type FalVideoRequirements,
 } from "./fal-model-selection.js";
-import {
-  estimateFalVideoCostUsd,
-  isFalModelPriced,
-  type FalVideoPricingConfig,
-} from "./fal-video-pricing.js";
+import { estimateFalVideoCostUsd, type FalVideoPricingConfig } from "./fal-video-pricing.js";
 import {
   FAL_VIDEO_FAMILIES,
   type FalVideoModel,
@@ -54,13 +51,28 @@ function toOption(model: FalVideoModel): FalStoryboardModelOption {
  * capability check and then dead-end at the Final Video Draft, which is a
  * worse experience than never being listed.
  */
+function pricedCompatibleModels(
+  cfg: FalStoryboardConfig,
+  requirements: FalVideoRequirements,
+): FalVideoModel[] {
+  return listCompatibleFalModels(cfg, requirements).filter(
+    (model) =>
+      estimateFalVideoCostUsd({
+        cfg,
+        model,
+        durationSeconds: requirements.durationSeconds,
+        // The size the endpoint will really produce, which is the one that
+        // gets quoted, frozen and charged.
+        resolution: resolveFalOutputResolution(model, requirements.resolution),
+      }).kind === "available",
+  );
+}
+
 export function listFalStoryboardModels(
   cfg: FalStoryboardConfig,
   requirements: FalVideoRequirements,
 ): FalStoryboardModelOption[] {
-  return listCompatibleFalModels(cfg, requirements)
-    .filter((model) => isFalModelPriced(cfg, model.modelId))
-    .map(toOption);
+  return pricedCompatibleModels(cfg, requirements).map(toOption);
 }
 
 /** Owner-facing sentence for why the usual default could not run this scene. */
@@ -70,25 +82,35 @@ export function describeFalDisplacement(
   replacementName: string,
 ): string {
   const first = reasons[0];
+  const supportedMax =
+    first?.kind === "duration" && first.supported && first.supported.length > 0
+      ? first.supported[first.supported.length - 1]
+      : undefined;
+  // Each branch is a complete sentence: a shared prefix reads wrongly in Thai
+  // once the reason is a state ("เงียบ") rather than a quantity.
   const detail =
     first?.kind === "duration"
-      ? `ความยาว ${first.requested} วินาที ซึ่ง ${modelName} รองรับไม่ได้`
+      ? supportedMax === undefined
+        ? `งานนี้ยาว ${first.requested} วินาที ซึ่ง ${modelName} รองรับไม่ได้`
+        : `งานนี้ยาว ${first.requested} วินาที ${modelName} รองรับสูงสุด ${supportedMax} วินาที`
       : first?.kind === "duration_unknown"
-        ? `ความยาวที่ ${modelName} ยังไม่ได้ยืนยันว่ารองรับ`
+        ? `${modelName} ยังไม่ได้ยืนยันว่ารองรับความยาวของงานนี้`
         : first?.kind === "audio_required"
-          ? `เสียงที่ ${modelName} ยังไม่ได้ยืนยันว่ารองรับ`
+          ? `งานนี้ต้องมีเสียง ซึ่ง ${modelName} ยังไม่ได้ยืนยันว่ารองรับ`
           : first?.kind === "audio_must_be_silent"
-            ? `งานเงียบ ซึ่ง ${modelName} ปิดเสียงไม่ได้`
+            ? `งานนี้ต้องไม่มีเสียง ซึ่ง ${modelName} ปิดเสียงไม่ได้`
             : first?.kind === "too_many_references"
-              ? `ตัวละครอ้างอิง ${first.requested} ตัว ซึ่งเกินที่ ${modelName} รองรับ`
-              : `ข้อกำหนดที่ ${modelName} รองรับไม่ได้`;
-  return `งานนี้มี${detail}\nDefault สำหรับงานนี้จึงเป็น ${replacementName}`;
+              ? `งานนี้ใช้ตัวละครอ้างอิง ${first.requested} ตัว เกินที่ ${modelName} รองรับ`
+              : `งานนี้มีข้อกำหนดที่ ${modelName} รองรับไม่ได้`;
+  return `${detail}\nDefault สำหรับงานนี้จึงเป็น ${replacementName}`;
 }
 
 export type FalStoryboardOffer =
   | Readonly<{
       kind: "offered";
       model: FalStoryboardModelOption;
+      /** The size this endpoint really produces, which is what was priced. */
+      outputResolution: string;
       estimatedCostUsd?: number;
       displacedReason?: string;
     }>
@@ -108,22 +130,28 @@ export function offerFalStoryboardDefault(
   if (selection.kind === "none_compatible") {
     return { kind: "none_compatible" };
   }
+  const payable = new Set(pricedCompatibleModels(cfg, requirements).map((model) => model.modelId));
   const priced = [selection.model, ...selection.alternatives].find((model) =>
-    isFalModelPriced(cfg, model.modelId),
+    payable.has(model.modelId),
   );
   if (!priced) {
     return { kind: "none_compatible" };
   }
+  // Priced at the size this endpoint will ACTUALLY produce, which is what the
+  // draft freezes and charges. Quoting the requested size would show one
+  // number and bill another whenever the endpoint cannot produce it.
+  const outputResolution = resolveFalOutputResolution(priced, requirements.resolution);
   const price = estimateFalVideoCostUsd({
     cfg,
     model: priced,
     durationSeconds: requirements.durationSeconds,
-    resolution: requirements.resolution,
+    resolution: outputResolution,
   });
   const displaced = selection.preferredUnavailable;
   return {
     kind: "offered",
     model: toOption(priced),
+    outputResolution,
     ...(price.kind === "available" ? { estimatedCostUsd: price.amountUsd } : {}),
     ...(displaced
       ? {
@@ -154,9 +182,7 @@ export function matchFalStoryboardQuery(
   requirements: FalVideoRequirements,
   text: string,
 ): FalStoryboardMatch | undefined {
-  const compatible = listCompatibleFalModels(cfg, requirements).filter((model) =>
-    isFalModelPriced(cfg, model.modelId),
-  );
+  const compatible = pricedCompatibleModels(cfg, requirements);
   if (compatible.length === 0) {
     return undefined;
   }

@@ -81,7 +81,9 @@ vi.mock("./accounts.js", () => ({
     tokenSource: "config" as const,
     config: {
       videoGeneration: {
-        // fal rates are per endpoint; an unpriced endpoint is not payable.
+        // Seedance 2.5 at 720p runs ~$0.46/second on fal's published token
+        // price, so the default $2 ceiling would refuse an ordinary clip.
+        maxEstimatedCostUsd: 10,
         falPricing: {
           models: { "bytedance/seedance-2.0/reference-to-video": { usdPerSecond: 0.1 } },
         },
@@ -168,12 +170,12 @@ function createStores() {
 
 function expectCompleteDraftPreview(text: string) {
   expect(text).toContain("🎬 Video draft");
-  expect(text).toContain("Model: Seedance 2.0 Reference-to-Video");
+  expect(text).toContain("Model: Seedance 2.5 Reference-to-Video");
   expect(text).toContain("Duration: 5 sec");
   expect(text).toContain("Resolution: 480p");
   expect(text).toContain("Aspect: 16:9");
   expect(text).toContain("Audio: Off");
-  expect(text).toContain("Estimated cost: $0.50");
+  expect(text).toContain("Estimated cost: $1.03");
   expect(text).toContain("Prompt:\na cat sitting on water");
   expect(text).toMatch(/ยืนยัน VIDEO \d{4}/u);
   expect(text).toContain("เพื่อเริ่มสร้าง");

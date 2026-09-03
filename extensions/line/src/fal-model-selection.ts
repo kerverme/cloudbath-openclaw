@@ -205,6 +205,10 @@ export function listCompatibleFalModels(
  */
 const DEFAULT_PREFERENCE: readonly string[] = Object.freeze([
   "minimax/h3/reference-to-video",
+  "minimax/h3-max/reference-to-video",
+  // The only registry endpoint that reaches 30 seconds, so a long scene lands
+  // here once H3 is ruled out on duration.
+  "bytedance/seedance-2.5/reference-to-video",
   "bytedance/seedance-2.0/reference-to-video",
 ]);
 

@@ -34,11 +34,7 @@ import {
   type FalVideoRequirements,
 } from "./fal-model-selection.js";
 import { compileFalProviderPrompt, type FalBoundReference } from "./fal-prompt-bindings.js";
-import {
-  estimateFalVideoCostUsd,
-  isFalModelPriced,
-  type FalVideoPricingConfig,
-} from "./fal-video-pricing.js";
+import { estimateFalVideoCostUsd, type FalVideoPricingConfig } from "./fal-video-pricing.js";
 import {
   resolveFalVideoModel,
   type FalVideoModel,
@@ -296,9 +292,6 @@ export async function prepareLineStoryboardVideoDraft(
   }
   const model = choice.model;
 
-  if (!isFalModelPriced(deps.cfg, model.modelId)) {
-    return { kind: "rejected", reason: "unknown_cost", model: model.modelId };
-  }
   // The size this endpoint will really produce, which is what gets quoted,
   // frozen and displayed -- never the requested one when they differ.
   const resolution = resolveFalOutputResolution(model, request.resolution);
@@ -388,9 +381,17 @@ export function listStoryboardCompatibleModels(
   request: LineStoryboardVideoDraftRequest,
   cfg: FalVideoModelConfig & FalVideoPricingConfig,
 ): FalVideoModel[] {
-  // Priced-only: an unpriced model cannot be billed, so offering it as a
-  // choice would dead-end the owner at the Final Video Draft.
-  return listCompatibleFalModels(cfg, deriveFalRequirements(request)).filter((model) =>
-    isFalModelPriced(cfg, model.modelId),
+  // Priced-only, at the size each endpoint will actually produce: an unpriced
+  // model cannot be billed, so offering it would dead-end the owner at the
+  // Final Video Draft.
+  const requirements = deriveFalRequirements(request);
+  return listCompatibleFalModels(cfg, requirements).filter(
+    (model) =>
+      estimateFalVideoCostUsd({
+        cfg,
+        model,
+        durationSeconds: requirements.durationSeconds,
+        resolution: resolveFalOutputResolution(model, requirements.resolution),
+      }).kind === "available",
   );
 }

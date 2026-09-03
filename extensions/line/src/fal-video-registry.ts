@@ -6,44 +6,65 @@
  * compatibility filter and the pricing adapter all read this registry, so
  * adding or retiring a model is a change to this file alone.
  *
- * PROVENANCE IS PART OF THE DATA. Each capability records where it came from:
+ * PROVENANCE IS PART OF THE DATA, and its order is a PRECEDENCE order. Each
+ * capability records where it came from, strongest first:
  *
- *   - `fal_schema` — read out of fal's own published, generated endpoint
- *     schema (`@fal-ai/client`, `src/types/endpoints.d.ts`), which maps every
- *     endpoint id to its input type. That file is the machine-readable
- *     capability source fal ships; it is not scraped, and nothing here is
- *     fetched at runtime.
- *   - `operator_declared` — a fact fal's schema does NOT encode, supplied by
- *     the operator in config. `minimax/h3/*` declares `duration?: number` with
- *     no bound, for instance, so no duration is provable from the schema and
- *     hardcoding one would be an invented capability.
+ *   1. `fal_api_page`   — fal's current official API reference for the
+ *      endpoint. This is the deployed contract and it WINS over everything
+ *      below it.
+ *   2. `fal_model_page` — fal's current official model page for the endpoint
+ *      (product-level limits fal states but the API reference does not spell
+ *      out, e.g. reference-file caps).
+ *   3. `fal_client_schema` — the generated types in `@fal-ai/client`. Useful,
+ *      but it LAGS: the npm package can be several endpoints behind fal's live
+ *      catalog, so it is never sufficient on its own and never overrides a
+ *      current API page.
+ *   4. `operator_declared` — supplied in config, for facts none of the above
+ *      establish.
+ *
+ * Nothing here is fetched or scraped at runtime; this is code, and the source
+ * comment on each entry names the authoritative page it was read from.
  *
  * An `unknown` capability is never treated as permission. A model whose
  * capabilities cannot answer the frozen storyboard's requirements is filtered
  * out before it can be offered, defaulted to, or given a payable VIDEO code.
- *
- * Verified against `@fal-ai/client@1.11.0-alpha.2` (published 2026-09-02, the
- * newest release; `latest` is 1.10.1 and carries the same endpoints minus the
- * newer resolutions). NOTE: fal publishes NO Seedance 2.5 endpoint of any
- * kind — its Seedance reference-to-video endpoints are `seedance-2.0` plus its
- * `fast`/`mini` variants. Seedance 2.5 exists on OpenRouter, not on fal, and
- * is deliberately absent here rather than aliased onto 2.0.
  */
 
 export const FAL_PROVIDER_ID = "fal";
-/** The exact package release every `fal_schema` fact below was read from. */
-export const FAL_SCHEMA_SOURCE = "@fal-ai/client@1.11.0-alpha.2";
+/**
+ * Where a capability came from, strongest first.
+ *
+ * `fal_client_schema` is deliberately NOT the top of this list: the npm
+ * package trails fal's deployed catalog, and treating it as the sole source of
+ * truth is what previously hid `bytedance/seedance-2.5/reference-to-video`
+ * from this registry entirely.
+ */
+export type FalCapabilityProvenance =
+  | "fal_api_page"
+  | "fal_model_page"
+  | "fal_client_schema"
+  | "operator_declared";
 
-export type FalCapabilityProvenance = "fal_schema" | "operator_declared";
+/** Ranked strongest-first; a later source never overrides an earlier one. */
+export const FAL_PROVENANCE_RANK: Readonly<Record<FalCapabilityProvenance, number>> = Object.freeze(
+  {
+    fal_api_page: 0,
+    fal_model_page: 1,
+    fal_client_schema: 2,
+    operator_declared: 3,
+  },
+);
 
 /**
  * How a model's prompt refers to its reference assets.
  *
- * Load-bearing, not cosmetic: Seedance reads `@Image1` and MiniMax H3 reads
- * `Image 1`, so the compiled prompt must be written in the selected model's
- * own dialect or the references silently go unused.
+ * Load-bearing, not cosmetic, and it differs PER ENDPOINT: Seedance 2.5 reads
+ * `[Image1]`, Seedance 2.0 reads `@Image1`, MiniMax H3 reads `Image 1`, and
+ * Veo documents none. A prompt written in the wrong dialect does not fail —
+ * the references are simply ignored and the owner pays for a video that does
+ * not contain their character.
  */
-export type FalReferenceMarkerStyle = "at_image_n" | "image_space_n" | "none";
+export type FalReferenceMarkerStyle = "bracket_image_n" | "at_image_n" | "image_space_n" | "none";
 
 export type FalDurationSupport =
   | Readonly<{ kind: "enum"; seconds: readonly number[]; provenance: FalCapabilityProvenance }>
@@ -142,27 +163,32 @@ export type FalVideoModel = Readonly<{
   verifiedFrom: string;
 }>;
 
-const SEEDANCE_2_DURATIONS: FalDurationSupport = Object.freeze({
+/** Whole seconds in an inclusive range, for endpoints fal states as a range. */
+function secondsRange(from: number, to: number): number[] {
+  return Array.from({ length: to - from + 1 }, (_unused, offset) => from + offset);
+}
+
+const SEEDANCE_2_0_DURATIONS: FalDurationSupport = Object.freeze({
   kind: "enum",
-  seconds: Object.freeze([4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]),
-  provenance: "fal_schema",
+  seconds: Object.freeze(secondsRange(4, 15)),
+  provenance: "fal_client_schema",
 });
-const SEEDANCE_2_ASPECTS = Object.freeze(["auto", "21:9", "16:9", "4:3", "1:1", "3:4", "9:16"]);
-const SEEDANCE_2_REFERENCES: FalReferenceSupport = Object.freeze({
+const SEEDANCE_ASPECTS = Object.freeze(["auto", "21:9", "16:9", "4:3", "1:1", "3:4", "9:16"]);
+const SEEDANCE_2_0_REFERENCES: FalReferenceSupport = Object.freeze({
   kind: "identity_reference",
   field: "image_urls",
   markerStyle: "at_image_n",
   maxImages: 9,
   maxTotalFiles: 12,
-  provenance: "fal_schema",
+  provenance: "fal_client_schema",
 });
-const SEEDANCE_2_AUDIO: FalAudioSupport = Object.freeze({
+const CONTROLLABLE_AUDIO: FalAudioSupport = Object.freeze({
   kind: "controllable",
   field: "generate_audio",
-  provenance: "fal_schema",
+  provenance: "fal_api_page",
 });
 
-function seedanceReferenceModel(params: {
+function seedance20ReferenceModel(params: {
   modelId: string;
   displayName: string;
   aliases: readonly string[];
@@ -174,16 +200,73 @@ function seedanceReferenceModel(params: {
     familyId: "bytedance",
     displayName: params.displayName,
     aliases: Object.freeze([...params.aliases]),
-    durations: SEEDANCE_2_DURATIONS,
+    durations: SEEDANCE_2_0_DURATIONS,
     resolutions: Object.freeze({
       values: Object.freeze([...params.resolutions]),
-      provenance: "fal_schema",
+      provenance: "fal_client_schema",
     }),
-    aspectRatios: Object.freeze({ values: SEEDANCE_2_ASPECTS, provenance: "fal_schema" }),
-    audio: SEEDANCE_2_AUDIO,
-    references: SEEDANCE_2_REFERENCES,
+    aspectRatios: Object.freeze({ values: SEEDANCE_ASPECTS, provenance: "fal_client_schema" }),
+    audio: Object.freeze({
+      kind: "controllable",
+      field: "generate_audio",
+      provenance: "fal_client_schema",
+    }),
+    references: SEEDANCE_2_0_REFERENCES,
     durationEncoding: "string_seconds",
-    verifiedFrom: FAL_SCHEMA_SOURCE,
+    verifiedFrom: "@fal-ai/client@1.11.0-alpha.2",
+  });
+}
+
+/**
+ * MiniMax H3 and H3 Max, which share a contract shape but are NOT the same
+ * model and must never be conflated.
+ *
+ * Both take `reference_*_urls` — a DIFFERENT field from Seedance's
+ * `image_urls` — read `Image 1` / `Video 1` / `Audio 1` in the prompt, cap at
+ * 12 reference files total, and produce native synchronized audio on every
+ * generation with no documented off switch.
+ */
+function minimaxH3ReferenceModel(params: {
+  modelId: string;
+  displayName: string;
+  aliases: readonly string[];
+  resolutions: readonly string[];
+}): FalVideoModel {
+  return Object.freeze({
+    provider: FAL_PROVIDER_ID,
+    modelId: params.modelId,
+    familyId: "minimax",
+    displayName: params.displayName,
+    aliases: Object.freeze([...params.aliases]),
+    // 5-15s is stated by fal's current official product documentation, so it
+    // is proven and needs no operator declaration.
+    durations: Object.freeze({
+      kind: "enum",
+      seconds: Object.freeze(secondsRange(5, 15)),
+      provenance: "fal_model_page",
+    }),
+    resolutions: Object.freeze({
+      values: Object.freeze([...params.resolutions]),
+      provenance: "fal_model_page",
+    }),
+    aspectRatios: Object.freeze({
+      values: Object.freeze(["adaptive", "21:9", "16:9", "4:3", "1:1", "3:4", "9:16"]),
+      provenance: "fal_model_page",
+    }),
+    // Native stereo audio on EVERY generation, with no proven off switch in
+    // the reference contract. `always_on` is therefore the honest shape: it
+    // satisfies a scene that wants sound and fails one that must be silent.
+    audio: Object.freeze({ kind: "always_on", provenance: "fal_model_page" }),
+    references: Object.freeze({
+      kind: "identity_reference",
+      field: "reference_image_urls",
+      markerStyle: "image_space_n",
+      maxImages: 9,
+      maxTotalFiles: 12,
+      provenance: "fal_model_page",
+    }),
+    durationEncoding: "number",
+    verifiedFrom: "fal official model page",
   });
 }
 
@@ -195,50 +278,69 @@ function seedanceReferenceModel(params: {
  * execute that storyboard however good its output is.
  */
 export const FAL_VIDEO_MODELS: readonly FalVideoModel[] = Object.freeze([
+  minimaxH3ReferenceModel({
+    modelId: "minimax/h3/reference-to-video",
+    displayName: "MiniMax H3 Reference-to-Video",
+    aliases: ["minimax h3", "h3", "hailuo h3"],
+    resolutions: ["768P", "1080P"],
+  }),
+  minimaxH3ReferenceModel({
+    modelId: "minimax/h3-max/reference-to-video",
+    // A DISTINCT model, never an alias of H3: different endpoint, different
+    // output sizes, and selecting one when the owner named the other would
+    // bill something they did not choose.
+    displayName: "MiniMax H3 Max Reference-to-Video",
+    aliases: ["minimax h3 max", "h3 max", "h3max"],
+    resolutions: ["480P", "768P"],
+  }),
   Object.freeze({
     provider: FAL_PROVIDER_ID,
-    modelId: "minimax/h3/reference-to-video",
-    familyId: "minimax",
-    displayName: "MiniMax H3 Reference-to-Video",
-    aliases: Object.freeze(["minimax h3", "h3", "hailuo h3"]),
-    // fal's schema declares `duration?: number` with NO bound, so no duration
-    // is provable here. Left unknown rather than guessed; the operator
-    // declares it (see falModels config) exactly as they declare the price.
-    durations: Object.freeze({ kind: "unknown" }),
-    // "Only 2K is currently supported" is stated in the schema's own doc
-    // comment on `resolution`, which is typed as an open string.
-    resolutions: Object.freeze({ values: Object.freeze(["2K"]), provenance: "fal_schema" }),
-    aspectRatios: Object.freeze({
-      values: Object.freeze(["adaptive", "21:9", "16:9", "4:3", "1:1", "3:4", "9:16"]),
-      provenance: "fal_schema",
+    modelId: "bytedance/seedance-2.5/reference-to-video",
+    familyId: "bytedance",
+    displayName: "Seedance 2.5 Reference-to-Video",
+    aliases: Object.freeze(["seedance 2.5", "seedance 2 5", "seedance25"]),
+    // 4-30s, from fal's current official API reference for this endpoint. This
+    // is the only registry entry that reaches 30 seconds, which is why a
+    // 30-second storyboard resolves here.
+    durations: Object.freeze({
+      kind: "enum",
+      seconds: Object.freeze(secondsRange(4, 30)),
+      provenance: "fal_api_page",
     }),
-    // No `generate_audio` field exists on this endpoint, so neither "makes
-    // sound" nor "can be silent" is provable from the schema.
-    audio: Object.freeze({ kind: "unknown" }),
+    resolutions: Object.freeze({
+      values: Object.freeze(["480p", "720p"]),
+      provenance: "fal_api_page",
+    }),
+    aspectRatios: Object.freeze({ values: SEEDANCE_ASPECTS, provenance: "fal_api_page" }),
+    audio: CONTROLLABLE_AUDIO,
     references: Object.freeze({
       kind: "identity_reference",
-      field: "reference_image_urls",
-      markerStyle: "image_space_n",
-      maxImages: 12,
-      maxTotalFiles: 12,
-      provenance: "fal_schema",
+      field: "image_urls",
+      // `[Image1]`, NOT Seedance 2.0's `@Image1`. Same vendor, different
+      // dialect; writing 2.0's form here would silently drop the references.
+      markerStyle: "bracket_image_n",
+      // Up to 50 multimodal reference inputs in total across images, videos
+      // and audio, per fal's current API reference.
+      maxImages: 50,
+      maxTotalFiles: 50,
+      provenance: "fal_api_page",
     }),
-    durationEncoding: "number",
-    verifiedFrom: FAL_SCHEMA_SOURCE,
+    durationEncoding: "string_seconds",
+    verifiedFrom: "fal official API reference",
   }),
-  seedanceReferenceModel({
+  seedance20ReferenceModel({
     modelId: "bytedance/seedance-2.0/reference-to-video",
     displayName: "Seedance 2.0 Reference-to-Video",
     aliases: ["seedance 2.0", "seedance 2"],
     resolutions: ["480p", "720p", "1080p", "4k"],
   }),
-  seedanceReferenceModel({
+  seedance20ReferenceModel({
     modelId: "bytedance/seedance-2.0/fast/reference-to-video",
     displayName: "Seedance 2.0 Fast Reference-to-Video",
     aliases: ["seedance 2.0 fast", "seedance fast"],
     resolutions: ["480p", "720p"],
   }),
-  seedanceReferenceModel({
+  seedance20ReferenceModel({
     modelId: "bytedance/seedance-2.0/mini/reference-to-video",
     displayName: "Seedance 2.0 Mini Reference-to-Video",
     aliases: ["seedance 2.0 mini", "seedance mini"],
@@ -250,36 +352,33 @@ export const FAL_VIDEO_MODELS: readonly FalVideoModel[] = Object.freeze([
     familyId: "google",
     displayName: "Veo 3.1 Reference-to-Video",
     aliases: Object.freeze(["veo 3.1", "veo3.1"]),
-    // `duration?: string` defaulting to "8s", with no enum: one documented
-    // value, not a provable set, so it is declared as the single length fal's
-    // schema actually shows.
     durations: Object.freeze({
       kind: "enum",
       seconds: Object.freeze([8]),
-      provenance: "fal_schema",
+      provenance: "fal_client_schema",
     }),
     resolutions: Object.freeze({
       values: Object.freeze(["720p", "1080p", "4k"]),
-      provenance: "fal_schema",
+      provenance: "fal_client_schema",
     }),
     aspectRatios: Object.freeze({
       values: Object.freeze(["16:9", "9:16"]),
-      provenance: "fal_schema",
+      provenance: "fal_client_schema",
     }),
     audio: Object.freeze({
       kind: "controllable",
       field: "generate_audio",
-      provenance: "fal_schema",
+      provenance: "fal_client_schema",
     }),
     references: Object.freeze({
       kind: "identity_reference",
       field: "image_urls",
       markerStyle: "none",
       maxImages: 3,
-      provenance: "fal_schema",
+      provenance: "fal_client_schema",
     }),
     durationEncoding: "string_seconds",
-    verifiedFrom: FAL_SCHEMA_SOURCE,
+    verifiedFrom: "@fal-ai/client@1.11.0-alpha.2",
   }),
 ]);
 

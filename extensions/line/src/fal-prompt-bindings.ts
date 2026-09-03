@@ -1,12 +1,13 @@
 /**
  * Binds Character Library references to the markers the selected fal model reads.
  *
- * fal's reference endpoints do not share one dialect. Seedance's schema says
- * "Refer to them in the prompt as @Image1, @Image2"; MiniMax H3's says "Image
- * 1, Image 2"; Veo 3.1 takes `image_urls` for "consistent subject appearance"
- * and documents no marker at all. A prompt written in the wrong dialect does
- * not fail — the references are simply ignored and the owner pays for a video
- * that does not contain their character.
+ * fal's reference endpoints do not share one dialect, and two endpoints from
+ * the SAME vendor can differ: Seedance 2.5 reads `[Image1]` while Seedance 2.0
+ * reads `@Image1`; MiniMax H3 and H3 Max read `Image 1`; Veo 3.1 takes
+ * `image_urls` for "consistent subject appearance" and documents no marker at
+ * all. A prompt written in the wrong dialect does not fail — the references
+ * are simply ignored and the owner pays for a video that does not contain
+ * their character.
  *
  * The binding block is generated from the SAME ordered reference list that
  * becomes the request's image URLs, in the same pass, so marker N and asset N
@@ -30,10 +31,16 @@ export function falReferenceMarker(
   index: number,
 ): string | undefined {
   const position = index + 1;
-  if (style === "at_image_n") {
-    return `@Image${position}`;
+  switch (style) {
+    case "bracket_image_n":
+      return `[Image${position}]`;
+    case "at_image_n":
+      return `@Image${position}`;
+    case "image_space_n":
+      return `Image ${position}`;
+    default:
+      return undefined;
   }
-  return style === "image_space_n" ? `Image ${position}` : undefined;
 }
 
 function describe(reference: FalBoundReference): string {

@@ -1,19 +1,21 @@
 import { describe, expect, it } from "vitest";
 import { listCompatibleFalFamilies, matchFalFamily, searchFalModels } from "./fal-model-picker.js";
 import { listCompatibleFalModels, type FalVideoRequirements } from "./fal-model-selection.js";
-import { matchFalStoryboardQuery } from "./fal-storyboard-seam.js";
+import { matchFalStoryboardQuery, type FalStoryboardConfig } from "./fal-storyboard-seam.js";
 
 const H3 = "minimax/h3/reference-to-video";
+const H3_MAX = "minimax/h3-max/reference-to-video";
+const SEEDANCE_25 = "bytedance/seedance-2.5/reference-to-video";
 const SEEDANCE = "bytedance/seedance-2.0/reference-to-video";
 const SEEDANCE_FAST = "bytedance/seedance-2.0/fast/reference-to-video";
 const VEO = "fal-ai/veo3.1/reference-to-video";
 
-const CFG = {
+const CFG: FalStoryboardConfig = {
   videoGeneration: {
-    falModels: { [H3]: { durationSeconds: [8, 15], audio: "always_on" as const } },
     falPricing: {
       models: {
         [H3]: { usdPerSecond: 0.1 },
+        [H3_MAX]: { usdPerSecond: 0.15 },
         [SEEDANCE]: { usdPerSecond: 0.05 },
         [SEEDANCE_FAST]: { usdPerSecond: 0.02 },
         [VEO]: { usdPerSecond: 0.3 },
@@ -52,12 +54,12 @@ describe("G. the family picker", () => {
 });
 
 describe("H. the version picker", () => {
-  it("shows only compatible Seedance versions", () => {
+  it("shows only compatible Seedance versions, 2.5 among them", () => {
     const seedance = compatible().filter((model) => model.familyId === "bytedance");
     expect(seedance.map((model) => model.modelId)).toEqual(
-      expect.arrayContaining([SEEDANCE, SEEDANCE_FAST]),
+      expect.arrayContaining([SEEDANCE_25, SEEDANCE, SEEDANCE_FAST]),
     );
-    expect(seedance.every((model) => model.modelId.includes("seedance-2.0"))).toBe(true);
+    expect(seedance.every((model) => model.modelId.includes("seedance"))).toBe(true);
   });
 });
 
@@ -67,8 +69,18 @@ describe("I. typed model queries", () => {
     expect(result.autoApply?.modelId).toBe(SEEDANCE_FAST);
   });
 
-  it("applies 'minimax h3'", () => {
-    expect(searchFalModels(compatible(), "minimax h3").autoApply?.modelId).toBe(H3);
+  it("does NOT auto-apply 'minimax h3': it is ambiguous with H3 Max", () => {
+    // Confusing H3 with H3 Max would bill a model the owner did not choose,
+    // so an ambiguous brand+family query renders choices instead.
+    const result = searchFalModels(compatible(), "minimax h3");
+    expect(result.autoApply).toBeUndefined();
+    expect(result.candidates.map((entry) => entry.model.modelId)).toEqual(
+      expect.arrayContaining([H3, H3_MAX]),
+    );
+  });
+
+  it("applies an unambiguous 'h3 max'", () => {
+    expect(searchFalModels(compatible(), "h3 max").autoApply?.modelId).toBe(H3_MAX);
   });
 
   it("never auto-applies an ambiguous query: it shows choices", () => {
@@ -104,9 +116,7 @@ describe("I. typed model queries", () => {
     expect(result?.kind).not.toBe("model");
   });
 
-  it("never matches an endpoint fal does not publish", () => {
-    expect(searchFalModels(compatible(), "seedance 2.5").autoApply?.modelId).not.toBe(
-      "bytedance/seedance-2.5/reference-to-video",
-    );
+  it("applies 'seedance 2.5' to fal's real 2.5 endpoint, never aliased to 2.0", () => {
+    expect(searchFalModels(compatible(), "seedance 2.5").autoApply?.modelId).toBe(SEEDANCE_25);
   });
 });

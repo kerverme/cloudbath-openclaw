@@ -382,6 +382,10 @@ export function createLineVideoDraftTool(params: CreateLineVideoDraftToolParams)
         });
       }
       const model = offer.model;
+      // The size this endpoint will really produce. Shown, frozen and billed
+      // as one value: displaying the requested size would quote one thing and
+      // deliver another whenever the endpoint cannot produce it.
+      const outputResolution = offer.outputResolution;
       if (offer.estimatedCostUsd === undefined) {
         logInfo(
           `[line/video-draft] event=video_cost_unknown model=${model.modelId} ` +
@@ -413,7 +417,7 @@ export function createLineVideoDraftTool(params: CreateLineVideoDraftToolParams)
         ...(imagePath ? { sourceImagePath: imagePath } : {}),
         durationSeconds,
         aspectRatio,
-        resolution,
+        resolution: outputResolution,
         audio,
         estimatedCostUsd,
         deliveryTo,
@@ -424,7 +428,7 @@ export function createLineVideoDraftTool(params: CreateLineVideoDraftToolParams)
         draftId: draft.draftId,
         modelName: model.displayName,
         durationSeconds,
-        resolution,
+        resolution: outputResolution,
         aspectRatio,
         audio,
         estimatedCostUsd,

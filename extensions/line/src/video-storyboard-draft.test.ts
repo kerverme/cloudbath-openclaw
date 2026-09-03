@@ -22,6 +22,7 @@ const ACCOUNT = "acct-1";
 const GROUP = "C1234567890abcdef";
 const OWNER = "U0987654321";
 const H3 = "minimax/h3/reference-to-video";
+const SEEDANCE_25 = "bytedance/seedance-2.5/reference-to-video";
 const SEEDANCE = "bytedance/seedance-2.0/reference-to-video";
 
 /**
@@ -39,16 +40,18 @@ type FalTestConfig = {
   };
 };
 
+/**
+ * H3 needs no declaration now: fal's product documentation proves 5-15s and
+ * native audio. Only the per-endpoint rates are operator-supplied.
+ */
 function fullyConfigured(maxEstimatedCostUsd = 20): FalTestConfig {
   return {
     videoGeneration: {
       maxEstimatedCostUsd,
-      falModels: {
-        [H3]: { durationSeconds: [5, 10, 15], audio: "always_on" as const },
-      },
       falPricing: {
         models: {
           [H3]: { usdPerSecond: 0.1, source: "https://fal.ai/pricing" },
+          [SEEDANCE_25]: { usdPerSecond: 0.05, source: "https://fal.ai/pricing" },
           [SEEDANCE]: { usdPerSecond: 0.05, source: "https://fal.ai/pricing" },
         },
       },
@@ -162,45 +165,31 @@ describe("E. the capability-aware default", () => {
 });
 
 describe("F. a 30-second scene H3 cannot execute", () => {
-  it("does NOT offer H3, and explains the model that took its place", async () => {
+  it("defaults to Seedance 2.5 and explains why H3 was not offered", async () => {
     const h = harness();
-    const result = await prepareLineStoryboardVideoDraft(
-      // 30s exceeds H3's declared lengths; Seedance's schema tops out at 15,
-      // so nothing can run it — proving the check is capability-driven.
-      request({ durationSeconds: 30 }),
-      h.deps,
-    );
-    expect(result).toMatchObject({ kind: "rejected", reason: "no_compatible_model" });
-  });
-
-  it("picks a proven alternative and names why the preferred one was dropped", async () => {
-    // H3 declared as 15s-only; a 12-second scene is inside Seedance's
-    // schema-proven range but outside H3's declaration.
-    const h = harness({
-      cfg: {
-        videoGeneration: {
-          ...fullyConfigured().videoGeneration,
-          falModels: { [H3]: { durationSeconds: [15], audio: "always_on" as const } },
-        },
-      },
-    });
-    const result = await prepareLineStoryboardVideoDraft(request({ durationSeconds: 12 }), h.deps);
-    expect(result).toMatchObject({ kind: "created", modelId: SEEDANCE });
+    const result = await prepareLineStoryboardVideoDraft(request({ durationSeconds: 30 }), h.deps);
+    expect(result).toMatchObject({ kind: "created", modelId: SEEDANCE_25 });
     if (result.kind !== "created") {
       return;
     }
     expect(result.displacedPreferred?.modelName).toContain("H3");
     expect(result.displacedPreferred?.reasons[0]).toMatchObject({
       kind: "duration",
-      requested: 12,
+      requested: 30,
     });
   });
 
-  it("drops H3 for a silent scene it cannot be proven to silence", async () => {
+  it("drops H3 for a silent scene it cannot be made to silence", async () => {
     const h = harness();
     const result = await prepareLineStoryboardVideoDraft(request({ audio: "off" }), h.deps);
-    // H3 is declared always_on, so it cannot serve a scene that must be silent.
-    expect(result).toMatchObject({ kind: "created", modelId: SEEDANCE });
+    // H3 produces native audio on every generation with no off switch.
+    expect(result).toMatchObject({ kind: "created", modelId: SEEDANCE_25 });
+  });
+
+  it("finds nothing for a length no fal endpoint reaches", async () => {
+    const h = harness();
+    const result = await prepareLineStoryboardVideoDraft(request({ durationSeconds: 60 }), h.deps);
+    expect(result).toMatchObject({ kind: "rejected", reason: "no_compatible_model" });
   });
 });
 
@@ -227,19 +216,15 @@ describe("K. no VIDEO code before model, price, auth and compatibility all pass"
     expect((await h.draftStore.entries()).length).toBe(0);
   });
 
-  it("mints nothing when H3's unbounded duration was never declared", async () => {
-    // Registry ships H3 with `durations: unknown`, because fal's schema types
-    // `duration` as an unbounded number. Unproven is not permission.
+  it("still mints nothing when no endpoint has a usable price", async () => {
+    // Seedance 2.5 carries fal's published token price, so it is excluded by
+    // making its output size one fal publishes no dimensions for.
     const h = harness({
       cfg: {
-        videoGeneration: {
-          maxEstimatedCostUsd: 20,
-          falPricing: { models: { [H3]: { usdPerSecond: 0.1 } } },
-        },
+        videoGeneration: { maxEstimatedCostUsd: 0.01, falPricing: { models: {} } },
       },
     });
     const result = await prepareLineStoryboardVideoDraft(request(), h.deps);
-    // Seedance is schema-proven for 15s but unpriced here, so nothing is payable.
     expect(result).toMatchObject({ kind: "rejected" });
     expect((await h.draftStore.entries()).length).toBe(0);
   });
@@ -259,12 +244,28 @@ describe("K. no VIDEO code before model, price, auth and compatibility all pass"
   it("refuses an endpoint that is not in the registry at all", async () => {
     const h = harness();
     const result = await prepareLineStoryboardVideoDraft(
-      request({ requestedModelId: "bytedance/seedance-2.5/reference-to-video" }),
+      request({ requestedModelId: "bytedance/seedance-9.9/reference-to-video" }),
       h.deps,
     );
-    // fal publishes no Seedance 2.5 endpoint. It is refused rather than
-    // silently substituted with 2.0.
     expect(result).toMatchObject({ kind: "rejected", reason: "model_unavailable" });
+  });
+
+  it("binds fal's REAL Seedance 2.5 endpoint when the owner names it", async () => {
+    const h = harness();
+    const result = await prepareLineStoryboardVideoDraft(
+      request({ requestedModelId: SEEDANCE_25 }),
+      h.deps,
+    );
+    expect(result).toMatchObject({ kind: "created", modelId: SEEDANCE_25 });
+    if (result.kind !== "created") {
+      return;
+    }
+    const stored = await h.draftStore.lookup(result.draftId);
+    // The exact frozen paid model, never aliased onto 2.0.
+    expect(stored?.providerRoute).toEqual({ provider: "fal", modelId: SEEDANCE_25 });
+    // Seedance 2.5's own bracket dialect, not 2.0's @Image form.
+    expect(stored?.prompt).toContain("[Image1] = F1 (CHAR-12), identity reference.");
+    expect(stored?.prompt).not.toContain("@Image1");
   });
 
   it("refuses when the quote exceeds the configured ceiling", async () => {
@@ -345,7 +346,9 @@ describe("compatible-model listing for the pickers", () => {
   it("offers only endpoints that are both compatible AND priced", async () => {
     const cfg = fullyConfigured();
     const models = listStoryboardCompatibleModels(request(), cfg);
-    expect(models.map((model) => model.modelId)).toEqual([H3, SEEDANCE]);
+    expect(models.map((model) => model.modelId)).toEqual(
+      expect.arrayContaining([H3, SEEDANCE_25, SEEDANCE]),
+    );
   });
 
   it("omits a compatible endpoint the operator never priced", () => {
@@ -356,7 +359,10 @@ describe("compatible-model listing for the pickers", () => {
       },
     };
     const models = listStoryboardCompatibleModels(request(), cfg);
-    expect(models.map((model) => model.modelId)).toEqual([SEEDANCE]);
+    // Seedance 2.5 remains payable on fal's published token price even with no
+    // operator rate; H3 without one drops out.
+    expect(models.map((model) => model.modelId)).not.toContain(H3);
+    expect(models.map((model) => model.modelId)).toContain(SEEDANCE);
   });
 });
 
