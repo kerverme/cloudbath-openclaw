@@ -27,7 +27,16 @@ export type StoryboardPaidDraftRequest = Readonly<{
   durationSeconds: number;
   aspectRatio: string;
   resolution: string;
-  audio: boolean;
+  /**
+   * The scene's audio decision, as the storyboard's own three-way mode.
+   *
+   * Not a boolean: "sound with no speech" is a real answer, and the provider
+   * side needs it to judge whether a model that cannot be silenced, or cannot
+   * be proven to make sound, can execute this scene at all.
+   */
+  audio: "off" | "ambient" | "full";
+  /** True when a beat carries a spoken line. */
+  spokenDialogue: boolean;
   storyboardId: string;
   storyboardVersionNumber: number;
   characterLocks: readonly Readonly<{ code: string; pageId: string }>[];
@@ -35,7 +44,12 @@ export type StoryboardPaidDraftRequest = Readonly<{
     kind: "identity" | "product" | "style";
     source: "r2" | "https";
     locator: string;
+    /** Canonical Character code, so the provider can name it in its markers. */
+    characterCode?: string;
+    displayName?: string;
   }>[];
+  /** Endpoint the owner chose. Absent means the capability-aware default. */
+  requestedModelId?: string;
 }>;
 
 export type StoryboardPaidDraftResult =
@@ -44,6 +58,7 @@ export type StoryboardPaidDraftResult =
       draftId: string;
       modelId: string;
       modelName: string;
+      familyId?: string;
       durationSeconds: number;
       resolution: string;
       aspectRatio: string;
@@ -52,13 +67,75 @@ export type StoryboardPaidDraftResult =
       maxAllowedUsd: number;
       /** Opaque provenance string from the owning plugin; never parsed here. */
       pricingSource: string;
-      outputSize?: string;
       /** Codes this allocation retired; the owner is told these are dead. */
       supersededDraftIds?: readonly string[];
+      /**
+       * The preferred default this model replaced, when it was displaced.
+       *
+       * Present so the reply can explain WHY the default differs instead of
+       * the owner quietly receiving a model the product does not usually pick.
+       */
+      displacedPreferred?: Readonly<{
+        modelName: string;
+        reasons: readonly Readonly<{ kind: string; [key: string]: unknown }>[];
+      }>;
     }>
   | Readonly<{ kind: "rejected"; reason: string; [key: string]: unknown }>;
 
+/** What a frozen storyboard needs from an endpoint. Provider-neutral. */
+export type StoryboardVideoRequirements = Readonly<{
+  durationSeconds: number;
+  aspectRatio: string;
+  resolution: string;
+  audio: "off" | "ambient" | "full";
+  spokenDialogue: boolean;
+  identityReferenceCount: number;
+}>;
+
+export type StoryboardRuntimeModelOption = Readonly<{
+  modelId: string;
+  displayName: string;
+  familyId: string;
+  familyDisplayName: string;
+}>;
+
+export type StoryboardRuntimeModelOffer =
+  | Readonly<{
+      kind: "offered";
+      model: StoryboardRuntimeModelOption;
+      estimatedCostUsd?: number;
+      displacedReason?: string;
+    }>
+  | Readonly<{ kind: "none_compatible" }>;
+
+export type StoryboardRuntimeModelMatch =
+  | Readonly<{ kind: "model"; modelId: string }>
+  | Readonly<{ kind: "family"; familyId: string }>
+  | Readonly<{ kind: "candidates"; models: readonly StoryboardRuntimeModelOption[] }>;
+
 export type StoryboardPaidDraftRuntime = {
+  /**
+   * The capability-aware default for a frozen storyboard, with its quote.
+   *
+   * Declared on the seam rather than imported, because the model registry,
+   * its capabilities and its prices all belong to the owning plugin. This side
+   * renders the answer and never holds a model list of its own.
+   */
+  offerDefaultVideoModel?(
+    accountId: string,
+    requirements: StoryboardVideoRequirements,
+  ): Promise<StoryboardRuntimeModelOffer>;
+  /** Endpoints that can execute this frozen storyboard, in preference order. */
+  listCompatibleVideoModels?(
+    accountId: string,
+    requirements: StoryboardVideoRequirements,
+  ): Promise<readonly StoryboardRuntimeModelOption[]>;
+  /** Ranks a typed model query. Never applies a weak or ambiguous guess. */
+  matchVideoModelQuery?(
+    accountId: string,
+    requirements: StoryboardVideoRequirements,
+    text: string,
+  ): Promise<StoryboardRuntimeModelMatch | undefined>;
   prepareStoryboardVideoDraft(
     request: StoryboardPaidDraftRequest,
   ): Promise<StoryboardPaidDraftResult>;

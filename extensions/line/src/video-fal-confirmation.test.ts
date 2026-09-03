@@ -65,7 +65,9 @@ vi.mock("./accounts.js", () => ({
     config: {
       videoGeneration: {
         maxEstimatedCostUsd: 5,
-        falPricing: { seedanceReferenceToVideoUsdPerSecond: 0.1 },
+        falPricing: {
+          models: { "bytedance/seedance-2.0/reference-to-video": { usdPerSecond: 0.1 } },
+        },
       },
     },
   }),
@@ -98,7 +100,6 @@ import type { LineVideoWorkspaceRuntime } from "./video-workspace-runtime.js";
 const FAL_ROUTE = {
   provider: "fal" as const,
   modelId: "bytedance/seedance-2.0/reference-to-video",
-  catalogModelId: "bytedance/seedance-2.5",
 };
 const OWNER_ID = "U-owner";
 const TRANSIENT_FAL_URL = "https://v3.fal.media/files/rabbit/out.mp4?token=transient";
@@ -232,14 +233,11 @@ async function fixture(options: { withScope?: boolean } = {}) {
     draftStore,
     jobStore,
     activeJobLockStore,
-    resolveApiKey: async () => "sk-test",
+    resolveFalAuth: async () => true,
     createNotionLibrary: () => notion as never,
     workspaceRuntime: workspaceRuntime(scopeStore),
     // A fal-routed draft must never need the OpenRouter catalog. Any call here
     // is the bug this fetch double exists to catch.
-    fetchImpl: (async () => {
-      throw new Error("fal-routed confirmation must not call the OpenRouter catalog");
-    }) as unknown as typeof fetch,
     scheduleBackgroundWork: (run) => {
       scheduled.push(run);
     },

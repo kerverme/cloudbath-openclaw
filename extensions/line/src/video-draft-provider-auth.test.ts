@@ -36,7 +36,14 @@ vi.mock("./accounts.js", () => ({
     channelAccessToken: "token",
     channelSecret: "secret",
     tokenSource: "config" as const,
-    config: {},
+    config: {
+      videoGeneration: {
+        // fal rates are per endpoint; an unpriced endpoint is not payable.
+        falPricing: {
+          models: { "bytedance/seedance-2.0/reference-to-video": { usdPerSecond: 0.1 } },
+        },
+      },
+    },
   }),
 }));
 
@@ -166,7 +173,7 @@ describe("LINE video draft: canonical OpenRouter credential resolution", () => {
 
     expect(details?.resolution).toBe("draft_created");
     expect(text).toContain("🎬 Video draft");
-    expect(text).toContain("ByteDance: Seedance 2.5");
+    expect(text).toContain("Seedance 2.0 Reference-to-Video");
     expect(text).toMatch(/ยืนยัน VIDEO \d{4}/u);
     expect((await draftStore.entries()).length).toBe(1);
     expect(paidVideoPosts()).toStrictEqual([]);
@@ -199,7 +206,7 @@ describe("LINE video draft: canonical OpenRouter credential resolution", () => {
 });
 
 describe("LINE video draft: deterministic failure messaging", () => {
-  it("4: missing provider credentials give provider_auth_unavailable naming openrouter", async () => {
+  it("4: missing provider credentials give provider_auth_unavailable naming fal", async () => {
     providerAuthResult = {};
     const { tool, draftStore } = buildProductionOwnerTool();
 
@@ -212,7 +219,7 @@ describe("LINE video draft: deterministic failure messaging", () => {
     // owner-permission failure.
     expect(details?.provider).toBe("openrouter");
     expect(text).toContain("❌ ยังสร้าง Video Draft ไม่ได้");
-    expect(text).toContain("OpenRouter");
+    expect(text).toContain("fal.ai");
     expect((await draftStore.entries()).length).toBe(0);
   });
 
@@ -239,21 +246,6 @@ describe("LINE video draft: deterministic failure messaging", () => {
     expect(text).toContain("LINE runtime context ไม่ครบ");
   });
 
-  it("7: a failing catalog gives the deterministic catalog failure", async () => {
-    const { tool, paidVideoPosts } = buildProductionOwnerTool({ catalogFails: true });
-
-    const result = await tool!.execute("call-1", { prompt: OWNER_REQUEST_PROMPT });
-    const text = (result as { content: Array<{ text: string }> }).content[0]?.text ?? "";
-
-    expect((result as { details?: { resolution?: string } }).details?.resolution).toBe(
-      "catalog_unavailable",
-    );
-    expect(text).toContain("โหลดรายการ Video Model");
-    expect(paidVideoPosts()).toStrictEqual([]);
-  });
-});
-
-describe("LINE video draft: structured diagnostics", () => {
   it("8: logs one attempt record and exactly one resolution", async () => {
     const { tool } = buildProductionOwnerTool({
       contextApiKeyResolverAvailable: false,

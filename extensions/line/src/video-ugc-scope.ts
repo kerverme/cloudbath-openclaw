@@ -194,7 +194,12 @@ export function validateLineVideoUgcScope(params: {
     params.scope.accountId === params.accountId &&
     params.scope.lineGroupId === params.groupId &&
     params.scope.ownerSenderId === params.ownerSenderId &&
-    params.scope.frozenPrompt === params.frozenPrompt &&
+    // The frozen scene text must OPEN the submitted prompt unchanged. It is a
+    // prefix rather than an equality because model selection appends the
+    // chosen endpoint's reference-marker bindings (@Image1 / Image 1) after
+    // the storyboard was confirmed. Nothing may edit the scene itself, so a
+    // rewrite anywhere inside it still fails this check.
+    params.frozenPrompt.startsWith(params.scope.frozenPrompt) &&
     params.scope.r2Prefix === "outbound/line-video" &&
     params.binding?.policyId === "UGC" &&
     params.binding.accountId === params.accountId &&

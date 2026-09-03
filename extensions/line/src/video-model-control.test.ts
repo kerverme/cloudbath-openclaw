@@ -598,7 +598,7 @@ describe("createLineVideoModelControlRouter — active-draft re-quote", () => {
     const agreed = await h.router(baseEvent({ content: "ไม่มีเสียง" }), CTX);
     expect(agreed?.text).toContain("ยืนยัน VIDEO 8821");
     // Audio is only dropped because the owner said so.
-    expect(h.calls[1]?.overrides).toEqual({ audio: false });
+    expect(h.calls[1]?.overrides).toEqual({ audio: "off" });
   });
 
   it("M: unrelated chat during a pending question is not swallowed", async () => {

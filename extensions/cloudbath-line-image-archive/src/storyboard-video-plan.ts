@@ -9,7 +9,7 @@
  */
 
 import { randomBytes } from "node:crypto";
-import { storyboardWantsProviderAudio } from "./storyboard-audio.js";
+import { storyboardHasSpeech } from "./storyboard-audio.js";
 import {
   tryGetStoryboardPaidDraftRuntime,
   type StoryboardPaidDraftRequest,
@@ -28,14 +28,13 @@ import type {
 import type { AsyncKeyedStore } from "./types.js";
 
 /**
- * Preferred model, by DISPLAY NAME only.
+ * Placeholder shown while no endpoint is bound yet.
  *
- * This repository resolves video model ids from the provider's live catalog at
- * confirmation time and holds no verified canonical id for this model, so the
- * draft stays provider-neutral. Inventing an api id here would bind the paid
- * pipeline to a string no catalog can resolve.
+ * Not a model name: endpoint selection belongs to the LINE side's fal registry
+ * and happens only AFTER the storyboard is confirmed. Naming a preferred model
+ * here would put a second, drifting model opinion in the product.
  */
-export const STORYBOARD_PREFERRED_VIDEO_MODEL_DISPLAY_NAME = "Seedance 2.5";
+export const STORYBOARD_UNBOUND_MODEL_DISPLAY_NAME = "ยังไม่เลือกโมเดล";
 
 const MAX_DRAFT_ID_ATTEMPTS = 20;
 
@@ -47,7 +46,7 @@ export function storyboardDraftKey(draftId: string): string {
 export function resolveStoryboardVideoModel(): StoryboardVideoModelSelection {
   return Object.freeze({
     kind: "deferred",
-    displayName: STORYBOARD_PREFERRED_VIDEO_MODEL_DISPLAY_NAME,
+    displayName: STORYBOARD_UNBOUND_MODEL_DISPLAY_NAME,
   });
 }
 
@@ -166,8 +165,16 @@ export type PrepareFinalVideoDraftParams = Readonly<{
     durationSeconds?: number;
     resolution?: string;
     aspectRatio?: string;
-    audio?: boolean;
+    audio?: "off" | "ambient" | "full";
   }>;
+  /**
+   * fal endpoint the owner selected after confirming the storyboard.
+   *
+   * Absent means the capability-aware default. Either way the LINE side
+   * re-checks it against this frozen version; naming a model is not a way to
+   * bypass compatibility.
+   */
+  requestedModelId?: string;
 }>;
 
 /**
@@ -238,15 +245,26 @@ function audioPromptLines(plan: StoryboardVideoPlan): readonly string[] {
 function paidReferenceAssets(
   version: StoryboardVersion,
 ): StoryboardPaidDraftRequest["referenceAssets"] {
+  const displayNames = castDisplayNames(version);
   return version.characterLocks.flatMap((lock) =>
     lock.identityReferences.map((reference) =>
       Object.freeze({
         kind: reference.kind,
         source: reference.source,
         locator: reference.locator,
+        // The canonical code and the scene name travel WITH the asset so the
+        // provider side can name the right subject in its reference markers
+        // without re-deriving which character an asset belonged to.
+        characterCode: lock.code,
+        ...((name) => (name ? { displayName: name } : {}))(displayNames.get(lock.code)),
       }),
     ),
   );
+}
+
+/** Scene names by canonical code, e.g. CHAR-12 -> "F1". */
+function castDisplayNames(version: StoryboardVersion): Map<string, string> {
+  return new Map(version.document.cast.map((member) => [member.characterId, member.displayName]));
 }
 
 /**
@@ -281,12 +299,16 @@ export async function prepareStoryboardFinalVideoDraftWithOutcome(
   // A refused paid draft is NOT a failed turn: the storyboard is still real and
   // the owner still gets it, minus a confirmation code. Only the LINE-allocated
   // code makes a draft billable, so a rejection simply leaves it unbillable.
+  // The draft names the ACTUAL endpoint and provider that will be billed, as
+  // the LINE side reported them. No display-name substitution: what the owner
+  // authorises has to be what receives the request.
   const model: StoryboardVideoModelSelection =
     paid?.kind === "created"
       ? Object.freeze({
           kind: "provider-bound",
+          provider: "fal.ai",
           providerModelId: paid.modelId,
-          displayName: STORYBOARD_PREFERRED_VIDEO_MODEL_DISPLAY_NAME,
+          displayName: paid.modelName,
         })
       : resolveStoryboardVideoModel();
   const estimatedCost: StoryboardCostEstimate =
@@ -371,17 +393,21 @@ async function requestPaidDraft(
       durationSeconds: params.overrides?.durationSeconds ?? plan.durationSeconds,
       aspectRatio: params.overrides?.aspectRatio ?? plan.aspectRatio,
       resolution: params.overrides?.resolution ?? plan.resolution,
-      // Asking is not granting: the LINE side only honours this when the live
-      // catalog reports audio support for the bound model. A scene the owner
-      // muted asks for none, so it re-quotes against the cheaper silent SKU
-      // instead of paying for audio nobody asked for.
-      audio: params.overrides?.audio ?? storyboardWantsProviderAudio(version.document),
+      // The scene's own three-way audio decision, passed through rather than
+      // flattened to a boolean: the provider side has to distinguish "must
+      // make sound" from "must be silent" to judge a model that can do
+      // neither on demand.
+      audio: params.overrides?.audio ?? version.document.audio,
+      spokenDialogue: storyboardHasSpeech(version.document),
       storyboardId: version.storyboardId,
       storyboardVersionNumber: version.versionNumber,
+      // Canonical identity only. A scene name travels with its reference
+      // asset instead, so a display name can never stand in for a code here.
       characterLocks: version.characterLocks.map((lock) =>
         Object.freeze({ code: lock.code, pageId: lock.pageId }),
       ),
       referenceAssets: paidReferenceAssets(version),
+      ...(params.requestedModelId ? { requestedModelId: params.requestedModelId } : {}),
     });
   } catch {
     return { kind: "rejected", reason: "paid_draft_unavailable" };

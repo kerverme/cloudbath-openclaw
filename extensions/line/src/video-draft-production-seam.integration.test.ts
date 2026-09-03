@@ -79,7 +79,14 @@ vi.mock("./accounts.js", () => ({
     channelAccessToken: "test-token",
     channelSecret: "test-secret",
     tokenSource: "config" as const,
-    config: {},
+    config: {
+      videoGeneration: {
+        // fal rates are per endpoint; an unpriced endpoint is not payable.
+        falPricing: {
+          models: { "bytedance/seedance-2.0/reference-to-video": { usdPerSecond: 0.1 } },
+        },
+      },
+    },
   }),
 }));
 
@@ -161,12 +168,12 @@ function createStores() {
 
 function expectCompleteDraftPreview(text: string) {
   expect(text).toContain("🎬 Video draft");
-  expect(text).toContain("Model: ByteDance: Seedance 2.5");
+  expect(text).toContain("Model: Seedance 2.0 Reference-to-Video");
   expect(text).toContain("Duration: 5 sec");
   expect(text).toContain("Resolution: 480p");
   expect(text).toContain("Aspect: 16:9");
   expect(text).toContain("Audio: Off");
-  expect(text).toContain("Estimated cost: $0.51");
+  expect(text).toContain("Estimated cost: $0.50");
   expect(text).toContain("Prompt:\na cat sitting on water");
   expect(text).toMatch(/ยืนยัน VIDEO \d{4}/u);
   expect(text).toContain("เพื่อเริ่มสร้าง");
@@ -354,8 +361,7 @@ describe(`LINE production outbound seam for '${PRODUCTION_REQUEST}'`, () => {
         activeJobLockStore: stores.get(
           LINE_VIDEO_ACTIVE_JOB_NAMESPACE,
         ) as PluginStateKeyedStore<LineVideoActiveJobLock>,
-        resolveApiKey: async () => "test-openrouter-key",
-        fetchImpl: globalThis.fetch,
+        resolveFalAuth: async () => true,
         createNotionLibrary: () => ({
           validate: async () => {},
           createProcessing: async () => ({ pageId: "notion-test-page" }),

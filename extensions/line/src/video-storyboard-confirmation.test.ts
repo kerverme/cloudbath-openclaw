@@ -26,7 +26,7 @@ type SubmittedVideoRequest = {
 
 const generateVideoMock = vi.fn(async (_request: SubmittedVideoRequest) => ({
   videos: [{ buffer: Buffer.from("video"), mimeType: "video/mp4" }],
-  metadata: { usage: { cost: 3.468 } },
+  metadata: {},
 }));
 const sendMessageLineMock = vi.fn(async (..._args: unknown[]) => ({}));
 const runtimeConfigMock = vi.hoisted(() => ({ current: {} as Record<string, unknown> }));
@@ -77,6 +77,28 @@ vi.mock("./video-ugc-scope.js", async () => {
   };
 });
 
+// fal's endpoint takes reference URLs, not bytes. Only the R2 publish is
+// replaced; the ORDERING comes from the real resolver, because that ordering is
+// what binds each @Image marker to the right character.
+vi.mock("./video-reference-urls.js", async () => {
+  const scopeModule =
+    await vi.importActual<typeof import("./video-ugc-scope.js")>("./video-ugc-scope.js");
+  return {
+    resolveLineVideoReferenceUrls: async (
+      scope: Parameters<typeof scopeModule.orderLineVideoUgcReferences>[0],
+    ) => {
+      materializeMock.calls.push(scope);
+      return scopeModule.orderLineVideoUgcReferences(scope).map((reference, index) => ({
+        index,
+        // The locator travels in the URL so submission order stays assertable
+        // without reaching storage.
+        url: `https://r2.example/${encodeURIComponent(reference.locator)}?X-Amz-Signature=sig`,
+        mimeType: "image/png",
+      }));
+    },
+  };
+});
+
 const { CloudbathStoryboardLineRouter } =
   await import("../../cloudbath-line-image-archive/src/storyboard-line-router.js");
 const { StoryboardStore } =
@@ -84,9 +106,10 @@ const { StoryboardStore } =
 const { resolver, CREATE_MESSAGE } =
   await import("../../cloudbath-line-image-archive/src/storyboard-router.test-support.js");
 const { createLineVideoConfirmationGate } = await import("./video-confirmation.js");
+const { listFalStoryboardModels, matchFalStoryboardQuery, offerFalStoryboardDefault } =
+  await import("./fal-storyboard-seam.js");
 const { prepareLineStoryboardVideoDraft } = await import("./video-storyboard-draft.js");
 const { ugcDraftScopeKey } = await import("../../cloudbath-line-image-archive/src/ugc-workflow.js");
-const { DEFAULT_VIDEO_MAX_ESTIMATED_COST_USD } = await import("./video-cost-guard.js");
 
 const ACCOUNT = "acct-1";
 const GROUP = "C1234567890abcdef";
@@ -113,37 +136,32 @@ const CAPABILITIES = Object.fromEntries(
  * Served over `fetchImpl` so the production catalog client parses it, and used
  * by BOTH the allocation and the gate's pre-submit re-check.
  */
-const CATALOG_ROWS = [
-  {
-    id: "bytedance/seedance-2.5",
-    name: "Seedance 2.5",
-    supported_durations: [4, 5, 10, 15, 20, 30],
-    supported_aspect_ratios: ["16:9", "9:16", "1:1"],
-    supported_resolutions: ["480p", "720p"],
-    supported_sizes: ["1280x720", "720x1280"],
-    supported_frame_images: ["first"],
-    generate_audio: true,
-    pricing_skus: { "per-video-second": "0.2312" },
-  },
-  {
-    id: "minimax/hailuo-h3",
-    name: "MiniMax: Hailuo H3",
-    supported_durations: [6, 10, 15],
-    supported_aspect_ratios: ["16:9", "9:16"],
-    supported_resolutions: ["720p"],
-    supported_sizes: ["1280x720", "720x1280"],
-    supported_frame_images: [],
-    generate_audio: false,
-    pricing_skus: { "per-video-second": "0.1000" },
-  },
-];
+/** The two fal endpoints these cases exercise. */
+const H3_MODEL = "minimax/h3/reference-to-video";
+const SEEDANCE_MODEL = "bytedance/seedance-2.0/reference-to-video";
+
+/**
+ * One fal configuration, shared by the allocation and the gate.
+ *
+ * Rates are per endpoint because fal does not bill one blended rate; H3's
+ * duration and audio are declared because fal's schema states neither.
+ */
+function falVideoGeneration(maxEstimatedCostUsd: number) {
+  return {
+    maxEstimatedCostUsd,
+    falPricing: {
+      models: {
+        [SEEDANCE_MODEL]: { usdPerSecond: 0.2312 },
+        [H3_MODEL]: { usdPerSecond: 0.1 },
+      },
+    },
+    falModels: {
+      [H3_MODEL]: { durationSeconds: [6, 10, 15], audio: "always_on" as const },
+    },
+  };
+}
 
 /** Serves the catalog fixture as an OpenRouter HTTP response. */
-const catalogFetch = async () =>
-  new Response(JSON.stringify({ data: CATALOG_ROWS }), {
-    status: 200,
-    headers: { "content-type": "application/json" },
-  });
 
 function mem<T>(): PluginStateKeyedStore<T> {
   const values = new Map<string, T>();
@@ -223,24 +241,58 @@ function harness(
   // worker. The seam's install/resolve round-trip is covered separately; what
   // matters here is that this IS the real LINE implementation.
   const paidDraftRuntime = {
+    // The SAME fal seam production installs, so the model the picker offers
+    // and the model the draft allocates come from one registry.
+    offerDefaultVideoModel: async (accountId: string, requirements: never) =>
+      offerFalStoryboardDefault(
+        { videoGeneration: falVideoGeneration(options.maxEstimatedCostUsd ?? 5) },
+        requirements,
+      ),
+    listCompatibleVideoModels: async (accountId: string, requirements: never) =>
+      listFalStoryboardModels(
+        { videoGeneration: falVideoGeneration(options.maxEstimatedCostUsd ?? 5) },
+        requirements,
+      ),
+    matchVideoModelQuery: async (accountId: string, requirements: never, text: string) =>
+      matchFalStoryboardQuery(
+        { videoGeneration: falVideoGeneration(options.maxEstimatedCostUsd ?? 5) },
+        requirements,
+        text,
+      ),
     prepareStoryboardVideoDraft: async (request: never) =>
-      await prepareLineStoryboardVideoDraft(request, {
-        draftStore: draftStore as never,
-        ...(options.preferredModel
-          ? {
-              preferenceStore: {
-                lookup: async () => ({ model: options.preferredModel, updatedAt: NOW }),
-              } as never,
-            }
-          : {}),
-        resolveApiKey: async () => "sk-test",
-        cfg: {
-          videoGeneration: { maxEstimatedCostUsd: options.maxEstimatedCostUsd ?? 5 },
+      await prepareLineStoryboardVideoDraft(
+        {
+          ...(request as object),
+          // The owner's chosen endpoint, when this case exercises selection.
+          ...(options.preferredModel ? { requestedModelId: options.preferredModel } : {}),
+        } as never,
+        {
+          draftStore: draftStore as never,
+          resolveFalAuth: async () => true,
+          cfg: {
+            videoGeneration: {
+              maxEstimatedCostUsd: options.maxEstimatedCostUsd ?? 5,
+              // Rates are per endpoint; an unpriced endpoint is not payable.
+              falPricing: {
+                models: {
+                  "bytedance/seedance-2.0/reference-to-video": { usdPerSecond: 0.2312 },
+                  "minimax/h3/reference-to-video": { usdPerSecond: 0.1 },
+                },
+              },
+              // MiniMax H3's duration and audio are not stated by fal's schema,
+              // so the operator declares them, exactly as production requires.
+              falModels: {
+                "minimax/h3/reference-to-video": {
+                  durationSeconds: [6, 10, 15],
+                  audio: "always_on" as const,
+                },
+              },
+            },
+          },
+          now: () => NOW,
+          ...(options.draftCodes ? { randomDraftCode: () => codes.shift() ?? 9999 } : {}),
         },
-        now: () => NOW,
-        fetchImpl: catalogFetch as never,
-        ...(options.draftCodes ? { randomDraftCode: () => codes.shift() ?? 9999 } : {}),
-      }),
+      ),
   };
 
   // The workspace runtime the gate reads the frozen scope from, shaped exactly
@@ -277,10 +329,9 @@ function harness(
     draftStore: draftStore as never,
     jobStore: jobStore as never,
     activeJobLockStore: activeJobLockStore as never,
-    resolveApiKey: async () => "sk-test",
+    resolveFalAuth: async () => true,
     // The gate re-reads the catalog through its real client; this serves the
     // same fixture bytes, so the production parser runs rather than a stub.
-    fetchImpl: catalogFetch as never,
     workspaceRuntime: workspaceRuntime as never,
     createNotionLibrary: () => notionLibraryStub() as never,
     scheduleBackgroundWork: (run) => void background.push(run),
@@ -290,9 +341,10 @@ function harness(
       channelAccessToken: "token",
       channelSecret: "secret",
       tokenSource: "config" as const,
-      config: {
-        videoGeneration: { maxEstimatedCostUsd: options.maxEstimatedCostUsd ?? 5 },
-      },
+      // The SAME fal configuration the allocation used: the gate re-quotes
+      // against the operator's live config, so a rate or capability that has
+      // moved since the draft was minted is what refuses it.
+      config: { videoGeneration: falVideoGeneration(options.maxEstimatedCostUsd ?? 5) },
     })) as never,
     now: () => NOW,
   });
@@ -356,15 +408,15 @@ describe("Storyboard -> LINE draft -> real confirmation gate -> provider boundar
     // The draft is a real LINE-owned record, allocated by the real allocator.
     const stored = await h.draftStore.lookup(code!);
     expect(stored).toMatchObject({
-      model: "bytedance/seedance-2.5",
+      model: H3_MODEL,
       ownerSenderId: OWNER,
       status: "pending",
       durationSeconds: 15,
-      resolution: "720p",
+      resolution: "2K",
       aspectRatio: "9:16",
     });
     expect((stored as unknown as { estimatedCostUsd: number }).estimatedCostUsd).toBeCloseTo(
-      3.468,
+      1.5,
       3,
     );
 
@@ -375,9 +427,9 @@ describe("Storyboard -> LINE draft -> real confirmation gate -> provider boundar
 
     expect(generateVideoMock).toHaveBeenCalledTimes(1);
     const submitted = generateVideoMock.mock.calls[0]![0];
-    expect(submitted.modelOverride).toBe("openrouter/bytedance/seedance-2.5");
+    expect(submitted.modelOverride).toBe(`fal/${H3_MODEL}`);
     expect(submitted.durationSeconds).toBe(15);
-    expect(submitted.resolution).toBe("720p");
+    expect(submitted.resolution).toBe("2K");
     expect(submitted.aspectRatio).toBe("9:16");
     expect(submitted.autoProviderFallback).toBe(false);
 
@@ -386,11 +438,19 @@ describe("Storyboard -> LINE draft -> real confirmation gate -> provider boundar
     expect(submitted.prompt).toContain("CHAR-7");
     expect(submitted.prompt).toContain("นั่งลง");
 
-    // Frozen identity references, in cast order.
-    expect(submitted.inputImages?.map((asset) => asset.buffer.toString())).toEqual([
-      "ugc/page-char-6.png",
-      "ugc/page-char-7.png",
+    // Frozen identity references, in cast order, as the signed R2 URLs fal's
+    // endpoint takes. The ORDER is what binds each @Image marker to a subject.
+    const submittedUrls = (
+      submitted.inputImages as ReadonlyArray<{ url?: string }> | undefined
+    )?.map((asset) => asset.url);
+    expect(submittedUrls).toEqual([
+      "https://r2.example/ugc%2Fpage-char-6.png?X-Amz-Signature=sig",
+      "https://r2.example/ugc%2Fpage-char-7.png?X-Amz-Signature=sig",
     ]);
+    // Reference bindings are written in the SELECTED model's own dialect and
+    // in the same order, so marker N and image N cannot drift apart.
+    expect(submitted.prompt).toContain("Image 1 = ");
+    expect(submitted.prompt).toContain("Image 2 = ");
   });
 
   it("records the confirmed quote on the job it created", async () => {
@@ -402,12 +462,12 @@ describe("Storyboard -> LINE draft -> real confirmation gate -> provider boundar
 
     const [job] = (await h.jobStore.entries()).map((entry) => entry.value);
     expect(job).toMatchObject({
-      model: "bytedance/seedance-2.5",
+      model: H3_MODEL,
       durationSeconds: 15,
-      resolution: "720p",
+      resolution: "2K",
       aspectRatio: "9:16",
     });
-    expect((job as unknown as { estimatedCostUsd: number }).estimatedCostUsd).toBeCloseTo(3.468, 3);
+    expect((job as unknown as { estimatedCostUsd: number }).estimatedCostUsd).toBeCloseTo(1.5, 3);
   });
 });
 
@@ -488,8 +548,10 @@ describe("exactly-once billing through the shipped gate", () => {
 });
 
 describe("budget policy is enforced by the shipped guard", () => {
-  it("allocates no code at all under the global default", async () => {
-    const h = harness({ maxEstimatedCostUsd: DEFAULT_VIDEO_MAX_ESTIMATED_COST_USD });
+  it("allocates no code at all when the quote exceeds the ceiling", async () => {
+    // 15s at the H3 rate is $1.50, so the ceiling is set below it: the guard,
+    // not the arithmetic, is what this case is about.
+    const h = harness({ maxEstimatedCostUsd: 0.5 });
     await h.storyboard(CREATE_MESSAGE, "m1");
     const drafted = await h.storyboard("สร้างวิดีโอ", "m2");
 
@@ -579,9 +641,13 @@ describe("superseded VIDEO codes", () => {
     const first = await h.storyboard("สร้างวิดีโอ", "m2");
     expect(first?.text).toContain("ยืนยัน VIDEO 1111");
 
-    // Same storyboard, revised: the re-quote allocates 2222 and retires 1111.
-    const revised = await h.storyboard("ขอ 20 วิแทน", "m3");
-    expect(revised?.text).toContain("ยืนยัน VIDEO 2222");
+    // Same storyboard, revised. A revision alone mints nothing now: the scene
+    // has changed, so it must be confirmed again before any model is quoted.
+    const revised = await h.storyboard("ขอ 10 วิแทน", "m3");
+    expect(revised?.text).not.toMatch(/ยืนยัน VIDEO/u);
+    // Re-quoting is what allocates 2222 and retires 1111.
+    const requoted = await h.storyboard("สร้างวิดีโอ", "m4");
+    expect(requoted?.text).toContain("ยืนยัน VIDEO 2222");
     return h;
   }
 
@@ -619,7 +685,7 @@ describe("superseded VIDEO codes", () => {
     expect(confirmed?.text).toContain("เริ่มสร้างวิดีโอแล้ว");
     expect(generateVideoMock).toHaveBeenCalledTimes(1);
     // The revision is what got submitted, not the length it replaced.
-    expect(generateVideoMock.mock.calls[0]![0].durationSeconds).toBe(20);
+    expect(generateVideoMock.mock.calls[0]![0].durationSeconds).toBe(10);
 
     const replay = await h.confirm("ยืนยัน VIDEO 2222");
     await h.drainBackground();
@@ -666,7 +732,7 @@ describe("superseded VIDEO codes", () => {
 
 describe("storyboard drafts bind the conversation's selected video model", () => {
   it("F: a selected model is what the Final Video Draft quotes, not the default", async () => {
-    const h = harness({ preferredModel: "minimax/hailuo-h3" });
+    const h = harness({ preferredModel: SEEDANCE_MODEL });
     await h.storyboard(CREATE_MESSAGE, "m1");
 
     const drafted = await h.storyboard("สร้างวิดีโอ", "m2");
@@ -676,9 +742,10 @@ describe("storyboard drafts bind the conversation's selected video model", () =>
     const stored = await h.draftStore.lookup(code!);
     // The real allocator wrote the SELECTED model, and priced it at that
     // model's live rate rather than the default's.
-    expect(stored).toMatchObject({ model: "minimax/hailuo-h3", status: "pending" });
+    expect(stored).toMatchObject({ model: SEEDANCE_MODEL, status: "pending" });
+    // Seedance's own $0.2312/s over 15s, not the H3 default's $0.10/s.
     expect((stored as unknown as { estimatedCostUsd: number }).estimatedCostUsd).toBeCloseTo(
-      1.5,
+      3.468,
       3,
     );
     expect(generateVideoMock).not.toHaveBeenCalled();
@@ -691,11 +758,11 @@ describe("storyboard drafts bind the conversation's selected video model", () =>
     const drafted = await h.storyboard("สร้างวิดีโอ", "m2");
 
     const code = /ยืนยัน VIDEO (\d{4})/u.exec(drafted?.text ?? "")![1]!;
-    expect(await h.draftStore.lookup(code)).toMatchObject({ model: "bytedance/seedance-2.5" });
+    expect(await h.draftStore.lookup(code)).toMatchObject({ model: H3_MODEL });
   });
 
   it("M/N: the exact confirmation still submits the selected model exactly once", async () => {
-    const h = harness({ preferredModel: "minimax/hailuo-h3" });
+    const h = harness({ preferredModel: SEEDANCE_MODEL });
     await h.storyboard(CREATE_MESSAGE, "m1");
     const drafted = await h.storyboard("สร้างวิดีโอ", "m2");
     const code = /ยืนยัน VIDEO (\d{4})/u.exec(drafted?.text ?? "")![1]!;
@@ -704,7 +771,7 @@ describe("storyboard drafts bind the conversation's selected video model", () =>
     await h.drainBackground();
 
     expect(generateVideoMock).toHaveBeenCalledTimes(1);
-    expect(generateVideoMock.mock.calls[0]![0].modelOverride).toBe("openrouter/minimax/hailuo-h3");
+    expect(generateVideoMock.mock.calls[0]![0].modelOverride).toBe(`fal/${SEEDANCE_MODEL}`);
     // Replay is still refused by the unchanged exactly-once consume.
     await h.confirm(`ยืนยัน VIDEO ${code}`);
     await h.drainBackground();

@@ -13,22 +13,24 @@
  * webhook handler replies immediately with a "started" acknowledgment
  * instead of blocking on a job that can take minutes.
  */
+import { resolveOpenClawAgentDir } from "openclaw/plugin-sdk/provider-auth";
+import { resolveApiKeyForProvider } from "openclaw/plugin-sdk/provider-auth-runtime";
 import { getRuntimeConfig } from "openclaw/plugin-sdk/runtime-config-snapshot";
 import { createSubsystemLogger } from "openclaw/plugin-sdk/runtime-env";
 import { resolveLineAccount } from "./accounts.js";
-import { estimateFalSeedanceCostUsd, type FalVideoPricingConfig } from "./fal-video-pricing.js";
-import { resolveLineProviderApiKey } from "./openrouter-auth.js";
+import { estimateFalVideoCostUsd, type FalVideoPricingConfig } from "./fal-video-pricing.js";
 import {
-  evaluateLineVideoCostGuard,
-  resolveLineVideoMaxEstimatedCostUsd,
-  resolveLineVideoOutputSize,
-} from "./video-cost-guard.js";
+  FAL_PROVIDER_ID,
+  resolveFalVideoModel,
+  type FalVideoModelConfig,
+} from "./fal-video-registry.js";
+import { resolveLineVideoMaxEstimatedCostUsd } from "./video-cost-guard.js";
 import {
   consumeLineVideoDraft,
   type LineVideoDraft,
   type LineVideoDraftStore,
 } from "./video-draft-store.js";
-import { confirmedDraftRoute, executeConfirmedLineVideoJob } from "./video-job-execution.js";
+import { confirmedFalModelId, executeConfirmedLineVideoJob } from "./video-job-execution.js";
 import {
   claimLineVideoActiveJobLock,
   createLineVideoJob,
@@ -37,7 +39,6 @@ import {
   type LineVideoJobStore,
 } from "./video-job-store.js";
 import { createLineVideoLibraryNotion, type LineVideoLibrary } from "./video-library-notion.js";
-import { loadOpenRouterVideoModels, type OpenRouterVideoModel } from "./video-model-catalog.js";
 import { buildLineVideoConversationKey } from "./video-model-preference.js";
 import {
   hasCloudbathLineGroupWorkspacePolicies,
@@ -108,88 +109,42 @@ type ConfirmedDraftRevalidation =
   | Readonly<{ kind: "ok"; estimatedCostUsd: number }>
   | Readonly<{ kind: "refused"; text: string }>;
 
-/** Re-checks a frozen draft against the live OpenRouter catalog and price. */
-async function revalidateOpenRouterDraft(
-  draft: LineVideoDraft,
-  deps: {
-    resolveApiKey: () => Promise<string | undefined>;
-    fetchImpl?: typeof fetch;
-    cfg: { videoGeneration?: { maxEstimatedCostUsd?: number } };
-  },
-): Promise<ConfirmedDraftRevalidation> {
-  const apiKey = await deps.resolveApiKey();
-  if (!apiKey?.trim()) {
-    return { kind: "refused", text: "ยังไม่ได้ตั้งค่า OpenRouter API key" };
-  }
-  let models: OpenRouterVideoModel[];
-  try {
-    models = await loadOpenRouterVideoModels({ apiKey, fetchImpl: deps.fetchImpl });
-  } catch {
-    return {
-      kind: "refused",
-      text: "ตรวจสอบ video model ไม่สำเร็จ ลองยืนยันใหม่อีกครั้งได้ไหม?",
-    };
-  }
-  const model = models.find((entry) => entry.id === draft.model);
-  if (!model) {
-    return { kind: "refused", text: `video model ${draft.model} ไม่พร้อมใช้งานแล้ว` };
-  }
-  if (
-    (model.supportedAspectRatios.length > 0 &&
-      !model.supportedAspectRatios.includes(draft.aspectRatio)) ||
-    (model.supportedResolutions.length > 0 &&
-      !model.supportedResolutions.includes(draft.resolution)) ||
-    (model.supportedDurationSeconds.length > 0 &&
-      !model.supportedDurationSeconds.includes(draft.durationSeconds))
-  ) {
-    return {
-      kind: "refused",
-      text: "การตั้งค่าของ draft นี้ไม่รองรับแล้ว กรุณาสร้าง draft ใหม่",
-    };
-  }
-  const costGuard = evaluateLineVideoCostGuard({
-    model,
-    selector: {
-      durationSeconds: draft.durationSeconds,
-      ...((size) => (size ? { size } : {}))(
-        resolveLineVideoOutputSize({
-          supportedSizes: model.supportedSizes,
-          resolution: draft.resolution,
-          aspectRatio: draft.aspectRatio,
-        }),
-      ),
-      resolution: draft.resolution,
-      audio: draft.audio,
-    },
-    cfg: deps.cfg,
-  });
-  if (!costGuard.allowed) {
-    return {
-      kind: "refused",
-      text:
-        costGuard.reason === "unknown_cost"
-          ? "ไม่สามารถประเมินค่าใช้จ่ายได้อย่างปลอดภัย ยกเลิกการสร้างวิดีโอ"
-          : `ค่าใช้จ่ายโดยประมาณ ($${costGuard.estimatedCostUsd.toFixed(2)}) เกินวงเงินที่ตั้งไว้ ($${costGuard.maxAllowedUsd.toFixed(2)})`,
-    };
-  }
-  return priceUnchanged(draft, costGuard.estimatedCostUsd);
-}
-
 /**
- * Re-checks a fal-routed draft against fal's rate.
+ * Re-checks a frozen draft against fal's registry and the operator's rate.
  *
- * No catalog call: fal publishes no live catalog, and the endpoint's accepted
- * values are fixed by its own schema, which `prepareLineStoryboardVideoDraft`
- * already validated when the draft was minted. What CAN change between quote
- * and confirmation is the operator's configured rate, so that is what is
- * re-read -- and an unconfigured rate refuses here exactly as it did there,
- * rather than submitting a job whose cost is unknown.
+ * There is no catalog call: fal publishes no live catalog, and the endpoint's
+ * accepted values are fixed by its own published schema, which the registry
+ * already encoded when the draft was minted. What CAN change between quote and
+ * confirmation is the operator's configuration — a retired model, a changed
+ * rate — so both are re-read, and either one failing refuses here exactly as it
+ * would have at draft time rather than submitting a job whose cost or
+ * capability is no longer established.
  */
 function revalidateFalDraft(
   draft: LineVideoDraft,
-  cfg: { videoGeneration?: { maxEstimatedCostUsd?: number } } & FalVideoPricingConfig,
+  cfg: { videoGeneration?: { maxEstimatedCostUsd?: number } } & FalVideoPricingConfig &
+    FalVideoModelConfig,
 ): ConfirmedDraftRevalidation {
-  const price = estimateFalSeedanceCostUsd({ cfg, durationSeconds: draft.durationSeconds });
+  const modelId = confirmedFalModelId(draft);
+  if (!modelId) {
+    // Every payable draft in this flow is fal-bound. One that is not was
+    // minted by an older build against a provider this flow no longer
+    // generates on, and it must be re-drafted rather than submitted anywhere.
+    return {
+      kind: "refused",
+      text: "video draft นี้ผูกกับผู้ให้บริการเดิม กรุณาสร้าง draft ใหม่ก่อนยืนยัน",
+    };
+  }
+  const model = resolveFalVideoModel(cfg, modelId);
+  if (!model) {
+    return { kind: "refused", text: `video model ${modelId} ไม่พร้อมใช้งานแล้ว` };
+  }
+  const price = estimateFalVideoCostUsd({
+    cfg,
+    model,
+    durationSeconds: draft.durationSeconds,
+    resolution: draft.resolution,
+  });
   if (price.kind !== "available") {
     return {
       kind: "refused",
@@ -203,20 +158,28 @@ function revalidateFalDraft(
       text: `ค่าใช้จ่ายโดยประมาณ ($${price.amountUsd.toFixed(2)}) เกินวงเงินที่ตั้งไว้ ($${maxAllowedUsd.toFixed(2)})`,
     };
   }
-  return priceUnchanged(draft, price.amountUsd);
-}
-
-/** The quote the owner confirmed is the only price that may be submitted. */
-function priceUnchanged(
-  draft: LineVideoDraft,
-  estimatedCostUsd: number,
-): ConfirmedDraftRevalidation {
-  return estimatedCostUsd === draft.estimatedCostUsd
-    ? { kind: "ok", estimatedCostUsd }
+  return price.amountUsd === draft.estimatedCostUsd
+    ? { kind: "ok", estimatedCostUsd: price.amountUsd }
     : {
         kind: "refused",
         text: "ค่าใช้จ่ายของ video draft เปลี่ยนไป กรุณาสร้าง draft ใหม่ก่อนยืนยัน",
       };
+}
+
+/**
+ * Default fal credential check.
+ *
+ * Goes through core's provider auth exactly as the fal provider itself does,
+ * so "configured" here means the same thing it will mean at submission time.
+ * The key is never read into this module, logged, or returned.
+ */
+async function defaultFalAuthCheck(): Promise<boolean> {
+  const auth = await resolveApiKeyForProvider({
+    provider: FAL_PROVIDER_ID,
+    cfg: getRuntimeConfig(),
+    agentDir: resolveOpenClawAgentDir(),
+  });
+  return Boolean(auth.apiKey?.trim());
 }
 
 export function createLineVideoConfirmationGate(params: {
@@ -224,14 +187,14 @@ export function createLineVideoConfirmationGate(params: {
   jobStore: LineVideoJobStore;
   activeJobLockStore: LineVideoActiveJobLockStore;
   workspaceRuntime?: LineVideoWorkspaceRuntime;
-  resolveApiKey?: () => Promise<string | undefined>;
-  fetchImpl?: typeof fetch;
+  /** Proves fal credentials exist before the paid path is entered. */
+  resolveFalAuth?: () => Promise<boolean>;
   createNotionLibrary?: (target: LineVideoNotionTarget) => LineVideoLibrary;
   scheduleBackgroundWork?: (run: () => Promise<void>) => void;
   resolveAccount?: typeof resolveLineAccount;
   now?: () => number;
 }) {
-  const resolveApiKey = params.resolveApiKey ?? (() => resolveLineProviderApiKey());
+  const resolveFalAuth = params.resolveFalAuth ?? defaultFalAuthCheck;
   const resolveAccount = params.resolveAccount ?? resolveLineAccount;
   const createNotionLibrary =
     params.createNotionLibrary ??
@@ -358,20 +321,17 @@ export function createLineVideoConfirmationGate(params: {
     }
 
     const account = resolveAccount({ cfg, accountId });
-    // Re-validate against the SAME provider the draft is locked to, using the
-    // SAME dimensions it froze, so the pre-submit ceiling check matches what
-    // the owner was quoted. A fal-routed draft is checked against fal's own
-    // schema and rate; running it past the OpenRouter catalog would validate a
-    // request that provider will never receive.
-    const route = confirmedDraftRoute(draft);
-    const revalidated =
-      route.provider === "fal"
-        ? revalidateFalDraft(draft, { videoGeneration: account.config.videoGeneration })
-        : await revalidateOpenRouterDraft(draft, {
-            resolveApiKey,
-            ...(params.fetchImpl ? { fetchImpl: params.fetchImpl } : {}),
-            cfg: { videoGeneration: account.config.videoGeneration },
-          });
+    // fal credentials are proven before the paid path is entered, so a
+    // confirmation can never start a job that dies on auth after the owner
+    // committed. The draft stays unconsumed and its code stays valid.
+    if (!(await resolveFalAuth())) {
+      return { handled: true, text: "ยังไม่ได้ตั้งค่า fal.ai API key" };
+    }
+    // Re-validated against the SAME endpoint and dimensions the draft froze,
+    // so the pre-submit ceiling check matches what the owner was quoted.
+    const revalidated = revalidateFalDraft(draft, {
+      videoGeneration: account.config.videoGeneration,
+    });
     if (revalidated.kind === "refused") {
       return { handled: true, text: revalidated.text };
     }
@@ -427,7 +387,8 @@ export function createLineVideoConfirmationGate(params: {
       resolution: draft.resolution,
       audio: draft.audio,
       estimatedCostUsd,
-      provider: route.provider,
+      provider: "fal",
+      ...(draft.deliveryTo ? { deliveryTo: draft.deliveryTo } : {}),
       now: params.now,
     });
     await claimLineVideoActiveJobLock({

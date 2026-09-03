@@ -296,7 +296,9 @@ describe("beat compilation", () => {
     expect(text).toContain("11–15 วิ");
     expect(text).toContain("Twong · CHAR-6");
     expect(text).toContain("Twong2 · CHAR-7");
-    expect(text).toContain("สร้างวิดีโอ");
+    // The storyboard now ends on the CONTENT confirmation, which costs
+    // nothing: no model is chosen and no VIDEO code exists at this point.
+    expect(text).toContain("ยืนยัน Storyboard หรือบอกจุดที่ต้องการแก้");
   });
 });
 
@@ -482,9 +484,9 @@ describe("provider-neutral video plan", () => {
     expect(plan.beats.at(-1)!.dialogue).toBe("คุยกันเบาๆ");
   });
 
-  it("names the preferred model without inventing a provider id", () => {
+  it("names no model at all until an endpoint is bound", () => {
     const model = resolveStoryboardVideoModel();
-    expect(model).toEqual({ kind: "deferred", displayName: "Seedance 2.5" });
+    expect(model).toEqual({ kind: "deferred", displayName: "ยังไม่เลือกโมเดล" });
     expect(estimateStoryboardCost(model)).toEqual({
       kind: "unavailable",
       reason: "provider-binding-deferred",

@@ -5,6 +5,24 @@ import { createLineVideoDraftTool, createLineVideoGenerationGuard } from "./vide
 import { claimLineVideoActiveJobLock, type LineVideoActiveJobLock } from "./video-job-store.js";
 import type { LineVideoModelPreferenceState } from "./video-model-preference.js";
 
+/**
+ * Account config in the shape `resolveLineAccount` reads.
+ *
+ * fal rates are declared per endpoint; an endpoint with none is not payable,
+ * so without this no draft can be created at all.
+ */
+const FAL_CFG = {
+  channels: {
+    line: {
+      videoGeneration: {
+        falPricing: {
+          models: { "bytedance/seedance-2.0/reference-to-video": { usdPerSecond: 0.1 } },
+        },
+      },
+    },
+  },
+} as never;
+
 function createMemoryStore<T>(): PluginStateKeyedStore<T> {
   const values = new Map<string, T>();
   return {
@@ -54,7 +72,11 @@ function seedanceCatalogResponse() {
   };
 }
 
-function toolFixture(params?: { models?: unknown; fileExists?: () => Promise<boolean> }) {
+function toolFixture(params?: {
+  models?: unknown;
+  fileExists?: () => Promise<boolean>;
+  cfg?: never;
+}) {
   const draftStore = createMemoryStore<LineVideoDraft>();
   const preferenceStore = createMemoryStore<LineVideoModelPreferenceState>();
   const activeJobLockStore = createMemoryStore<LineVideoActiveJobLock>();
@@ -76,7 +98,7 @@ function toolFixture(params?: { models?: unknown; fileExists?: () => Promise<boo
     nativeConversationId: "grp-a",
     accountId: "acct-1",
     deliveryTo: "line:group:grp-a",
-    cfg: {},
+    cfg: params?.cfg ?? FAL_CFG,
     draftStore,
     preferenceStore,
     activeJobLockStore,
@@ -120,7 +142,7 @@ describe("createLineVideoDraftTool", () => {
     });
     const text = (result as { content: Array<{ text: string }> }).content[0]?.text ?? "";
 
-    expect(text).toContain("Seedance 2.5");
+    expect(text).toContain("Seedance 2.0 Reference-to-Video");
     expect(text).toContain("8 sec");
     expect(text).toContain("Estimated cost: $0.80");
     expect(text).toMatch(/ยืนยัน VIDEO \d{4}/u);
@@ -140,20 +162,20 @@ describe("createLineVideoDraftTool", () => {
     expect(entry?.value.durationSeconds).toBe(6);
   });
 
-  it("rejects an explicit unsupported duration instead of rounding or creating a draft", async () => {
+  it("rejects a duration no fal endpoint accepts, instead of rounding or drafting", async () => {
     const { tool, draftStore, requestedUrls } = toolFixture();
+    // 30s: fal's Seedance schema tops out at 15, so no endpoint accepts it.
     const result = await tool!.execute("call-unsupported-duration", {
       prompt: "a cat riding a skateboard",
-      durationSeconds: 5,
+      durationSeconds: 30,
     });
     const text = (result as { content: Array<{ text: string }> }).content[0]?.text ?? "";
 
     expect((result as { details?: { resolution?: string } }).details?.resolution).toBe(
       "unsupported_duration",
     );
-    expect(text).toContain("ระยะเวลา 5 วินาทีไม่รองรับ");
-    expect(text).toContain("4, 6, 8");
-    expect(text).toContain("สูงสุด 8 วินาที");
+    expect(text).toContain("ความยาว 30 วินาที");
+    expect(text).toContain("4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15");
     expect((await draftStore.entries()).length).toBe(0);
     expect(requestedUrls.some((url) => url.endsWith("/videos"))).toBe(false);
   });
@@ -183,19 +205,20 @@ describe("createLineVideoDraftTool", () => {
   });
 
   it("7: refuses when the estimated cost exceeds the configured limit (cost guard, not the LLM, decides)", async () => {
-    const overPriced = {
-      data: [
-        {
-          id: "bytedance/seedance-2.5",
-          name: "Seedance 2.5",
-          supported_durations: [8],
-          supported_aspect_ratios: ["16:9"],
-          supported_resolutions: ["1080p"],
-          pricing_skus: { "per-video-second": "5" },
+    const { tool, draftStore } = toolFixture({
+      cfg: {
+        channels: {
+          line: {
+            videoGeneration: {
+              maxEstimatedCostUsd: 1,
+              falPricing: {
+                models: { "bytedance/seedance-2.0/reference-to-video": { usdPerSecond: 5 } },
+              },
+            },
+          },
         },
-      ],
-    };
-    const { tool, draftStore } = toolFixture({ models: overPriced });
+      } as never,
+    });
     const result = await tool!.execute("call-1", { prompt: "a very expensive video" });
 
     expect((result as { details?: { resolution?: string } }).details?.resolution).toBe(
@@ -204,35 +227,20 @@ describe("createLineVideoDraftTool", () => {
     expect((await draftStore.entries()).length).toBe(0);
   });
 
-  it("8: uses the conversation's current video-model preference, not always the hardcoded default", async () => {
-    const { tool, preferenceStore, draftStore } = toolFixture({
-      models: {
-        data: [
-          {
-            id: "bytedance/seedance-2.5",
-            name: "Seedance 2.5",
-            supported_durations: [8],
-            supported_aspect_ratios: ["16:9"],
-            supported_resolutions: ["1080p"],
-            pricing_skus: { "per-video-second": "0.10" },
-          },
-          {
-            id: "google/veo-3.1",
-            name: "Veo 3.1",
-            supported_durations: [8],
-            supported_aspect_ratios: ["16:9"],
-            supported_resolutions: ["1080p"],
-            pricing_skus: { "per-video-second": "0.10" },
-          },
-        ],
-      },
-    });
-    await preferenceStore.register("acct-1|grp-a", { model: "google/veo-3.1", updatedAt: 0 });
+  it("8: binds the fal endpoint the registry selects, and records it on the draft", async () => {
+    // Model selection for a paid request comes from the fal registry, not from
+    // the OpenRouter catalog: fal is the only provider this flow generates on,
+    // so binding anything else would quote one provider and bill another.
+    const { tool, draftStore } = toolFixture();
 
     await tool!.execute("call-1", { prompt: "a cat riding a skateboard" });
 
     const [entry] = await draftStore.entries();
-    expect(entry?.value.model).toBe("google/veo-3.1");
+    expect(entry?.value.model).toBe("bytedance/seedance-2.0/reference-to-video");
+    expect(entry?.value.providerRoute).toEqual({
+      provider: "fal",
+      modelId: "bytedance/seedance-2.0/reference-to-video",
+    });
   });
 
   it("9: refuses a new draft while a job is already running for this conversation", async () => {

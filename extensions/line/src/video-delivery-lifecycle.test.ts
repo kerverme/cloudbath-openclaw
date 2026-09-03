@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { retryLineVideoDelivery } from "./video-job-execution.js";
+import { recoverLineVideoJob } from "./video-job-execution.js";
 import {
   createLineVideoJob,
   updateLineVideoJob,
@@ -83,7 +83,7 @@ describe("delivery is a separate lifecycle stage from generation", () => {
     const signUrl = vi.fn(async (key: string) => `https://r2.example/${key}?X-Amz-Signature=sig`);
     const deliver = vi.fn(async () => {});
 
-    const result = await retryLineVideoDelivery({
+    const result = await recoverLineVideoJob({
       jobStore: store,
       jobId: job.jobId,
       account: ACCOUNT,
@@ -107,7 +107,7 @@ describe("delivery is a separate lifecycle stage from generation", () => {
     const store = memoryJobStore();
     const job = await archivedJob(store);
 
-    const result = await retryLineVideoDelivery({
+    const result = await recoverLineVideoJob({
       jobStore: store,
       jobId: job.jobId,
       account: ACCOUNT,
@@ -145,7 +145,7 @@ describe("delivery is a separate lifecycle stage from generation", () => {
     const deliver = vi.fn(async () => {});
 
     await expect(
-      retryLineVideoDelivery({
+      recoverLineVideoJob({
         jobStore: store,
         jobId: job.jobId,
         account: ACCOUNT,
@@ -164,7 +164,7 @@ describe("delivery is a separate lifecycle stage from generation", () => {
     const deliver = vi.fn(async () => {});
 
     await expect(
-      retryLineVideoDelivery({
+      recoverLineVideoJob({
         jobStore: store,
         jobId: job.jobId,
         account: ACCOUNT,
@@ -174,6 +174,64 @@ describe("delivery is a separate lifecycle stage from generation", () => {
       }),
     ).resolves.toEqual({ kind: "no_recoverable_job" });
     expect(deliver).not.toHaveBeenCalled();
+  });
+
+  it("R: resumes from fal's OWN result when the artifact was never archived", async () => {
+    const store = memoryJobStore();
+    const created = await createLineVideoJob({
+      store,
+      draftId: "1234",
+      accountId: "primary",
+      conversationKey: "primary:C1",
+      model: "bytedance/seedance-2.0/reference-to-video",
+      provider: "fal",
+      prompt: "walk in the garden",
+      durationSeconds: 10,
+      aspectRatio: "9:16",
+      resolution: "720p",
+      audio: true,
+      estimatedCostUsd: 1.5,
+    });
+    // The paid generation FINISHED; only the download failed afterwards.
+    await updateLineVideoJob({
+      store,
+      jobId: created.jobId,
+      patch: {
+        status: "failed",
+        stage: "artifact_retrieval",
+        providerRequestId: "fal-req-1",
+        providerResultUrl: "https://queue.fal.run/requests/fal-req-1",
+        error: "download failed",
+      },
+    });
+    const archive = vi.fn(async () => ({
+      url: "https://r2.example/archived.mp4?sig",
+      objectKey: "outbound/line-video/sha256/cd/cdef.mp4",
+      contentType: "video/mp4",
+      contentLength: 10,
+      sha256: "cdef",
+    }));
+    const deliver = vi.fn(async () => {});
+
+    const result = await recoverLineVideoJob({
+      jobStore: store,
+      jobId: created.jobId,
+      account: ACCOUNT,
+      deliveryTo: "line:group:C1",
+      cfg: {} as never,
+      archive: archive as never,
+      signUrl: (async (key: string) => `https://r2.example/${key}?sig`) as never,
+      deliver: deliver as never,
+    });
+
+    expect(result).toEqual({ kind: "delivered", jobId: created.jobId });
+    // Re-fetched from THIS generation's own fal result, never regenerated.
+    expect(archive).toHaveBeenCalledWith("https://queue.fal.run/requests/fal-req-1");
+    expect(deliver).toHaveBeenCalledTimes(1);
+    expect(store.entriesMap.get(created.jobId)).toMatchObject({
+      status: "completed",
+      r2ObjectKey: "outbound/line-video/sha256/cd/cdef.mp4",
+    });
   });
 
   it("records the provider that generated the job, for audit", async () => {

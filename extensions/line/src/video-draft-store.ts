@@ -8,7 +8,19 @@
  */
 import { randomInt } from "node:crypto";
 import type { PluginStateKeyedStore } from "openclaw/plugin-sdk/plugin-state-runtime";
-import type { LineVideoProviderRoute } from "./video-provider-routing.js";
+/**
+ * The paid path a draft is locked to.
+ *
+ * fal is the only video-generation provider in this flow, so this carries the
+ * endpoint rather than a provider choice. It is still a tagged shape: a draft
+ * minted by an older build carries a different tag (or none), and the
+ * confirmation gate refuses it instead of submitting it somewhere unintended.
+ */
+export type LineVideoProviderRoute = Readonly<{
+  provider: "fal";
+  /** fal endpoint id, submitted as `fal/<modelId>`. */
+  modelId: string;
+}>;
 
 export const LINE_VIDEO_DRAFT_NAMESPACE = "video-draft-v1";
 export const LINE_VIDEO_DRAFT_MAX_ENTRIES = 5_000;

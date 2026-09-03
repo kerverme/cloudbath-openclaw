@@ -267,36 +267,61 @@ export default defineBundledChannelEntry({
     // implementation is imported lazily on first use, like the routers below.
     //
     // Everything it does is LINE-owned and runs against LINE-owned state: the
-    // live catalog check, the quote, the cost guard and — critically — the
+    // fal capability check, the quote, the auth check and — critically — the
     // 4-digit allocation, which uses THIS plugin's draft store. That is what
     // keeps a single VIDEO code space; plugin state is partitioned by plugin
     // id, so an allocator on the storyboard side would be a second one.
+    // The fal registry answers, for the storyboard side's post-freeze model
+    // conversation. That plugin holds no model list, capability or price of
+    // its own; it asks here and renders what comes back, so the registry
+    // stays the one place fal endpoint metadata lives.
+    const falStoryboardConfig = async (accountId: string) => {
+      const [{ resolveLineAccount }, { getRuntimeConfig }] = await Promise.all([
+        import("./src/accounts.js"),
+        import("openclaw/plugin-sdk/runtime-config-snapshot"),
+      ]);
+      return resolveLineAccount({ cfg: getRuntimeConfig(), accountId }).config;
+    };
     installLineStoryboardVideoRuntime(LINE_STORYBOARD_RUNTIME_OWNER, {
+      offerDefaultVideoModel: async (accountId, requirements) => {
+        const { offerFalStoryboardDefault } = await import("./src/fal-storyboard-seam.js");
+        return offerFalStoryboardDefault(await falStoryboardConfig(accountId), requirements);
+      },
+      listCompatibleVideoModels: async (accountId, requirements) => {
+        const { listFalStoryboardModels } = await import("./src/fal-storyboard-seam.js");
+        return listFalStoryboardModels(await falStoryboardConfig(accountId), requirements);
+      },
+      matchVideoModelQuery: async (accountId, requirements, text) => {
+        const { matchFalStoryboardQuery } = await import("./src/fal-storyboard-seam.js");
+        return matchFalStoryboardQuery(await falStoryboardConfig(accountId), requirements, text);
+      },
       prepareStoryboardVideoDraft: async (request) => {
-        const [
-          { prepareLineStoryboardVideoDraft },
-          { resolveLineAccount },
-          { resolveLineProviderApiKey },
-          { getRuntimeConfig },
-        ] = await Promise.all([
-          import("./src/video-storyboard-draft.js"),
-          import("./src/accounts.js"),
-          import("./src/openrouter-auth.js"),
-          import("openclaw/plugin-sdk/runtime-config-snapshot"),
-        ]);
+        const [{ prepareLineStoryboardVideoDraft }, { resolveLineAccount }, { getRuntimeConfig }] =
+          await Promise.all([
+            import("./src/video-storyboard-draft.js"),
+            import("./src/accounts.js"),
+            import("openclaw/plugin-sdk/runtime-config-snapshot"),
+          ]);
+        const cfg = getRuntimeConfig();
         return await prepareLineStoryboardVideoDraft(request, {
           draftStore: videoDraftStore,
-          resolveApiKey: async () => await resolveLineProviderApiKey(),
-          // Account-scoped, so the budget is the one configured for THIS
-          // account rather than the global default.
-          cfg: resolveLineAccount({
-            cfg: getRuntimeConfig(),
-            accountId: request.accountId,
-          }).config,
-          // The SAME store the video-model picker writes, so a storyboard
-          // quote binds the model the owner actually chose for this
-          // conversation rather than the built-in default.
-          preferenceStore: videoModelPreferenceStore,
+          // Proven BEFORE a payable code exists, so the owner is never handed
+          // a code that dies on credentials once they commit to it.
+          resolveFalAuth: async () => {
+            const [{ resolveApiKeyForProvider }, { resolveOpenClawAgentDir }] = await Promise.all([
+              import("openclaw/plugin-sdk/provider-auth-runtime"),
+              import("openclaw/plugin-sdk/provider-auth"),
+            ]);
+            const auth = await resolveApiKeyForProvider({
+              provider: "fal",
+              cfg,
+              agentDir: resolveOpenClawAgentDir(),
+            });
+            return Boolean(auth.apiKey?.trim());
+          },
+          // Account-scoped, so the budget, fal rates and capability
+          // declarations are the ones configured for THIS account.
+          cfg: resolveLineAccount({ cfg, accountId: request.accountId }).config,
         });
       },
     });
@@ -316,6 +341,20 @@ export default defineBundledChannelEntry({
     api.on("before_dispatch", async (event, ctx) => {
       const gate = await loadVideoConfirmationGate();
       return gate(event, ctx);
+    });
+    // Registered next to the paid gate, and after it: both are exact
+    // owner-only commands, and this one must be claimed before the chat
+    // router's broad matching can read "ส่งวิดีโออีกครั้ง" as conversation.
+    // It never generates -- it resumes an already-paid job.
+    api.on("before_dispatch", async (event, ctx) => {
+      const [{ handleLineVideoRetryCommand }, { getRuntimeConfig }] = await Promise.all([
+        import("./src/video-retry-router.js"),
+        import("openclaw/plugin-sdk/runtime-config-snapshot"),
+      ]);
+      return await handleLineVideoRetryCommand(event, ctx, {
+        jobStore: videoJobStore,
+        cfg: getRuntimeConfig(),
+      });
     });
     const loadVideoModelControlRouter = createLineVideoModelControlRouterLoader({
       preferenceStore: videoModelPreferenceStore,

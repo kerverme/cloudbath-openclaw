@@ -1,65 +1,118 @@
 import { describe, expect, it } from "vitest";
-import { estimateFalSeedanceCostUsd } from "./fal-video-pricing.js";
+import { estimateFalVideoCostUsd, isFalModelPriced } from "./fal-video-pricing.js";
 
-describe("fal Seedance pricing adapter", () => {
-  it("reports unavailable when the operator has configured no fal rate", () => {
-    expect(estimateFalSeedanceCostUsd({ cfg: {}, durationSeconds: 10 })).toEqual({
+const H3 = { modelId: "minimax/h3/reference-to-video" };
+const SEEDANCE = { modelId: "bytedance/seedance-2.0/reference-to-video" };
+
+describe("per-model fal pricing", () => {
+  it("reports unavailable when the operator has declared no rate for the endpoint", () => {
+    expect(
+      estimateFalVideoCostUsd({ cfg: {}, model: H3, durationSeconds: 15, resolution: "2K" }),
+    ).toEqual({
       kind: "unavailable",
-      reason: "fal_rate_not_configured",
+      reason: "fal_model_rate_not_configured",
+      modelId: H3.modelId,
+    });
+    expect(isFalModelPriced({}, H3.modelId)).toBe(false);
+  });
+
+  it("does NOT price one endpoint from another endpoint's rate", () => {
+    const cfg = {
+      videoGeneration: { falPricing: { models: { [SEEDANCE.modelId]: { usdPerSecond: 0.1 } } } },
+    };
+    expect(isFalModelPriced(cfg, SEEDANCE.modelId)).toBe(true);
+    // A Seedance rate says nothing about H3, so H3 stays unpriced and unpayable.
+    expect(isFalModelPriced(cfg, H3.modelId)).toBe(false);
+    expect(
+      estimateFalVideoCostUsd({ cfg, model: H3, durationSeconds: 15, resolution: "2K" }).kind,
+    ).toBe("unavailable");
+  });
+
+  it("prices from the endpoint's own rate and carries its source", () => {
+    const cfg = {
+      videoGeneration: {
+        falPricing: {
+          models: {
+            [H3.modelId]: { usdPerSecond: 0.2, source: "https://fal.ai/pricing" },
+          },
+        },
+      },
+    };
+    expect(
+      estimateFalVideoCostUsd({ cfg, model: H3, durationSeconds: 15, resolution: "2K" }),
+    ).toEqual({
+      kind: "available",
+      amountUsd: 3,
+      source: {
+        kind: "operator_configured",
+        modelId: H3.modelId,
+        reference: "https://fal.ai/pricing",
+      },
     });
   });
 
+  it("prefers a resolution-specific rate over the endpoint-wide one", () => {
+    const cfg = {
+      videoGeneration: {
+        falPricing: {
+          models: {
+            [SEEDANCE.modelId]: { usdPerSecond: 0.1, byResolution: { "1080p": 0.4 } },
+          },
+        },
+      },
+    };
+    const cheap = estimateFalVideoCostUsd({
+      cfg,
+      model: SEEDANCE,
+      durationSeconds: 10,
+      resolution: "720p",
+    });
+    const dear = estimateFalVideoCostUsd({
+      cfg,
+      model: SEEDANCE,
+      durationSeconds: 10,
+      resolution: "1080p",
+    });
+    expect(cheap).toMatchObject({ kind: "available", amountUsd: 1 });
+    expect(dear).toMatchObject({ kind: "available", amountUsd: 4 });
+    // The more precise statement names the resolution it applied to.
+    expect(dear).toMatchObject({ source: { resolution: "1080p" } });
+  });
+
   it("never returns a zero or negative quote from a bad rate", () => {
-    for (const seedanceReferenceToVideoUsdPerSecond of [
-      0,
-      -1,
-      Number.NaN,
-      Number.POSITIVE_INFINITY,
-    ]) {
+    for (const usdPerSecond of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      const cfg = {
+        videoGeneration: { falPricing: { models: { [H3.modelId]: { usdPerSecond } } } },
+      };
+      expect(isFalModelPriced(cfg, H3.modelId)).toBe(false);
       expect(
-        estimateFalSeedanceCostUsd({
-          cfg: { videoGeneration: { falPricing: { seedanceReferenceToVideoUsdPerSecond } } },
-          durationSeconds: 10,
-        }).kind,
+        estimateFalVideoCostUsd({ cfg, model: H3, durationSeconds: 15, resolution: "2K" }).kind,
       ).toBe("unavailable");
     }
   });
 
-  it("prices from the operator's own rate and carries its source", () => {
-    const estimate = estimateFalSeedanceCostUsd({
-      cfg: {
-        videoGeneration: {
-          falPricing: {
-            seedanceReferenceToVideoUsdPerSecond: 0.15,
-            source: "https://fal.ai/pricing",
-          },
-        },
-      },
-      durationSeconds: 10,
-    });
-    expect(estimate).toEqual({
-      kind: "available",
-      amountUsd: 1.5,
-      source: { kind: "operator_configured", reference: "https://fal.ai/pricing" },
-    });
-  });
-
   it("does NOT double the quote for audio: fal's two published schemas disagree", () => {
     const cfg = {
-      videoGeneration: { falPricing: { seedanceReferenceToVideoUsdPerSecond: 0.15 } },
+      videoGeneration: { falPricing: { models: { [SEEDANCE.modelId]: { usdPerSecond: 0.1 } } } },
     };
-    expect(estimateFalSeedanceCostUsd({ cfg, durationSeconds: 8 })).toEqual({
-      kind: "available",
-      amountUsd: 0.15 * 8,
-      source: { kind: "operator_configured" },
-    });
+    expect(
+      estimateFalVideoCostUsd({
+        cfg,
+        model: SEEDANCE,
+        durationSeconds: 8,
+        resolution: "720p",
+      }),
+    ).toMatchObject({ kind: "available", amountUsd: 0.8 });
   });
 
   it("reports unavailable rather than quoting a nonsense duration", () => {
     const cfg = {
-      videoGeneration: { falPricing: { seedanceReferenceToVideoUsdPerSecond: 0.15 } },
+      videoGeneration: { falPricing: { models: { [H3.modelId]: { usdPerSecond: 0.2 } } } },
     };
-    expect(estimateFalSeedanceCostUsd({ cfg, durationSeconds: 0 }).kind).toBe("unavailable");
-    expect(estimateFalSeedanceCostUsd({ cfg, durationSeconds: -5 }).kind).toBe("unavailable");
+    for (const durationSeconds of [0, -5]) {
+      expect(
+        estimateFalVideoCostUsd({ cfg, model: H3, durationSeconds, resolution: "2K" }).kind,
+      ).toBe("unavailable");
+    }
   });
 });

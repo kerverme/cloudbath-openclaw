@@ -124,6 +124,12 @@ const SEEDANCE_CATALOG = {
   ],
 };
 
+/** Standalone OpenRouter catalog double for the routers that still read it. */
+function catalogFetchDouble(): typeof fetch {
+  return (async () =>
+    new Response(JSON.stringify(SEEDANCE_CATALOG), { status: 200 })) as unknown as typeof fetch;
+}
+
 function buildFlow() {
   const draftStore = createMemoryStore<LineVideoDraft>();
   const preferenceStore = createMemoryStore<LineVideoModelPreferenceState>();
@@ -155,8 +161,7 @@ function buildFlow() {
     draftStore,
     jobStore,
     activeJobLockStore,
-    resolveApiKey: async () => "sk-test",
-    fetchImpl,
+    resolveFalAuth: async () => true,
     createNotionLibrary: () => ({
       validate: async () => {},
       createProcessing: async () => ({ pageId: "notion-page-1" }),
@@ -217,6 +222,7 @@ describe("owner natural-language video request routing", () => {
       preferenceStore,
       pendingStore: createMemoryStore<LinePendingVideoModelSelection>(),
       resolveApiKey: async () => "sk-test",
+      fetchImpl: catalogFetchDouble(),
     });
     expect(await videoModelRouter(event, CTX)).toBeUndefined();
 
@@ -393,6 +399,7 @@ describe("unauthorized LINE video operations fail closed", () => {
       preferenceStore: flow.preferenceStore,
       pendingStore: createMemoryStore<LinePendingVideoModelSelection>(),
       resolveApiKey: async () => "sk-test",
+      fetchImpl: catalogFetchDouble(),
     });
     expect(
       await videoModelRouter(

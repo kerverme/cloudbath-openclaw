@@ -13,15 +13,15 @@ import { expectNothingBillable, harness } from "./storyboard-router.test-support
 /** The production request that used to fall through to ordinary chat. */
 const NATURAL_REQUEST = "เอา Twong ไปเดินในสวน";
 
-const DURATION_QUESTION = "ต้องการความยาวกี่วินาที? (เช่น 10 วิ)";
+const DURATION_QUESTION = "ต้องการความยาวเท่าไร?\n1. 15 วินาที\n2. 30 วินาที";
 const DIALOGUE_QUESTION = "มีเสียงพูดในคลิปไหม? (มี / ไม่มี)";
 const DIALOGUE_TEXT_QUESTION = "ให้พูดว่าอะไร?";
 
 /** A paid runtime that allocates a code and quotes, without any network call. */
 function stubPaidRuntime(): StoryboardPaidDraftRuntime & {
-  calls: Array<{ audio: boolean; durationSeconds: number }>;
+  calls: Array<{ audio: string; durationSeconds: number }>;
 } {
-  const calls: Array<{ audio: boolean; durationSeconds: number }> = [];
+  const calls: Array<{ audio: string; durationSeconds: number }> = [];
   let next = 0;
   return {
     calls,
@@ -31,15 +31,15 @@ function stubPaidRuntime(): StoryboardPaidDraftRuntime & {
       return {
         kind: "created",
         draftId: String(1000 + next),
-        modelId: "bytedance/seedance-2.5",
-        modelName: "Seedance 2.5",
+        modelId: "minimax/h3/reference-to-video",
+        modelName: "MiniMax H3 Reference-to-Video",
         durationSeconds: request.durationSeconds,
         resolution: request.resolution,
         aspectRatio: request.aspectRatio,
-        audio: request.audio,
+        audio: request.audio !== "off",
         estimatedCostUsd: 0.42,
         maxAllowedUsd: 2,
-        pricingSource: "openrouter-catalog",
+        pricingSource: "fal:minimax/h3/reference-to-video",
       };
     },
   };
@@ -68,7 +68,7 @@ describe("conversational video director", () => {
     expect(version.document.durationSeconds).toBe(10);
     expect(version.document.cast.map((member) => member.characterId)).toEqual(["CHAR-6"]);
     // A silent scene asks the provider for no audio, which is what re-quotes it.
-    expect(paid.calls).toEqual([{ audio: false, durationSeconds: 10 }]);
+    expect(paid.calls).toEqual([{ audio: "off", durationSeconds: 10 }]);
   });
 
   it("asks what is said only when the owner wants dialogue, and carries it into the scene", async () => {
@@ -84,7 +84,7 @@ describe("conversational video director", () => {
     expect(done.text).toContain("Final Video Draft");
     const version = await h.latest();
     expect(version.document.scenePrompt).toContain("สวัสดีครับ");
-    expect(paid.calls).toEqual([{ audio: true, durationSeconds: 10 }]);
+    expect(paid.calls).toEqual([{ audio: "full", durationSeconds: 10 }]);
   });
 
   it("writes nothing billable while the request is still being gathered", async () => {
@@ -171,7 +171,10 @@ describe("natural draft revision", () => {
     expect(version.versionNumber).toBe(2);
     expect(version.document.durationSeconds).toBe(15);
     expect(version.document.beats.at(-1)?.endSeconds).toBe(15);
-    expect(revised.text).toContain("Final Video Draft");
+    // A revision re-renders the SCENE and quotes nothing: the storyboard has
+    // changed, so it must be confirmed again before a model is chosen.
+    expect(revised.text).toContain("Storyboard v2");
+    expect(revised.text).not.toContain("Final Video Draft");
   });
 
   it("changes the environment without touching the cast", async () => {
@@ -191,13 +194,16 @@ describe("natural draft revision", () => {
     await h.dispatch("10 วิ");
     await h.dispatch("มี");
     await h.dispatch("ทักทายกันหน่อย");
-    expect(paid.calls.at(-1)?.audio).toBe(true);
+    expect(paid.calls.at(-1)?.audio).toBe("full");
 
     await h.dispatch("ไม่เอาเสียงพูด");
 
     const version = await h.latest();
     expect(version.document.beats.some((beat) => beat.dialogue)).toBe(false);
-    expect(paid.calls.at(-1)?.audio).toBe(false);
+    expect(version.document.audio).toBe("off");
+    // The revision itself re-quotes nothing, so the last paid call is still
+    // the pre-revision one: no model is bound to content awaiting confirmation.
+    expect(paid.calls.at(-1)?.audio).toBe("full");
   });
 
   it("applies a camera instruction to the whole scene", async () => {

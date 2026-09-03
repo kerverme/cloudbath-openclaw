@@ -147,8 +147,7 @@ function buildFlow(catalogEntry: unknown = SEEDANCE_25_LIVE) {
     draftStore,
     jobStore,
     activeJobLockStore,
-    resolveApiKey: async () => "sk-openrouter-test",
-    fetchImpl,
+    resolveFalAuth: async () => true,
     scheduleBackgroundWork: (run) => {
       scheduled.push(run);
     },

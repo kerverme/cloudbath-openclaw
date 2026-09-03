@@ -59,7 +59,8 @@ export type StoryboardRequoteOverrides = Readonly<{
   durationSeconds?: number;
   resolution?: string;
   aspectRatio?: string;
-  audio?: boolean;
+  /** The scene's three-way audio decision, not a boolean. */
+  audio?: "off" | "ambient" | "full";
 }>;
 
 export type StoryboardRequoteDeps = Readonly<{

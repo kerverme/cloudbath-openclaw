@@ -19,8 +19,14 @@ import type { UgcCharacterLock } from "./types.js";
 export const STORYBOARD_ASPECT_RATIOS = ["16:9", "9:16", "1:1", "4:3", "2.39:1"] as const;
 export type StoryboardAspectRatio = (typeof STORYBOARD_ASPECT_RATIOS)[number];
 
-/** Target output resolutions a request may name. */
-export const STORYBOARD_RESOLUTIONS = ["480p", "720p", "1080p", "4K"] as const;
+/**
+ * Target output resolutions a request may name.
+ *
+ * "2K" is here because a provider endpoint requires it: MiniMax H3's
+ * reference-to-video documents 2K as its only output size, so without this the
+ * storyboard vocabulary could not describe a scene that endpoint can execute.
+ */
+export const STORYBOARD_RESOLUTIONS = ["480p", "720p", "1080p", "2K", "4K"] as const;
 export type StoryboardResolution = (typeof STORYBOARD_RESOLUTIONS)[number];
 
 /**
@@ -161,7 +167,14 @@ export type ActiveStoryboardContext = Readonly<{
  * the paid pipeline to a string no catalog can resolve.
  */
 export type StoryboardVideoModelSelection =
-  | Readonly<{ kind: "provider-bound"; providerModelId: string; displayName: string }>
+  | Readonly<{
+      kind: "provider-bound";
+      /** Provider that will receive the paid request, e.g. "fal.ai". */
+      provider: string;
+      /** The ACTUAL endpoint id billed, e.g. "minimax/h3/reference-to-video". */
+      providerModelId: string;
+      displayName: string;
+    }>
   | Readonly<{ kind: "deferred"; displayName: string }>;
 
 /**

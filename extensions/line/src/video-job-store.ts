@@ -28,12 +28,14 @@ export type LineVideoJobStatus = "running" | "completed" | "failed" | "delivery_
  * How far a job got. Recorded as each stage completes, so a failure names the
  * stage that failed and a retry knows which stages it may skip.
  *
- * `provider_generation` is the only stage that spends money. Everything after
- * it operates on bytes already paid for, so a failure past it must never
- * re-enter it.
+ * `provider_submission` is the only stage that spends money. Once
+ * `provider_generation_completed` is recorded the video EXISTS and is paid
+ * for, so every later stage works on an artifact already bought and must
+ * never re-enter submission.
  */
 export type LineVideoJobStage =
-  | "provider_generation"
+  | "provider_submission"
+  | "provider_generation_completed"
   | "artifact_retrieval"
   | "r2_archive"
   | "line_delivery";
@@ -54,10 +56,27 @@ export type LineVideoJob = {
   status: LineVideoJobStatus;
   /** Last stage that completed. Absent until the provider call returns. */
   stage?: LineVideoJobStage;
-  /** Which paid provider generated this job, e.g. "fal" / "openrouter". */
+  /** Which paid provider generated this job. Always "fal" in this flow. */
   provider?: string;
+  /**
+   * fal's identifiers for the COMPLETED generation.
+   *
+   * The whole point of persisting these is that a download, archive or send
+   * failure can go back to THIS paid generation. Without them a recovery has
+   * nothing to resume from and the only option left would be paying twice.
+   */
+  providerRequestId?: string;
+  providerResultUrl?: string;
   /** Delivery attempts made from the archived R2 object. Bounds retry churn. */
   deliveryAttempts?: number;
+  /**
+   * LINE-native `to` address this job delivers to, copied from the draft.
+   *
+   * Persisted because a recovery can happen long after the draft was consumed,
+   * and re-deriving a destination then would risk sending a paid video to a
+   * conversation that never confirmed it.
+   */
+  deliveryTo?: string;
   submittedAt: number;
   estimatedCostUsd: number;
   actualCostUsd?: number;
@@ -76,6 +95,7 @@ export async function createLineVideoJob(params: {
   conversationKey: string;
   model: string;
   provider?: string;
+  deliveryTo?: string;
   prompt: string;
   durationSeconds: number;
   aspectRatio: string;
@@ -93,6 +113,7 @@ export async function createLineVideoJob(params: {
     conversationKey: params.conversationKey,
     model: params.model,
     ...(params.provider ? { provider: params.provider } : {}),
+    ...(params.deliveryTo ? { deliveryTo: params.deliveryTo } : {}),
     prompt: params.prompt,
     durationSeconds: params.durationSeconds,
     aspectRatio: params.aspectRatio,
@@ -116,6 +137,8 @@ export async function updateLineVideoJob(params: {
       | "status"
       | "stage"
       | "provider"
+      | "providerRequestId"
+      | "providerResultUrl"
       | "deliveryAttempts"
       | "openRouterJobId"
       | "actualCostUsd"

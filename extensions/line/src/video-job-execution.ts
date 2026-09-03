@@ -16,7 +16,6 @@ import fs from "node:fs/promises";
 import { resolveOpenClawAgentDir } from "openclaw/plugin-sdk/provider-auth";
 import { getRuntimeConfig } from "openclaw/plugin-sdk/runtime-config-snapshot";
 import { createSubsystemLogger } from "openclaw/plugin-sdk/runtime-env";
-import type { VideoGenerationSourceAsset } from "openclaw/plugin-sdk/video-generation";
 import { generateVideo } from "openclaw/plugin-sdk/video-generation-runtime";
 import type { resolveLineAccount } from "./accounts.js";
 import { sendMessageLine } from "./send.js";
@@ -34,27 +33,10 @@ import {
   stageLineOutboundVideo,
   stageLineVideoPreviewImage,
 } from "./video-outbound-staging.js";
-import type { LineVideoProviderRoute } from "./video-provider-routing.js";
 import { resolveLineVideoReferenceUrls } from "./video-reference-urls.js";
-import {
-  materializeLineVideoUgcReferences,
-  type LineVideoNotionTarget,
-  type LineVideoUgcScope,
-} from "./video-ugc-scope.js";
+import type { LineVideoNotionTarget, LineVideoUgcScope } from "./video-ugc-scope.js";
 
 const log = createSubsystemLogger("line/video-job");
-
-/** Reads `metadata.usage.cost` from generateVideo()'s result without unsafe optional-chained casts. */
-function readOpenRouterUsageCost(
-  metadata: Record<string, unknown> | undefined,
-): number | undefined {
-  const usage = metadata?.usage;
-  if (!usage || typeof usage !== "object") {
-    return undefined;
-  }
-  const cost = (usage as { cost?: unknown }).cost;
-  return typeof cost === "number" ? cost : undefined;
-}
 
 const MAX_FAILURE_REASON_LENGTH = 200;
 // Strips patterns that look like bearer tokens/API keys before a raw
@@ -86,136 +68,107 @@ function formatLineVideoFailureReply(reason: string): string {
   ].join("\n");
 }
 
-async function loadSourceImageAsset(path: string): Promise<VideoGenerationSourceAsset | undefined> {
-  try {
-    const buffer = await fs.readFile(path);
-    return { buffer };
-  } catch {
-    return undefined;
-  }
-}
-
 /**
- * The route a confirmed draft is locked to.
+ * The fal endpoint a confirmed draft is locked to.
  *
- * A draft minted before provider routing existed carries none; it was quoted
- * against OpenRouter, so that is what it submits to. The route is READ here,
- * never recomputed: re-deriving it at submission time could send the paid job
- * to a provider whose price the owner never saw.
+ * READ, never recomputed: re-deriving the model at submission time could send
+ * the paid job to an endpoint whose price and capability check the owner never
+ * saw. A draft that carries no fal route is not submittable at all — this flow
+ * generates video on fal only, so there is nothing else to fall back to.
  */
-export function confirmedDraftRoute(draft: LineVideoDraft): LineVideoProviderRoute {
-  return draft.providerRoute ?? { provider: "openrouter", modelId: draft.model };
+export function confirmedFalModelId(draft: LineVideoDraft): string | undefined {
+  return draft.providerRoute?.provider === "fal" ? draft.providerRoute.modelId : undefined;
 }
 
-/** What one provider stage produced. `source` is bytes or a transient URL. */
+/** What the provider stage produced, plus what it takes to recover it. */
 type ProviderGenerationOutcome = Readonly<{
   provider: string;
   source: Buffer | string;
   actualCostUsd?: number;
+  /**
+   * fal's own identifiers for the completed generation.
+   *
+   * Persisted so a later failure can fetch THIS generation's existing result
+   * instead of paying for another one. `resultUrl` is fal's queue response
+   * URL; `requestId` identifies the request in fal's queue.
+   */
+  recovery?: Readonly<{ requestId?: string; resultUrl?: string }>;
 }>;
 
+function readStringField(
+  metadata: Record<string, unknown> | undefined,
+  key: string,
+): string | undefined {
+  const value = metadata?.[key];
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+/** The owner's own attached image, when a draft carries one and no scene does. */
+async function loadDraftSourceImages(
+  draft: LineVideoDraft,
+): Promise<Array<{ buffer: Buffer; role: "reference_image" }>> {
+  if (!draft.sourceImagePath) {
+    return [];
+  }
+  try {
+    return [{ buffer: await fs.readFile(draft.sourceImagePath), role: "reference_image" }];
+  } catch {
+    return [];
+  }
+}
+
 /**
- * The one paid call, dispatched on the draft's frozen route.
+ * The one paid call: fal's reference-to-video endpoint the draft named.
  *
- * There is no cross-provider fallback edge on purpose: a fal failure does not
- * retry on OpenRouter and vice versa. Either would be a second paid job the
- * owner never confirmed, billed at a price they were never quoted.
+ * Submitted through core's registered `fal` provider (`extensions/fal`), which
+ * already implements this endpoint family's queue submit, poll,
+ * reference-count caps and SSRF-guarded artifact download. There is no
+ * cross-provider fallback edge on purpose — a fal failure never re-submits
+ * anywhere else, because that would bill a second job the owner did not
+ * confirm.
+ *
+ * fal's endpoint takes reference URLs, not bytes, so the frozen Character
+ * Library assets are published as short-lived signed R2 URLs in the SAME order
+ * the draft's prompt markers were compiled against.
  */
 async function runProviderGeneration(params: {
   draft: LineVideoDraft;
   jobId: string;
   ugcScope?: LineVideoUgcScope;
 }): Promise<ProviderGenerationOutcome> {
-  const route = confirmedDraftRoute(params.draft);
-  if (route.provider === "fal") {
-    return await runFalGeneration({ ...params, route });
+  const modelId = confirmedFalModelId(params.draft);
+  if (!modelId) {
+    throw new Error("Confirmed video draft has no fal model bound");
   }
-  const cfg = getRuntimeConfig();
-  const inputImages: VideoGenerationSourceAsset[] = [];
-  if (params.ugcScope) {
-    inputImages.push(
-      ...(await materializeLineVideoUgcReferences(params.ugcScope, {
-        correlationId: params.jobId,
-      })),
-    );
-  }
-  if (params.draft.sourceImagePath) {
-    const asset = await loadSourceImageAsset(params.draft.sourceImagePath);
-    if (asset) {
-      inputImages.push(asset);
-    }
-  }
-  const result = await generateVideo({
-    cfg,
-    prompt: params.draft.prompt,
-    agentDir: resolveOpenClawAgentDir(),
-    modelOverride: `openrouter/${params.draft.model}`,
-    aspectRatio: params.draft.aspectRatio,
-    resolution: params.draft.resolution,
-    durationSeconds: params.draft.durationSeconds,
-    audio: params.draft.audio,
-    inputImages: inputImages.length > 0 ? inputImages : undefined,
-    // The confirmed draft is model/provider-locked; a silent fallback
-    // substitution here would violate "the confirmed prompt/settings must
-    // be exactly what gets submitted".
-    autoProviderFallback: false,
-  });
-  const video = result.videos[0];
-  if (!video) {
-    throw new Error("OpenRouter video generation returned no video asset");
-  }
-  const source = video.buffer ?? video.url;
-  if (!source) {
-    throw new Error("Generated video has neither a buffer nor a deliverable URL");
-  }
-  const actualCostUsd = readOpenRouterUsageCost(result.metadata);
-  return {
-    provider: "openrouter",
-    source,
-    ...(actualCostUsd !== undefined ? { actualCostUsd } : {}),
-  };
-}
-
-/**
- * fal's reference-to-video path, through core's registered `fal` provider.
- *
- * This plugin holds no fal client: `extensions/fal` already implements the
- * endpoint's queue submit, poll, reference-count caps and SSRF-guarded
- * artifact download, and core resolves its FAL_KEY the same way it resolves
- * every other provider's credential.
- *
- * What IS this plugin's job is the reference images. fal's endpoint takes
- * URLs, not bytes, so they are published as SHORT-LIVED signed R2 URLs from
- * the same frozen Character Library assets and in the same order the
- * OpenRouter path submits, and passed through as `url` assets so the provider
- * forwards them verbatim instead of inlining megabytes of base64.
- */
-async function runFalGeneration(params: {
-  draft: LineVideoDraft;
-  jobId: string;
-  ugcScope?: LineVideoUgcScope;
-  route: Extract<LineVideoProviderRoute, { provider: "fal" }>;
-}): Promise<ProviderGenerationOutcome> {
-  if (!params.ugcScope) {
-    throw new Error("fal reference-to-video requires a frozen reference scope");
-  }
-  const references = await resolveLineVideoReferenceUrls(params.ugcScope, {
-    correlationId: params.jobId,
-  });
+  // A scene that casts Character Library identities publishes those frozen
+  // assets as short-lived signed R2 URLs, in the SAME order the draft's prompt
+  // markers were compiled against. A draft with no scope carries at most the
+  // owner's own attached image, and is submitted with whatever it has rather
+  // than being refused here -- the endpoint is the authority on what it needs.
+  const references = params.ugcScope
+    ? await resolveLineVideoReferenceUrls(params.ugcScope, { correlationId: params.jobId })
+    : [];
+  const inputImages =
+    references.length > 0
+      ? references.map((reference) => ({
+          url: reference.url,
+          mimeType: reference.mimeType,
+          role: "reference_image" as const,
+        }))
+      : await loadDraftSourceImages(params.draft);
   const result = await generateVideo({
     cfg: getRuntimeConfig(),
     prompt: params.draft.prompt,
     agentDir: resolveOpenClawAgentDir(),
-    modelOverride: `fal/${params.route.modelId}`,
+    modelOverride: `fal/${modelId}`,
     aspectRatio: params.draft.aspectRatio,
     resolution: params.draft.resolution,
     durationSeconds: params.draft.durationSeconds,
     audio: params.draft.audio,
-    inputImages: references.map((reference) => ({
-      url: reference.url,
-      mimeType: reference.mimeType,
-      role: "reference_image" as const,
-    })),
+    ...(inputImages.length > 0 ? { inputImages } : {}),
+    // The confirmed draft is model-locked; a silent substitution here would
+    // violate "the confirmed prompt/settings must be exactly what gets
+    // submitted", and would bill an endpoint that was never quoted.
     autoProviderFallback: false,
   });
   const video = result.videos[0];
@@ -223,9 +176,21 @@ async function runFalGeneration(params: {
   if (!source) {
     throw new Error("fal video generation returned no video asset");
   }
+  const requestId = readStringField(result.metadata, "requestId");
   // Whatever fal returned is TRANSIENT -- a signed artifact URL or its bytes.
   // The caller re-stages it in R2 before LINE sees any URL.
-  return { provider: "fal", source };
+  return {
+    provider: "fal",
+    source,
+    ...(requestId || video?.url
+      ? {
+          recovery: Object.freeze({
+            ...(requestId ? { requestId } : {}),
+            ...(video?.url ? { resultUrl: video.url } : {}),
+          }),
+        }
+      : {}),
+  };
 }
 
 /** Pushes an already-archived, already-signed R2 video to the conversation. */
@@ -315,30 +280,57 @@ export type LineVideoDeliveryRetryResult =
   | Readonly<{ kind: "failed"; jobId: string; reason: string }>;
 
 /**
- * Re-sends a video that is ALREADY archived in R2. Calls no provider, ever.
+ * Resumes a job whose paid generation already SUCCEEDED. Never generates.
  *
- * The signed URL the original attempt used has its own lifetime, so the object
- * key -- not that URL -- is what is persisted and re-signed here. This is the
- * whole reason `r2_archive` is a stage of its own: a delivery failure is
- * recoverable work on bytes already paid for, not a reason to bill again.
+ * Resumption starts at the furthest stage that completed, which is why each
+ * stage is recorded separately:
+ *
+ *   - archived in R2 -> re-sign and send. The original signed URL has its own
+ *     lifetime, so the durable object key is what is persisted and re-signed.
+ *   - generated but never archived -> re-fetch fal's OWN existing result and
+ *     archive that.
+ *
+ * In neither case is a generate call made. The video was already bought.
  */
-export async function retryLineVideoDelivery(params: {
+export async function recoverLineVideoJob(params: {
   jobStore: LineVideoJobStore;
   jobId: string;
   account: ReturnType<typeof resolveLineAccount>;
   deliveryTo?: string;
   cfg?: ReturnType<typeof getRuntimeConfig>;
   signUrl?: typeof signArchivedLineVideoUrl;
+  archive?: typeof stageLineOutboundVideo;
   deliver?: typeof deliverArchivedLineVideo;
 }): Promise<LineVideoDeliveryRetryResult> {
   const job = await params.jobStore.lookup(params.jobId);
-  if (!job?.r2ObjectKey || job.status === "completed") {
+  if (!job || job.status === "completed") {
+    return { kind: "no_recoverable_job" };
+  }
+  // Recoverable means the paid generation actually finished. A job that failed
+  // before that has nothing bought to resume from, and resuming it would mean
+  // submitting again -- which is exactly what this function exists to avoid.
+  const archived = job.r2ObjectKey;
+  const providerArtifact = job.providerResultUrl;
+  if (!archived && !providerArtifact) {
     return { kind: "no_recoverable_job" };
   }
   const cfg = params.cfg ?? getRuntimeConfig();
   const deliveryTo = params.deliveryTo ?? undefined;
   try {
-    const videoUrl = await (params.signUrl ?? signArchivedLineVideoUrl)(job.r2ObjectKey);
+    // Resume from the furthest stage that already succeeded. An archived
+    // object only needs re-signing; a completed generation whose artifact was
+    // never archived is re-fetched from fal's OWN result URL, not regenerated.
+    let objectKey = archived;
+    if (!objectKey) {
+      const staged = await (params.archive ?? stageLineOutboundVideo)(providerArtifact!);
+      objectKey = staged.objectKey;
+      await updateLineVideoJob({
+        store: params.jobStore,
+        jobId: params.jobId,
+        patch: { stage: "r2_archive", r2ObjectKey: staged.objectKey, videoUrl: staged.url },
+      });
+    }
+    const videoUrl = await (params.signUrl ?? signArchivedLineVideoUrl)(objectKey);
     await (params.deliver ?? deliverArchivedLineVideo)({
       cfg,
       account: params.account,
@@ -407,12 +399,29 @@ export async function executeConfirmedLineVideoJob(params: {
       await notionLibrary.markUgcProcessing(params.ugcScope);
     }
 
-    // STAGE provider_generation -- the only stage that spends money.
-    const generated = await runProviderGeneration(params);
+    // STAGE provider_submission -- the only stage that spends money.
     await updateLineVideoJob({
       store: params.jobStore,
       jobId: params.jobId,
-      patch: { stage: "provider_generation", provider: generated.provider },
+      patch: { stage: "provider_submission", provider: "fal" },
+    });
+    const generated = await runProviderGeneration(params);
+    // The video now EXISTS and is paid for. Recording that, with fal's own
+    // identifiers, is what makes every later failure recoverable instead of
+    // billable: nothing downstream may re-enter submission.
+    await updateLineVideoJob({
+      store: params.jobStore,
+      jobId: params.jobId,
+      patch: {
+        stage: "provider_generation_completed",
+        provider: generated.provider,
+        ...(generated.recovery?.requestId
+          ? { providerRequestId: generated.recovery.requestId }
+          : {}),
+        ...(generated.recovery?.resultUrl
+          ? { providerResultUrl: generated.recovery.resultUrl }
+          : {}),
+      },
     });
     const actualCostUsd = generated.actualCostUsd;
 

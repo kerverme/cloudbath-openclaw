@@ -28,15 +28,40 @@ const LineVideoGenerationConfigSchema = z
   .object({
     maxEstimatedCostUsd: z.number().positive().optional(),
     defaultModel: z.string().optional(),
-    // fal publishes no machine-readable price for its Seedance endpoint, so
-    // the rate is an operator-declared fact. Its presence is also what enables
-    // the fal reference-to-video route at all -- see fal-video-pricing.ts.
+    // fal publishes no machine-readable price, so rates are operator-declared
+    // PER ENDPOINT: fal does not bill one blended rate across its catalog, and
+    // a model with no declared rate is simply not payable.
     falPricing: z
       .object({
-        seedanceReferenceToVideoUsdPerSecond: z.number().positive().optional(),
-        source: z.string().optional(),
+        models: z
+          .record(
+            z.string(),
+            z
+              .object({
+                usdPerSecond: z.number().positive().optional(),
+                byResolution: z.record(z.string(), z.number().positive()).optional(),
+                source: z.string().optional(),
+              })
+              .strict(),
+          )
+          .optional(),
       })
       .strict()
+      .optional(),
+    // Capabilities fal's published schema leaves unbounded (MiniMax H3 declares
+    // `duration?: number` with no range). Declared rather than guessed; a
+    // declaration only ever fills an `unknown`, never widens a schema fact.
+    falModels: z
+      .record(
+        z.string(),
+        z
+          .object({
+            durationSeconds: z.array(z.number().int().positive()).optional(),
+            audio: z.enum(["controllable", "always_on"]).optional(),
+            enabled: z.boolean().optional(),
+          })
+          .strict(),
+      )
       .optional(),
   })
   .strict();

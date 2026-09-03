@@ -83,8 +83,20 @@ export function nextDirectorSlot(session: StoryboardDirectorSession): DirectorSl
   return session.dialogue.wanted && !session.dialogue.text ? "dialogue_text" : undefined;
 }
 
+/**
+ * The two lengths the product offers, in the order they are numbered.
+ *
+ * Offered as a numbered choice rather than an open question because the answer
+ * decides which models can execute the scene at all, and a free-form length is
+ * routinely one no endpoint supports. A typed length is still accepted.
+ */
+export const STORYBOARD_DURATION_CHOICES: readonly number[] = Object.freeze([15, 30]);
+
 export const DIRECTOR_QUESTION: Readonly<Record<DirectorSlot, string>> = Object.freeze({
-  duration: "ต้องการความยาวกี่วินาที? (เช่น 10 วิ)",
+  duration: [
+    "ต้องการความยาวเท่าไร?",
+    ...STORYBOARD_DURATION_CHOICES.map((seconds, index) => `${index + 1}. ${seconds} วินาที`),
+  ].join("\n"),
   dialogue: "มีเสียงพูดในคลิปไหม? (มี / ไม่มี)",
   dialogue_text: "ให้พูดว่าอะไร?",
 });
@@ -96,12 +108,21 @@ const NEGATIVE = /ไม่มี|ไม่เอา|ไม่ต้อง|ไ�
 const CANCEL = /^(?:ยกเลิก|ไม่เอาแล้ว|พอแล้ว|\bcancel\b|\bstop\b)/iu;
 
 /**
- * A bare number answering "how many seconds", e.g. "10".
+ * A bare number answering the duration question, e.g. "10".
  *
  * Only consulted while the duration slot is open, so a lone number in ordinary
- * conversation cannot start a scene.
+ * conversation cannot start a scene. A number that indexes the offered choices
+ * ("1", "2") is read as that choice; anything else is read as seconds, which
+ * keeps "15" meaning fifteen seconds rather than an out-of-range menu pick.
  */
 const BARE_SECONDS = /^(\d{1,3})$/u;
+
+/** Resolves a bare number against the offered menu, else as literal seconds. */
+function readDurationChoice(value: number): number {
+  return value >= 1 && value <= STORYBOARD_DURATION_CHOICES.length
+    ? STORYBOARD_DURATION_CHOICES[value - 1]!
+    : value;
+}
 
 export type DirectorAnswer =
   | Readonly<{ kind: "cancel" }>
@@ -130,7 +151,10 @@ export function parseDirectorAnswer(params: {
   }
   if (params.slot === "duration") {
     const bare = text.match(BARE_SECONDS)?.[1];
-    const seconds = readStoryboardDuration(text) ?? (bare ? Number(bare) : undefined);
+    // An explicit unit wins ("15 วิ" is fifteen seconds, never menu item 15);
+    // a bare number is read against the menu first.
+    const seconds =
+      readStoryboardDuration(text) ?? (bare ? readDurationChoice(Number(bare)) : undefined);
     if (seconds === undefined || !Number.isSafeInteger(seconds) || seconds < 1) {
       return undefined;
     }

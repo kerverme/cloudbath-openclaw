@@ -36,7 +36,8 @@ export type LineRequoteOverrides = Readonly<{
   durationSeconds?: number;
   resolution?: string;
   aspectRatio?: string;
-  audio?: boolean;
+  /** The scene's three-way audio decision, not a boolean. */
+  audio?: "off" | "ambient" | "full";
 }>;
 
 /**
@@ -82,10 +83,12 @@ export function parseRequoteAnswer(params: {
   }
   if (params.field === "audio") {
     // Dropping audio is never assumed: only an explicit yes/no counts.
+    // "yes" re-quotes as a full scene; the storyboard's own ambient/full
+    // distinction is not something this narrow answer can express.
     if (NEGATIVE_AUDIO.test(text)) {
-      return { audio: false };
+      return { audio: "off" };
     }
-    return AFFIRMATIVE_AUDIO.test(text) ? { audio: true } : undefined;
+    return AFFIRMATIVE_AUDIO.test(text) ? { audio: "full" } : undefined;
   }
   const normalized = text.toLowerCase().replace(/\s+/gu, "");
   const supported = params.supported.map((entry) => entry.toLowerCase());
@@ -141,7 +144,7 @@ export function formatRequotedDraft(params: {
     overrides.durationSeconds === undefined ? "" : `${overrides.durationSeconds} วิ`,
     overrides.resolution ?? "",
     overrides.aspectRatio ?? "",
-    overrides.audio === false ? "ไม่มีเสียง" : "",
+    overrides.audio === "off" ? "ไม่มีเสียง" : "",
   ].filter(Boolean);
   const price =
     params.result.estimatedCostUsd === undefined

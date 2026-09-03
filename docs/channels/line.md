@@ -230,22 +230,45 @@ Generic media sends without LINE-specific options use the image route.
 
 ## Paid video generation
 
-Owner-confirmed video jobs (`ยืนยัน VIDEO ####`) are quoted before anything is
-submitted, and the provider is chosen once, at quote time, then frozen into the
-draft. A confirmation never re-routes and never falls back to another provider.
+Video for this flow is generated on **fal.ai only**. OpenRouter is no longer
+used to generate video here (it remains available for chat and other uses).
 
-- **OpenRouter** is the default path for every video model the live picker
-  offers. It is quoted from OpenRouter's own `pricing_skus`.
-- **fal** handles Seedance _reference-to-video_ — a Seedance model plus at least
-  one Character identity reference — through
-  `bytedance/seedance-2.0/reference-to-video`, the only endpoint on either
-  provider that accepts multiple reference images. It uses the `fal` provider
-  credential (`FAL_KEY`).
+The owner conversation runs in this order, and money enters at the very end:
 
-fal publishes no machine-readable price, so the fal route is **opt-in**: it is
-used only once you declare the rate. Without it, Seedance scenes stay on
-OpenRouter and behave exactly as before — a job is never quoted at an unknown
-cost.
+1. Describe the scene naturally.
+2. The bot asks the length (15 or 30 seconds) **before** building anything.
+3. It renders a storyboard — time windows, action, camera, characters,
+   environment, and beat-level sound design when audio was asked for.
+4. `ยืนยัน Storyboard` freezes the scene. This costs nothing and mints no code;
+   revisions before it are free and unlimited.
+5. Only then does model selection begin: the bot offers a **capability-aware
+   default**, or `เปลี่ยนโมเดล` opens a family picker and then a version picker.
+6. The Final Video Draft shows the actual fal endpoint that will be billed, and
+   its price, with the exact `ยืนยัน VIDEO ####` code.
+7. That exact phrase is the only paid trigger, and it is consumed once.
+
+### Model registry
+
+Every selectable endpoint, and its capabilities, lives in one place
+(`extensions/line/src/fal-video-registry.ts`), transcribed from fal's own
+published schema in `@fal-ai/client`. Capabilities carry their provenance:
+`fal_schema` for facts fal states, and `operator_declared` for facts its schema
+leaves open. **An unproven capability is never treated as permission** — a model
+that cannot be shown to execute the confirmed storyboard is never offered,
+defaulted to, or given a payable code.
+
+Two consequences worth knowing:
+
+- fal publishes **no Seedance 2.5** endpoint of any kind. Its Seedance
+  reference-to-video endpoints are `seedance-2.0` plus `fast`/`mini` variants.
+- MiniMax H3's schema declares `duration` as an unbounded number and exposes no
+  audio field, so both must be declared before H3 can be selected.
+
+### Configuration
+
+fal publishes no machine-readable price, so rates are declared **per endpoint** —
+there is no blended fallback rate, and an endpoint with no rate is simply not
+payable. `falModels` supplies what fal's schema leaves open.
 
 ```jsonc
 {
@@ -253,20 +276,46 @@ cost.
     "videoGeneration": {
       "maxEstimatedCostUsd": 5,
       "falPricing": {
-        "seedanceReferenceToVideoUsdPerSecond": 0.15,
-        "source": "https://fal.ai/pricing",
+        "models": {
+          "minimax/h3/reference-to-video": {
+            "usdPerSecond": 0.1,
+            "source": "https://fal.ai/pricing",
+          },
+          "bytedance/seedance-2.0/reference-to-video": {
+            "usdPerSecond": 0.05,
+            "byResolution": { "1080p": 0.09 },
+            "source": "https://fal.ai/pricing",
+          },
+        },
+      },
+      "falModels": {
+        "minimax/h3/reference-to-video": {
+          "durationSeconds": [5, 10, 15],
+          "audio": "always_on",
+        },
       },
     },
   },
 }
 ```
 
-Generated video is always archived in your R2 bucket and delivered to LINE from
-a signed R2 URL; a transient provider artifact URL is never sent. Reference
-images are published to fal as short-lived signed R2 URLs, so the bucket stays
-private. If generation succeeds but the LINE send fails, the job is recorded as
-`delivery_failed` rather than failed, and re-delivery re-signs the archived
-object instead of paying for a second generation.
+Credentials come from the standard `fal` provider (`FAL_KEY`) and are verified
+**before** a payable code is minted, so a code is never handed out that cannot
+be spent.
+
+### Delivery and recovery
+
+Generated video is always archived in your R2 bucket and delivered from a signed
+R2 URL; a transient provider artifact URL is never sent to LINE. Reference images
+are published to fal as short-lived signed R2 URLs, so the bucket stays private.
+
+The job records each stage separately — `provider_submission`,
+`provider_generation_completed`, `artifact_retrieval`, `r2_archive`,
+`line_delivery` — and only the first spends money. Once generation has
+completed, **no failure afterwards re-generates**: the owner can type
+`ส่งวิดีโออีกครั้ง` and delivery resumes from the furthest stage that
+succeeded, re-signing the archived object or re-fetching fal's own existing
+result. That command is scoped to the same account, group and owner.
 
 ## Troubleshooting
 

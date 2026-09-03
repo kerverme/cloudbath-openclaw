@@ -59,8 +59,10 @@ describe("A. สร้างวิดีโอ hands off and shows the LINE-allo
 
     const [draft] = (await h.drafts.entries()).map((entry) => entry.value);
     expect(draft?.confirmation).toEqual({ kind: "ready", code: "4821" });
+    // The draft names the provider AND the exact endpoint that will be billed.
     expect(draft?.model).toEqual({
       kind: "provider-bound",
+      provider: "fal.ai",
       providerModelId: "bytedance/seedance-2.5",
       displayName: "Seedance 2.5",
     });

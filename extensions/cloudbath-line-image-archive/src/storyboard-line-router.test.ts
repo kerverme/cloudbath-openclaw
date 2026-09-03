@@ -149,7 +149,9 @@ describe("D. สร้างวิดีโอ prepares a Final Video Draft", ()
     expect(result.text).toContain("15 วิ");
     expect(result.text).toContain("9:16");
     expect(result.text).toContain("720p");
-    expect(result.text).toContain("Seedance 2.5");
+    // No paid runtime is installed here, so no endpoint is bound and the
+    // draft says so plainly rather than naming a model it did not choose.
+    expect(result.text).toContain("ยังไม่เลือกโมเดล");
     // No paid phrase is emitted while provider binding is deferred: a code the
     // paid gate cannot resolve would either dead-end or hit somebody else's draft.
     expect(result.text).not.toMatch(/ยืนยัน\s+VIDEO/u);
@@ -166,7 +168,7 @@ describe("D. สร้างวิดีโอ prepares a Final Video Draft", ()
     expect(draft.confirmation).toEqual({ kind: "deferred" });
     expect(draft.draftId).not.toMatch(/^\d{4}$/u);
     // Provider binding is deferred, so no api model id is invented.
-    expect(draft.model).toEqual({ kind: "deferred", displayName: "Seedance 2.5" });
+    expect(draft.model).toEqual({ kind: "deferred", displayName: "ยังไม่เลือกโมเดล" });
     expect(draft.estimatedCost).toEqual({
       kind: "unavailable",
       reason: "provider-binding-deferred",
