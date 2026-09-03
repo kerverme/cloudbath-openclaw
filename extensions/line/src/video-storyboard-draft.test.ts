@@ -113,17 +113,29 @@ function harness(
     apiKey?: string | undefined;
     loadModels?: () => Promise<OpenRouterVideoModel[]>;
     randomDraftCode?: () => number;
+    /** Operator-declared fal rate; its presence enables the fal route. */
+    falUsdPerSecond?: number;
   } = {},
 ) {
   const draftStore = memoryDraftStore();
   const loadModels = options.loadModels ?? (async () => options.models ?? [seedanceRow()]);
+  const videoGeneration = {
+    ...(options.maxEstimatedCostUsd === undefined
+      ? {}
+      : { maxEstimatedCostUsd: options.maxEstimatedCostUsd }),
+    ...(options.falUsdPerSecond === undefined
+      ? {}
+      : {
+          falPricing: {
+            seedanceReferenceToVideoUsdPerSecond: options.falUsdPerSecond,
+            source: "https://fal.ai/pricing",
+          },
+        }),
+  };
   const deps = {
     draftStore,
     resolveApiKey: async () => ("apiKey" in options ? options.apiKey : "sk-test-key"),
-    cfg:
-      options.maxEstimatedCostUsd === undefined
-        ? {}
-        : { videoGeneration: { maxEstimatedCostUsd: options.maxEstimatedCostUsd } },
+    cfg: Object.keys(videoGeneration).length === 0 ? {} : { videoGeneration },
     loadModels,
     ...(options.randomDraftCode ? { randomDraftCode: options.randomDraftCode } : {}),
   };
@@ -414,5 +426,112 @@ describe("the cross-plugin seam round-trips and is owner-guarded", () => {
       // The slot lives on globalThis, so it must not outlive this test.
       clearLineStoryboardVideoRuntime(owner);
     }
+  });
+});
+
+describe("fal Seedance reference-to-video routing", () => {
+  it("keeps the existing OpenRouter route and its live price when fal is not configured", async () => {
+    const h = harness({ maxEstimatedCostUsd: 5 });
+    const result = await prepareLineStoryboardVideoDraft(request(), h.deps);
+
+    expect(result).toMatchObject({ kind: "created" });
+    if (result.kind !== "created") {
+      return;
+    }
+    expect(result.providerRoute).toEqual({
+      provider: "openrouter",
+      modelId: "bytedance/seedance-2.5",
+    });
+    expect(result.pricingSource).toBe("openrouter:bytedance/seedance-2.5");
+    expect(result.estimatedCostUsd).toBeCloseTo(3.468, 3);
+  });
+
+  it("routes a Seedance scene WITH identity references to fal once configured", async () => {
+    const h = harness({ maxEstimatedCostUsd: 5, falUsdPerSecond: 0.1 });
+    const result = await prepareLineStoryboardVideoDraft(request(), h.deps);
+
+    expect(result).toMatchObject({ kind: "created" });
+    if (result.kind !== "created") {
+      return;
+    }
+    expect(result.providerRoute).toEqual({
+      provider: "fal",
+      modelId: "bytedance/seedance-2.0/reference-to-video",
+      catalogModelId: "bytedance/seedance-2.5",
+    });
+    // fal's own rate, not OpenRouter's $0.2312/s Seedance price.
+    expect(result.estimatedCostUsd).toBeCloseTo(1.5, 6);
+    expect(result.pricingSource).toBe("fal:bytedance/seedance-2.0/reference-to-video");
+  });
+
+  it("freezes the route into the draft BEFORE the confirmation code exists", async () => {
+    const h = harness({ maxEstimatedCostUsd: 5, falUsdPerSecond: 0.1 });
+    const result = await prepareLineStoryboardVideoDraft(request(), h.deps);
+    if (result.kind !== "created") {
+      throw new Error("expected a created draft");
+    }
+    const stored = await h.draftStore.lookup(result.draftId);
+    expect(stored?.providerRoute).toEqual({
+      provider: "fal",
+      modelId: "bytedance/seedance-2.0/reference-to-video",
+      catalogModelId: "bytedance/seedance-2.5",
+    });
+    // The price stored is the one the owner will be shown and billed.
+    expect(stored?.estimatedCostUsd).toBeCloseTo(1.5, 6);
+  });
+
+  it("stays on OpenRouter for a Seedance scene with no identity references", async () => {
+    const h = harness({ maxEstimatedCostUsd: 5, falUsdPerSecond: 0.1 });
+    const result = await prepareLineStoryboardVideoDraft(request({ referenceAssets: [] }), h.deps);
+    expect(result).toMatchObject({ kind: "created" });
+    if (result.kind !== "created") {
+      return;
+    }
+    expect(result.providerRoute.provider).toBe("openrouter");
+  });
+
+  it("refuses a fal duration its published schema does not accept, minting no code", async () => {
+    const h = harness({ maxEstimatedCostUsd: 5, falUsdPerSecond: 0.1 });
+    const result = await prepareLineStoryboardVideoDraft(request({ durationSeconds: 30 }), h.deps);
+    expect(result).toMatchObject({ kind: "rejected", reason: "unsupported_duration" });
+    expect((await h.draftStore.entries()).length).toBe(0);
+  });
+
+  it("refuses more reference images than fal accepts, minting no code", async () => {
+    const h = harness({ maxEstimatedCostUsd: 5, falUsdPerSecond: 0.1 });
+    const result = await prepareLineStoryboardVideoDraft(
+      request({
+        referenceAssets: Array.from({ length: 10 }, (_unused, index) => ({
+          kind: "identity" as const,
+          source: "r2" as const,
+          locator: `ugc/characters/char-${index}.png`,
+        })),
+      }),
+      h.deps,
+    );
+    expect(result).toMatchObject({ kind: "rejected", reason: "too_many_references" });
+    expect((await h.draftStore.entries()).length).toBe(0);
+  });
+
+  it("never quotes an unknown fal price as payable", async () => {
+    // fal route selected by model + references, but with a rate of zero the
+    // adapter reports unavailable and the draft is refused rather than
+    // showing the owner $0.00 for a job that will be billed.
+    const h = harness({ maxEstimatedCostUsd: 5, falUsdPerSecond: 0.1 });
+    const withoutRate = {
+      ...h.deps,
+      cfg: { videoGeneration: { maxEstimatedCostUsd: 5 } },
+    };
+    const routed = await prepareLineStoryboardVideoDraft(request(), h.deps);
+    expect(routed).toMatchObject({ kind: "created" });
+    // Same request, no fal rate: falls back to the OpenRouter route rather
+    // than quoting nothing -- and never produces a $0 fal quote.
+    const unrouted = await prepareLineStoryboardVideoDraft(request(), withoutRate);
+    expect(unrouted).toMatchObject({ kind: "created" });
+    if (unrouted.kind !== "created") {
+      return;
+    }
+    expect(unrouted.providerRoute.provider).toBe("openrouter");
+    expect(unrouted.estimatedCostUsd).toBeGreaterThan(0);
   });
 });

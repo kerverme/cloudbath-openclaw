@@ -28,6 +28,16 @@ const LineVideoGenerationConfigSchema = z
   .object({
     maxEstimatedCostUsd: z.number().positive().optional(),
     defaultModel: z.string().optional(),
+    // fal publishes no machine-readable price for its Seedance endpoint, so
+    // the rate is an operator-declared fact. Its presence is also what enables
+    // the fal reference-to-video route at all -- see fal-video-pricing.ts.
+    falPricing: z
+      .object({
+        seedanceReferenceToVideoUsdPerSecond: z.number().positive().optional(),
+        source: z.string().optional(),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 

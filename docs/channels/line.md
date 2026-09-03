@@ -228,6 +228,46 @@ link-local, and private-network targets.
 
 Generic media sends without LINE-specific options use the image route.
 
+## Paid video generation
+
+Owner-confirmed video jobs (`ยืนยัน VIDEO ####`) are quoted before anything is
+submitted, and the provider is chosen once, at quote time, then frozen into the
+draft. A confirmation never re-routes and never falls back to another provider.
+
+- **OpenRouter** is the default path for every video model the live picker
+  offers. It is quoted from OpenRouter's own `pricing_skus`.
+- **fal** handles Seedance _reference-to-video_ — a Seedance model plus at least
+  one Character identity reference — through
+  `bytedance/seedance-2.0/reference-to-video`, the only endpoint on either
+  provider that accepts multiple reference images. It uses the `fal` provider
+  credential (`FAL_KEY`).
+
+fal publishes no machine-readable price, so the fal route is **opt-in**: it is
+used only once you declare the rate. Without it, Seedance scenes stay on
+OpenRouter and behave exactly as before — a job is never quoted at an unknown
+cost.
+
+```jsonc
+{
+  "line": {
+    "videoGeneration": {
+      "maxEstimatedCostUsd": 5,
+      "falPricing": {
+        "seedanceReferenceToVideoUsdPerSecond": 0.15,
+        "source": "https://fal.ai/pricing",
+      },
+    },
+  },
+}
+```
+
+Generated video is always archived in your R2 bucket and delivered to LINE from
+a signed R2 URL; a transient provider artifact URL is never sent. Reference
+images are published to fal as short-lived signed R2 URLs, so the bucket stays
+private. If generation succeeds but the LINE send fails, the job is recorded as
+`delivery_failed` rather than failed, and re-delivery re-signs the archived
+object instead of paying for a second generation.
+
 ## Troubleshooting
 
 - **Webhook verification fails:** ensure the webhook URL is HTTPS and the

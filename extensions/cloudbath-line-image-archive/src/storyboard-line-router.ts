@@ -13,6 +13,7 @@
  */
 
 import type { PrevisProjectResolver } from "./previs-line-router.js";
+import { parseStoryboardAudioIntent } from "./storyboard-audio.js";
 import { compileStoryboardDocument } from "./storyboard-compiler.js";
 import {
   applyDirectorAnswer,
@@ -388,6 +389,12 @@ export class CloudbathStoryboardLineRouter {
         aspectRatio: toAspectRatio(intent.aspectRatio),
         resolution: toResolution(intent.resolution),
         environment: intent.environment,
+        // Read from the owner's own words, by the one parser that separates
+        // SOUND from SPEECH. Absent, the compiler falls back to whether the
+        // scene has a spoken line, which is the pre-audio-mode behaviour.
+        ...((mode) => (mode ? { audio: mode } : {}))(
+          parseStoryboardAudioIntent(intent.scenePrompt),
+        ),
         ...(planned ? { plannedBeats: planned.beats } : {}),
       });
       const created = await this.deps.store.createStoryboard({

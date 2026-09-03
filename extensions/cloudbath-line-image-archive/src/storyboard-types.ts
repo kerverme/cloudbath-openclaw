@@ -29,6 +29,15 @@ export type StoryboardResolution = (typeof STORYBOARD_RESOLUTIONS)[number];
  * A closed union rather than free text so timing and framing stay derivable:
  * an unrecognised action becomes `"action"`, never a new implicit kind.
  */
+/**
+ * Scene-level audio decision.
+ *
+ * `ambient` is the shape the previous boolean could not express: sound on,
+ * speech off. Collapsing it back to a boolean is what made "ไม่มีเสียงพูด
+ * แต่มีเสียง" render as a silent scene.
+ */
+export type StoryboardAudioMode = "off" | "ambient" | "full";
+
 export type StoryboardBeatKind =
   | "establishing"
   | "locomotion"
@@ -63,8 +72,10 @@ export type StoryboardBeat = Readonly<{
   action: string;
   /** Camera instruction, e.g. "Track with the subject". */
   camera: string;
-  /** Dialogue or audio intent, when the beat carries any. */
+  /** SPEECH only: the spoken line, verbatim. Absent unless the beat is spoken. */
   dialogue?: string;
+  /** SOUND only: ambience and effects for this window. Absent when audio is off. */
+  soundDesign?: string;
   /** Beat-local environment note, when it differs from the scene environment. */
   environmentNote?: string;
   /** Canonical character ids this beat frames, in cast order. */
@@ -81,6 +92,8 @@ export type StoryboardDocument = Readonly<{
   resolution: StoryboardResolution;
   /** Scene location, e.g. "ร้านกาแฟ". Empty when the request named none. */
   environment: string;
+  /** Scene audio decision. Drives both the LINE rendering and the provider prompt. */
+  audio: StoryboardAudioMode;
   cast: readonly StoryboardCastMember[];
   beats: readonly StoryboardBeat[];
 }>;
@@ -175,6 +188,7 @@ export type StoryboardVideoPlan = Readonly<{
   aspectRatio: StoryboardAspectRatio;
   resolution: StoryboardResolution;
   environment: string;
+  audio: StoryboardAudioMode;
   characters: readonly StoryboardPlanCharacter[];
   beats: readonly StoryboardPlanBeat[];
 }>;
@@ -197,6 +211,7 @@ export type StoryboardPlanBeat = Readonly<{
   action: string;
   camera: string;
   dialogue?: string;
+  soundDesign?: string;
   characterIds: readonly string[];
 }>;
 

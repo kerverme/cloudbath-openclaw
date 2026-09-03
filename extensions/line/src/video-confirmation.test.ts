@@ -67,6 +67,9 @@ vi.mock("./send.js", () => ({
 vi.mock("./video-outbound-staging.js", () => ({
   stageLineOutboundVideo: (...args: unknown[]) => stageLineOutboundVideoMock(...args),
   stageLineVideoPreviewImage: (...args: unknown[]) => stageLineVideoPreviewImageMock(...args),
+  // Exported because the module under test imports it, even though no case
+  // here reaches the delivery-retry path.
+  signArchivedLineVideoUrl: async (key: string) => `https://r2.example/${key}`,
 }));
 
 const { createLineVideoConfirmationGate, parseLineVideoConfirmationCode } =
@@ -649,20 +652,34 @@ describe("createLineVideoConfirmationGate", () => {
     expect(sendMessageLineMock).toHaveBeenCalledTimes(1);
   });
 
-  it("changes the same Notion record from Completed to Failed when LINE delivery fails", async () => {
+  it("keeps a delivery-only failure recoverable instead of calling the generation failed", async () => {
     sendMessageLineMock.mockRejectedValueOnce(new Error("LINE delivery failed"));
     const { gate, draft, scheduled, jobStore } = await fixture();
 
     await gate(confirmEvent(draft.draftId), CTX);
     await scheduled[0]?.();
 
+    // The provider generated and was paid; only the send failed. The Notion
+    // record therefore stays Completed and the job stays recoverable.
     expect(notionMarkCompletedMock).toHaveBeenCalledTimes(1);
-    expect(notionMarkFailedMock).toHaveBeenCalledWith(
-      { pageId: "notion-page-1" },
-      "LINE delivery failed",
-    );
+    expect(notionMarkFailedMock).not.toHaveBeenCalled();
     const [job] = await jobStore.entries();
-    expect(job?.value.status).toBe("failed");
+    expect(job?.value.status).toBe("delivery_failed");
+    expect(job?.value.stage).toBe("line_delivery");
+    // The archived object is what a retry re-signs from, so it must persist.
+    expect(job?.value.r2ObjectKey).toBeTruthy();
+  });
+
+  it("never tells the owner the video failed when only delivery failed", async () => {
+    sendMessageLineMock.mockRejectedValueOnce(new Error("LINE delivery failed"));
+    const { gate, draft, scheduled } = await fixture();
+
+    await gate(confirmEvent(draft.draftId), CTX);
+    await scheduled[0]?.();
+
+    const notices = sendMessageLineMock.mock.calls.map((call) => String(call[1]));
+    expect(notices.some((text) => text.includes("สร้างวิดีโอไม่สำเร็จ"))).toBe(false);
+    expect(notices.some((text) => text.includes("สร้างวิดีโอสำเร็จแล้ว"))).toBe(true);
   });
 
   it("validates Notion before the paid provider call and fails closed when unavailable", async () => {

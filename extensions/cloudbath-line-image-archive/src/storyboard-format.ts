@@ -7,12 +7,20 @@
  */
 
 import type {
+  StoryboardAudioMode,
   StoryboardCostEstimate,
   StoryboardDraftConfirmation,
   StoryboardDocument,
   StoryboardFinalVideoDraft,
   StoryboardVideoModelSelection,
 } from "./storyboard-types.js";
+
+/** Owner-facing wording for the scene audio decision. */
+const AUDIO_MODE_LABELS: Readonly<Record<StoryboardAudioMode, string>> = Object.freeze({
+  off: "ไม่มีเสียง",
+  ambient: "มีเสียงประกอบ ไม่มีเสียงพูด",
+  full: "มีเสียง",
+});
 
 function beatBlock(document: StoryboardDocument): string[] {
   return document.beats.flatMap((beat) => {
@@ -24,7 +32,10 @@ function beatBlock(document: StoryboardDocument): string[] {
       `${beat.startSeconds}–${beat.endSeconds} วิ`,
       heading,
       beat.action,
-      ...(beat.dialogue ? [`เสียง: ${beat.dialogue}`] : []),
+      // SPEECH and SOUND are labelled apart. One shared "เสียง:" line is what
+      // made "มีเสียง" and "มีบทพูด" read identically to the owner.
+      ...(beat.dialogue ? [`พูด: ${beat.dialogue}`] : []),
+      ...(beat.soundDesign ? [`เสียง: ${beat.soundDesign}`] : []),
       ...(beat.camera && beat.camera !== "Static" ? [`กล้อง: ${beat.camera}`] : []),
     ];
   });
@@ -39,6 +50,7 @@ export function formatStoryboardForLine(params: {
   const lines = [
     `🎬 Storyboard v${params.versionNumber} — ${document.durationSeconds} วิ · ${document.aspectRatio}`,
     ...(document.environment ? [`สถานที่: ${document.environment}`] : []),
+    `เสียง: ${AUDIO_MODE_LABELS[document.audio]}`,
     ...beatBlock(document),
     "",
     "ตัวละคร:",

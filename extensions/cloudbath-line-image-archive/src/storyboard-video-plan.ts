@@ -9,13 +9,13 @@
  */
 
 import { randomBytes } from "node:crypto";
+import { storyboardWantsProviderAudio } from "./storyboard-audio.js";
 import {
   tryGetStoryboardPaidDraftRuntime,
   type StoryboardPaidDraftRequest,
   type StoryboardPaidDraftResult,
   type StoryboardPaidDraftRuntime,
 } from "./storyboard-paid-draft-runtime.js";
-import { storyboardHasDialogue } from "./storyboard-revision.js";
 import type {
   StoryboardCostEstimate,
   StoryboardDraftConfirmation,
@@ -99,6 +99,7 @@ export function compileStoryboardVideoPlan(version: StoryboardVersion): Storyboa
     aspectRatio: version.document.aspectRatio,
     resolution: version.document.resolution,
     environment: version.document.environment,
+    audio: version.document.audio,
     characters: planCharacters(version),
     beats: Object.freeze(
       version.document.beats.map((beat) =>
@@ -110,6 +111,7 @@ export function compileStoryboardVideoPlan(version: StoryboardVersion): Storyboa
           action: beat.action,
           camera: beat.camera,
           ...(beat.dialogue ? { dialogue: beat.dialogue } : {}),
+          ...(beat.soundDesign ? { soundDesign: beat.soundDesign } : {}),
           characterIds: beat.characterIds,
         }),
       ),
@@ -189,9 +191,41 @@ export function compileStoryboardProviderPrompt(plan: StoryboardVideoPlan): stri
     `Duration: ${plan.durationSeconds}s · ${plan.aspectRatio} · ${plan.resolution}`,
     "Beats:",
     ...beats,
+    ...audioPromptLines(plan),
   ]
     .filter((line): line is string => Boolean(line))
     .join("\n");
+}
+
+/**
+ * The audio timeline, rendered from the SAME beats the LINE storyboard shows.
+ *
+ * Setting `generate_audio` without telling the model what to put in each
+ * window is what produced paid-for audio nobody asked for: the provider fills
+ * the silence with whatever it likes. These lines are the contract that the
+ * message the owner approved and the prompt the provider receives describe one
+ * scene, so they are derived here rather than authored separately.
+ */
+function audioPromptLines(plan: StoryboardVideoPlan): readonly string[] {
+  if (plan.audio === "off") {
+    return ["Audio: none. Generate a silent video with no speech, music or sound effects."];
+  }
+  const speechRule =
+    plan.audio === "ambient"
+      ? "No spoken dialogue anywhere in the video."
+      : "Spoken lines only where a beat names one, in that beat's window.";
+  return [
+    "",
+    `Audio: on. ${speechRule}`,
+    "Audio timeline:",
+    ...plan.beats.map(
+      (beat) =>
+        `${beat.startSeconds}-${beat.endSeconds}s | sound: ${beat.soundDesign ?? "continuous scene ambience"}` +
+        (plan.audio === "full" && beat.dialogue
+          ? ` | speech: ${beat.dialogue}`
+          : " | speech: none"),
+    ),
+  ];
 }
 
 /**
@@ -338,10 +372,10 @@ async function requestPaidDraft(
       aspectRatio: params.overrides?.aspectRatio ?? plan.aspectRatio,
       resolution: params.overrides?.resolution ?? plan.resolution,
       // Asking is not granting: the LINE side only honours this when the live
-      // catalog reports audio support for the bound model. A scene with no
-      // spoken line asks for none, so dropping dialogue actually re-quotes
-      // against the cheaper silent SKU instead of paying for unused audio.
-      audio: params.overrides?.audio ?? storyboardHasDialogue(version.document),
+      // catalog reports audio support for the bound model. A scene the owner
+      // muted asks for none, so it re-quotes against the cheaper silent SKU
+      // instead of paying for audio nobody asked for.
+      audio: params.overrides?.audio ?? storyboardWantsProviderAudio(version.document),
       storyboardId: version.storyboardId,
       storyboardVersionNumber: version.versionNumber,
       characterLocks: version.characterLocks.map((lock) =>

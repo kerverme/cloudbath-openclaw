@@ -26,6 +26,11 @@ interface LineThreadBindingsConfig {
 interface LineVideoGenerationConfig {
   maxEstimatedCostUsd?: number;
   defaultModel?: string;
+  /** Operator-declared fal rate. Its presence enables the fal route. */
+  falPricing?: {
+    seedanceReferenceToVideoUsdPerSecond?: number;
+    source?: string;
+  };
 }
 
 interface LineAccountBaseConfig {

@@ -8,9 +8,11 @@
  * never the formatted text.
  */
 
+import { applyStoryboardAudioMode } from "./storyboard-audio.js";
 import { parseStoryboardActions, type ParsedAction } from "./storyboard-request.js";
 import type {
   StoryboardAspectRatio,
+  StoryboardAudioMode,
   StoryboardBeat,
   StoryboardBeatKind,
   StoryboardCastMember,
@@ -36,6 +38,7 @@ type PlannedBeat = Readonly<{
   camera: string;
   action: string;
   dialogue?: string;
+  soundDesign?: string;
   environmentNote?: string;
   characterIds: readonly string[];
   /** Names this beat was built from, so a connective beat can reuse them. */
@@ -197,25 +200,45 @@ export type CompileStoryboardParams = Readonly<{
   aspectRatio: StoryboardAspectRatio;
   resolution: StoryboardResolution;
   environment: string;
+  /**
+   * Scene audio decision, when the request named one.
+   *
+   * Absent, it is derived from whether any beat carries a spoken line, which
+   * is the pre-audio-mode behaviour: a scene the owner never discussed audio
+   * for gets no invented sound direction.
+   */
+  audio?: StoryboardAudioMode;
   /** Already schema-validated and canonically mapped by StoryboardLlmPlanner. */
   plannedBeats?: readonly StoryboardBeat[];
 }>;
 
 /** Compiles one immutable storyboard document. Deterministic for a given input. */
 export function compileStoryboardDocument(params: CompileStoryboardParams): StoryboardDocument {
-  if (params.plannedBeats) {
-    validatePlannedTimeline(params.plannedBeats, params.durationSeconds);
-    return Object.freeze({
-      version: 1,
-      scenePrompt: params.scenePrompt,
-      durationSeconds: params.durationSeconds,
-      aspectRatio: params.aspectRatio,
-      resolution: params.resolution,
-      environment: params.environment,
-      cast: Object.freeze([...params.cast]),
-      beats: Object.freeze([...params.plannedBeats]),
-    });
-  }
+  const beats = params.plannedBeats
+    ? (validatePlannedTimeline(params.plannedBeats, params.durationSeconds),
+      [...params.plannedBeats])
+    : buildDerivedBeats(params);
+  const base = Object.freeze({
+    version: 1,
+    scenePrompt: params.scenePrompt,
+    durationSeconds: params.durationSeconds,
+    aspectRatio: params.aspectRatio,
+    resolution: params.resolution,
+    environment: params.environment,
+    audio: "off",
+    cast: Object.freeze([...params.cast]),
+    beats: Object.freeze(beats),
+  } satisfies StoryboardDocument);
+  // One place decides audio, and it is the same one a later revision goes
+  // through, so a spoken beat always arrives with its sound design attached
+  // instead of a `generate_audio` flag over a prompt that never mentions sound.
+  const audio =
+    params.audio ?? (beats.some((beat) => Boolean(beat.dialogue?.trim())) ? "full" : "off");
+  return applyStoryboardAudioMode(base, audio);
+}
+
+/** Beats derived from the request text, when no planner supplied them. */
+function buildDerivedBeats(params: CompileStoryboardParams): StoryboardBeat[] {
   const actions = parseStoryboardActions(
     params.scenePrompt,
     params.cast.map((member) => member.displayName),
@@ -228,7 +251,7 @@ export function compileStoryboardDocument(params: CompileStoryboardParams): Stor
     params.durationSeconds,
     planned.map((beat) => beat.kind),
   );
-  const beats = planned.map((beat, index) =>
+  return planned.map((beat, index) =>
     Object.freeze({
       beatId: `BEAT-${index + 1}`,
       startSeconds: windows[index]!.startSeconds,
@@ -242,16 +265,6 @@ export function compileStoryboardDocument(params: CompileStoryboardParams): Stor
       characterIds: Object.freeze([...beat.characterIds]),
     }),
   );
-  return Object.freeze({
-    version: 1,
-    scenePrompt: params.scenePrompt,
-    durationSeconds: params.durationSeconds,
-    aspectRatio: params.aspectRatio,
-    resolution: params.resolution,
-    environment: params.environment,
-    cast: Object.freeze([...params.cast]),
-    beats: Object.freeze(beats),
-  });
 }
 
 function validatePlannedTimeline(beats: readonly StoryboardBeat[], durationSeconds: number): void {

@@ -8,6 +8,7 @@
  */
 import { randomInt } from "node:crypto";
 import type { PluginStateKeyedStore } from "openclaw/plugin-sdk/plugin-state-runtime";
+import type { LineVideoProviderRoute } from "./video-provider-routing.js";
 
 export const LINE_VIDEO_DRAFT_NAMESPACE = "video-draft-v1";
 export const LINE_VIDEO_DRAFT_MAX_ENTRIES = 5_000;
@@ -33,6 +34,16 @@ export type LineVideoDraft = {
   conversationKey: string;
   ownerSenderId: string;
   model: string;
+  /**
+   * The paid path this draft is LOCKED to, frozen before its code was minted.
+   *
+   * Confirmation reads this back verbatim instead of re-deciding: the owner
+   * confirmed a quote for one provider, and re-running the routing at
+   * submission time could bill a different one after the price was shown.
+   * Absent on drafts created before provider routing existed, which the
+   * confirmation gate treats as the OpenRouter path it was quoted against.
+   */
+  providerRoute?: LineVideoProviderRoute;
   prompt: string;
   sourceImagePath?: string;
   durationSeconds: number;
@@ -86,6 +97,7 @@ export async function createLineVideoDraft(params: {
   conversationKey: string;
   ownerSenderId: string;
   model: string;
+  providerRoute?: LineVideoProviderRoute;
   prompt: string;
   sourceImagePath?: string;
   durationSeconds: number;
@@ -109,6 +121,7 @@ export async function createLineVideoDraft(params: {
     conversationKey: params.conversationKey,
     ownerSenderId: params.ownerSenderId,
     model: params.model,
+    ...(params.providerRoute ? { providerRoute: params.providerRoute } : {}),
     prompt: params.prompt,
     ...(params.sourceImagePath ? { sourceImagePath: params.sourceImagePath } : {}),
     durationSeconds: params.durationSeconds,

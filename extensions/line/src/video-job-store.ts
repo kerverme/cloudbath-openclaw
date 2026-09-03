@@ -14,7 +14,29 @@ export const LINE_VIDEO_JOB_MAX_ENTRIES = 20_000;
 // transient pending state, but must not accumulate forever either.
 export const LINE_VIDEO_JOB_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
-export type LineVideoJobStatus = "running" | "completed" | "failed";
+/**
+ * Terminal states, plus the one that is NOT a generation failure.
+ *
+ * `delivery_failed` means the provider generated successfully and the bytes
+ * are archived in R2 — only the LINE send did not land. It exists so that
+ * state is recoverable without another paid call, and so the owner is never
+ * told "สร้างวิดีโอไม่สำเร็จ" about a video that was in fact generated and paid for.
+ */
+export type LineVideoJobStatus = "running" | "completed" | "failed" | "delivery_failed";
+
+/**
+ * How far a job got. Recorded as each stage completes, so a failure names the
+ * stage that failed and a retry knows which stages it may skip.
+ *
+ * `provider_generation` is the only stage that spends money. Everything after
+ * it operates on bytes already paid for, so a failure past it must never
+ * re-enter it.
+ */
+export type LineVideoJobStage =
+  | "provider_generation"
+  | "artifact_retrieval"
+  | "r2_archive"
+  | "line_delivery";
 
 export type LineVideoJob = {
   version: 1;
@@ -30,6 +52,12 @@ export type LineVideoJob = {
   resolution: string;
   audio: boolean;
   status: LineVideoJobStatus;
+  /** Last stage that completed. Absent until the provider call returns. */
+  stage?: LineVideoJobStage;
+  /** Which paid provider generated this job, e.g. "fal" / "openrouter". */
+  provider?: string;
+  /** Delivery attempts made from the archived R2 object. Bounds retry churn. */
+  deliveryAttempts?: number;
   submittedAt: number;
   estimatedCostUsd: number;
   actualCostUsd?: number;
@@ -47,6 +75,7 @@ export async function createLineVideoJob(params: {
   accountId: string;
   conversationKey: string;
   model: string;
+  provider?: string;
   prompt: string;
   durationSeconds: number;
   aspectRatio: string;
@@ -63,6 +92,7 @@ export async function createLineVideoJob(params: {
     accountId: params.accountId,
     conversationKey: params.conversationKey,
     model: params.model,
+    ...(params.provider ? { provider: params.provider } : {}),
     prompt: params.prompt,
     durationSeconds: params.durationSeconds,
     aspectRatio: params.aspectRatio,
@@ -84,6 +114,9 @@ export async function updateLineVideoJob(params: {
     Pick<
       LineVideoJob,
       | "status"
+      | "stage"
+      | "provider"
+      | "deliveryAttempts"
       | "openRouterJobId"
       | "actualCostUsd"
       | "notionPageId"

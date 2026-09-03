@@ -19,6 +19,11 @@
  */
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import {
+  estimateFalSeedanceCostUsd,
+  isFalVideoRoutingConfigured,
+  type FalVideoPricingConfig,
+} from "./fal-video-pricing.js";
+import {
   evaluateLineVideoCostGuard,
   resolveLineVideoMaxEstimatedCostUsd,
   resolveLineVideoOutputSize,
@@ -35,6 +40,15 @@ import {
   resolveLineVideoModelPreference,
   type LineVideoModelPreferenceStore,
 } from "./video-model-preference.js";
+import {
+  FAL_SEEDANCE_ASPECT_RATIOS,
+  FAL_SEEDANCE_MAX_REFERENCE_IMAGES,
+  FAL_SEEDANCE_REFERENCE_TO_VIDEO_MODEL,
+  FAL_SEEDANCE_RESOLUTIONS,
+  falSeedanceDurations,
+  resolveLineVideoProviderRoute,
+  type LineVideoProviderRoute,
+} from "./video-provider-routing.js";
 
 /**
  * The model a storyboard draft binds to.
@@ -109,6 +123,7 @@ export type LineStoryboardVideoDraftRejection =
       supported: readonly string[];
     }
   | { kind: "rejected"; reason: "unknown_cost"; model: string }
+  | { kind: "rejected"; reason: "too_many_references"; requested: number }
   | {
       kind: "rejected";
       reason: "over_limit";
@@ -140,6 +155,8 @@ export type LineStoryboardVideoDraftResult =
       outputSize?: string;
       /** Codes this allocation retired, so the caller can say which are dead. */
       supersededDraftIds?: readonly string[];
+      /** The paid path this draft is locked to. Frozen before the code exists. */
+      providerRoute: LineVideoProviderRoute;
     }>
   | Readonly<LineStoryboardVideoDraftRejection>;
 
@@ -147,7 +164,9 @@ export type PrepareLineStoryboardVideoDraftDeps = Readonly<{
   draftStore: LineVideoDraftStore;
   resolveApiKey: () => Promise<string | undefined>;
   /** Account-scoped config; `videoGeneration.maxEstimatedCostUsd` is the budget. */
-  cfg: Pick<OpenClawConfig, never> & { videoGeneration?: { maxEstimatedCostUsd?: number } };
+  cfg: Pick<OpenClawConfig, never> & {
+    videoGeneration?: { maxEstimatedCostUsd?: number };
+  } & FalVideoPricingConfig;
   fetchImpl?: typeof fetch;
   now?: () => number;
   randomDraftCode?: () => number;
@@ -172,6 +191,167 @@ export type PrepareLineStoryboardVideoDraftDeps = Readonly<{
  */
 function violatesCatalogChoice(supported: readonly string[], requested: string): boolean {
   return supported.length > 0 && !supported.includes(requested);
+}
+
+/**
+ * A completed quote, or the rejection that stops the draft from existing.
+ *
+ * One shape for both providers so the allocation below is written once: only
+ * how a price is derived differs, never what a priced draft looks like.
+ */
+type LineStoryboardQuote =
+  | Readonly<{
+      kind: "quoted";
+      audio: boolean;
+      estimatedCostUsd: number;
+      pricingSource: string;
+      outputSize?: string;
+    }>
+  | Readonly<LineStoryboardVideoDraftRejection>;
+
+/** Validates against the live OpenRouter catalog row and its `pricing_skus`. */
+function quoteOpenRouterModel(
+  request: LineStoryboardVideoDraftRequest,
+  model: OpenRouterVideoModel,
+  cfg: PrepareLineStoryboardVideoDraftDeps["cfg"],
+): LineStoryboardQuote {
+  if (
+    model.supportedDurationSeconds.length > 0 &&
+    !model.supportedDurationSeconds.includes(request.durationSeconds)
+  ) {
+    return {
+      kind: "rejected",
+      reason: "unsupported_duration",
+      requested: request.durationSeconds,
+      supported: model.supportedDurationSeconds.toSorted((left, right) => left - right),
+    };
+  }
+  if (violatesCatalogChoice(model.supportedResolutions, request.resolution)) {
+    return {
+      kind: "rejected",
+      reason: "unsupported_resolution",
+      requested: request.resolution,
+      supported: model.supportedResolutions,
+    };
+  }
+  if (violatesCatalogChoice(model.supportedAspectRatios, request.aspectRatio)) {
+    return {
+      kind: "rejected",
+      reason: "unsupported_aspect_ratio",
+      requested: request.aspectRatio,
+      supported: model.supportedAspectRatios,
+    };
+  }
+
+  // Audio is never invented: the request may ask for it, but only the live
+  // catalog can grant it. `supportsAudio === undefined` means the row does not
+  // declare the field, which is not permission.
+  const audio = request.audio && model.supportsAudio === true;
+
+  // Token-priced models bill by output pixel area, so the concrete size — not
+  // the "720p" label — is what the estimate needs.
+  const outputSize = resolveLineVideoOutputSize({
+    supportedSizes: model.supportedSizes,
+    resolution: request.resolution,
+    aspectRatio: request.aspectRatio,
+  });
+  const costGuard = evaluateLineVideoCostGuard({
+    model,
+    selector: {
+      durationSeconds: request.durationSeconds,
+      ...(outputSize ? { size: outputSize } : {}),
+      resolution: request.resolution,
+      audio,
+    },
+    cfg,
+  });
+  if (!costGuard.allowed) {
+    return costGuard.reason === "unknown_cost"
+      ? { kind: "rejected", reason: "unknown_cost", model: model.id }
+      : {
+          kind: "rejected",
+          reason: "over_limit",
+          estimatedCostUsd: costGuard.estimatedCostUsd,
+          maxAllowedUsd: costGuard.maxAllowedUsd,
+        };
+  }
+  return {
+    kind: "quoted",
+    audio,
+    estimatedCostUsd: costGuard.estimatedCostUsd,
+    pricingSource: `openrouter:${model.id}`,
+    ...(outputSize ? { outputSize } : {}),
+  };
+}
+
+/**
+ * Validates against fal's OWN published schema, and prices from fal's own rate.
+ *
+ * The OpenRouter catalog row describes what OpenRouter would accept, which is
+ * not what fal's endpoint accepts, and OpenRouter's Seedance price is not
+ * fal's. Reusing either here would quote one provider and bill another. An
+ * unconfigured fal rate rejects as `unknown_cost` — the same fail-closed exit
+ * the OpenRouter guard takes — so an unknown price is never shown as payable.
+ */
+function quoteFalSeedance(
+  request: LineStoryboardVideoDraftRequest,
+  cfg: PrepareLineStoryboardVideoDraftDeps["cfg"],
+): LineStoryboardQuote {
+  const identityCount = request.referenceAssets.filter((asset) => asset.kind === "identity").length;
+  if (identityCount > FAL_SEEDANCE_MAX_REFERENCE_IMAGES) {
+    return { kind: "rejected", reason: "too_many_references", requested: identityCount };
+  }
+  const durations = falSeedanceDurations();
+  if (!durations.includes(request.durationSeconds)) {
+    return {
+      kind: "rejected",
+      reason: "unsupported_duration",
+      requested: request.durationSeconds,
+      supported: durations,
+    };
+  }
+  if (!FAL_SEEDANCE_RESOLUTIONS.some((entry) => entry === request.resolution)) {
+    return {
+      kind: "rejected",
+      reason: "unsupported_resolution",
+      requested: request.resolution,
+      supported: FAL_SEEDANCE_RESOLUTIONS,
+    };
+  }
+  if (!FAL_SEEDANCE_ASPECT_RATIOS.some((entry) => entry === request.aspectRatio)) {
+    return {
+      kind: "rejected",
+      reason: "unsupported_aspect_ratio",
+      requested: request.aspectRatio,
+      supported: FAL_SEEDANCE_ASPECT_RATIOS,
+    };
+  }
+  const price = estimateFalSeedanceCostUsd({ cfg, durationSeconds: request.durationSeconds });
+  if (price.kind !== "available") {
+    return {
+      kind: "rejected",
+      reason: "unknown_cost",
+      model: FAL_SEEDANCE_REFERENCE_TO_VIDEO_MODEL,
+    };
+  }
+  const maxAllowedUsd = resolveLineVideoMaxEstimatedCostUsd(cfg);
+  if (price.amountUsd > maxAllowedUsd) {
+    return {
+      kind: "rejected",
+      reason: "over_limit",
+      estimatedCostUsd: price.amountUsd,
+      maxAllowedUsd,
+    };
+  }
+  return {
+    kind: "quoted",
+    // fal exposes `generate_audio` on every Seedance reference-to-video
+    // request, so there is no catalog row to grant it: the owner's choice is
+    // the decision.
+    audio: request.audio,
+    estimatedCostUsd: price.amountUsd,
+    pricingSource: `fal:${FAL_SEEDANCE_REFERENCE_TO_VIDEO_MODEL}`,
+  };
 }
 
 /**
@@ -225,65 +405,20 @@ export async function prepareLineStoryboardVideoDraft(
     return { kind: "rejected", reason: "model_unavailable", model: modelId };
   }
 
-  if (
-    model.supportedDurationSeconds.length > 0 &&
-    !model.supportedDurationSeconds.includes(request.durationSeconds)
-  ) {
-    return {
-      kind: "rejected",
-      reason: "unsupported_duration",
-      requested: request.durationSeconds,
-      supported: model.supportedDurationSeconds.toSorted((left, right) => left - right),
-    };
-  }
-  if (violatesCatalogChoice(model.supportedResolutions, request.resolution)) {
-    return {
-      kind: "rejected",
-      reason: "unsupported_resolution",
-      requested: request.resolution,
-      supported: model.supportedResolutions,
-    };
-  }
-  if (violatesCatalogChoice(model.supportedAspectRatios, request.aspectRatio)) {
-    return {
-      kind: "rejected",
-      reason: "unsupported_aspect_ratio",
-      requested: request.aspectRatio,
-      supported: model.supportedAspectRatios,
-    };
-  }
-
-  // Audio is never invented: the request may ask for it, but only the live
-  // catalog can grant it. `supportsAudio === undefined` means the row does not
-  // declare the field, which is not permission.
-  const audio = request.audio && model.supportsAudio === true;
-
-  // Token-priced models bill by output pixel area, so the concrete size — not
-  // the "720p" label — is what the estimate needs.
-  const outputSize = resolveLineVideoOutputSize({
-    supportedSizes: model.supportedSizes,
-    resolution: request.resolution,
-    aspectRatio: request.aspectRatio,
+  // Routed BEFORE anything is quoted or minted, so the price the owner sees and
+  // the provider that will be billed are decided in the same pass.
+  const providerRoute = resolveLineVideoProviderRoute({
+    modelId: model.id,
+    identityReferenceCount: request.referenceAssets.filter((asset) => asset.kind === "identity")
+      .length,
+    falEnabled: isFalVideoRoutingConfigured(deps.cfg),
   });
-  const costGuard = evaluateLineVideoCostGuard({
-    model,
-    selector: {
-      durationSeconds: request.durationSeconds,
-      ...(outputSize ? { size: outputSize } : {}),
-      resolution: request.resolution,
-      audio,
-    },
-    cfg: deps.cfg,
-  });
-  if (!costGuard.allowed) {
-    return costGuard.reason === "unknown_cost"
-      ? { kind: "rejected", reason: "unknown_cost", model: model.id }
-      : {
-          kind: "rejected",
-          reason: "over_limit",
-          estimatedCostUsd: costGuard.estimatedCostUsd,
-          maxAllowedUsd: costGuard.maxAllowedUsd,
-        };
+  const quote =
+    providerRoute.provider === "fal"
+      ? quoteFalSeedance(request, deps.cfg)
+      : quoteOpenRouterModel(request, model, deps.cfg);
+  if (quote.kind !== "quoted") {
+    return quote;
   }
 
   // The one collision-safe allocator, against LINE's own draft store.
@@ -297,8 +432,9 @@ export async function prepareLineStoryboardVideoDraft(
     durationSeconds: request.durationSeconds,
     aspectRatio: request.aspectRatio,
     resolution: request.resolution,
-    audio,
-    estimatedCostUsd: costGuard.estimatedCostUsd,
+    audio: quote.audio,
+    estimatedCostUsd: quote.estimatedCostUsd,
+    providerRoute,
     storyboardId: request.storyboardId,
     ...(request.deliveryTo ? { deliveryTo: request.deliveryTo } : {}),
     ...(deps.now ? { now: deps.now } : {}),
@@ -327,12 +463,13 @@ export async function prepareLineStoryboardVideoDraft(
     durationSeconds: request.durationSeconds,
     resolution: request.resolution,
     aspectRatio: request.aspectRatio,
-    audio,
-    estimatedCostUsd: costGuard.estimatedCostUsd,
+    audio: quote.audio,
+    estimatedCostUsd: quote.estimatedCostUsd,
     // The guard's own resolver, so the snapshotted ceiling is by construction
     // the one the guard just compared against.
     maxAllowedUsd: resolveLineVideoMaxEstimatedCostUsd(deps.cfg),
-    pricingSource: `openrouter:${model.id}`,
-    ...(outputSize ? { outputSize } : {}),
+    pricingSource: quote.pricingSource,
+    providerRoute,
+    ...(quote.outputSize ? { outputSize: quote.outputSize } : {}),
   };
 }

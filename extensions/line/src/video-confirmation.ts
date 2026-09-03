@@ -13,48 +13,37 @@
  * webhook handler replies immediately with a "started" acknowledgment
  * instead of blocking on a job that can take minutes.
  */
-import fs from "node:fs/promises";
-import { resolveOpenClawAgentDir } from "openclaw/plugin-sdk/provider-auth";
 import { getRuntimeConfig } from "openclaw/plugin-sdk/runtime-config-snapshot";
 import { createSubsystemLogger } from "openclaw/plugin-sdk/runtime-env";
-import type { VideoGenerationSourceAsset } from "openclaw/plugin-sdk/video-generation";
-import { generateVideo } from "openclaw/plugin-sdk/video-generation-runtime";
 import { resolveLineAccount } from "./accounts.js";
+import { estimateFalSeedanceCostUsd, type FalVideoPricingConfig } from "./fal-video-pricing.js";
 import { resolveLineProviderApiKey } from "./openrouter-auth.js";
-import { sendMessageLine } from "./send.js";
-import { evaluateLineVideoCostGuard, resolveLineVideoOutputSize } from "./video-cost-guard.js";
+import {
+  evaluateLineVideoCostGuard,
+  resolveLineVideoMaxEstimatedCostUsd,
+  resolveLineVideoOutputSize,
+} from "./video-cost-guard.js";
 import {
   consumeLineVideoDraft,
   type LineVideoDraft,
   type LineVideoDraftStore,
 } from "./video-draft-store.js";
+import { confirmedDraftRoute, executeConfirmedLineVideoJob } from "./video-job-execution.js";
 import {
   claimLineVideoActiveJobLock,
   createLineVideoJob,
-  releaseLineVideoActiveJobLock,
   resolveLineVideoActiveJobLock,
-  updateLineVideoJob,
   type LineVideoActiveJobLockStore,
   type LineVideoJobStore,
 } from "./video-job-store.js";
-import {
-  createLineVideoLibraryNotion,
-  type LineVideoLibrary,
-  type LineVideoLibraryRecord,
-} from "./video-library-notion.js";
+import { createLineVideoLibraryNotion, type LineVideoLibrary } from "./video-library-notion.js";
 import { loadOpenRouterVideoModels, type OpenRouterVideoModel } from "./video-model-catalog.js";
-import {
-  buildLineVideoConversationKey,
-  normalizeLineVideoConversationId,
-} from "./video-model-preference.js";
-import { stageLineOutboundVideo, stageLineVideoPreviewImage } from "./video-outbound-staging.js";
+import { buildLineVideoConversationKey } from "./video-model-preference.js";
 import {
   hasCloudbathLineGroupWorkspacePolicies,
-  materializeLineVideoUgcReferences,
   resolveCloudbathUgcCapabilities,
   validateLineVideoUgcScope,
   type LineVideoNotionTarget,
-  type LineVideoUgcScope,
 } from "./video-ugc-scope.js";
 import {
   tryGetLineVideoWorkspaceRuntime,
@@ -108,241 +97,126 @@ export function parseLineVideoConfirmationCode(rawText: string): string | null {
   return match?.[1] ?? null;
 }
 
-/** Reads `metadata.usage.cost` from generateVideo()'s result without unsafe optional-chained casts. */
-function readOpenRouterUsageCost(
-  metadata: Record<string, unknown> | undefined,
-): number | undefined {
-  const usage = metadata?.usage;
-  if (!usage || typeof usage !== "object") {
-    return undefined;
+/**
+ * Pre-submit revalidation outcome.
+ *
+ * `refused` carries the exact owner-facing text, so every refusal is written
+ * where the check that produced it lives instead of being re-derived from a
+ * reason code at the call site.
+ */
+type ConfirmedDraftRevalidation =
+  | Readonly<{ kind: "ok"; estimatedCostUsd: number }>
+  | Readonly<{ kind: "refused"; text: string }>;
+
+/** Re-checks a frozen draft against the live OpenRouter catalog and price. */
+async function revalidateOpenRouterDraft(
+  draft: LineVideoDraft,
+  deps: {
+    resolveApiKey: () => Promise<string | undefined>;
+    fetchImpl?: typeof fetch;
+    cfg: { videoGeneration?: { maxEstimatedCostUsd?: number } };
+  },
+): Promise<ConfirmedDraftRevalidation> {
+  const apiKey = await deps.resolveApiKey();
+  if (!apiKey?.trim()) {
+    return { kind: "refused", text: "ยังไม่ได้ตั้งค่า OpenRouter API key" };
   }
-  const cost = (usage as { cost?: unknown }).cost;
-  return typeof cost === "number" ? cost : undefined;
-}
-
-const MAX_FAILURE_REASON_LENGTH = 200;
-// Strips patterns that look like bearer tokens/API keys before a raw
-// provider/SDK error message ever reaches the user-facing failure reply.
-const SENSITIVE_TOKEN_PATTERN = /\b(?:bearer\s+\S+|sk-[a-z0-9_-]{8,})/giu;
-const SENSITIVE_ASSIGNMENT_PATTERN =
-  /\b[a-z0-9_]*(?:token|api[_-]?key|access[_-]?key|secret)[a-z0-9_]*\s*[=:]\s*\S+/giu;
-
-/** Renders a caught error as a short, safe-to-display failure reason. */
-function sanitizeLineVideoFailureReason(error: unknown): string {
-  const message = error instanceof Error ? error.message : String(error);
-  const singleLine = message.replace(/\s+/gu, " ").trim();
-  const redacted = singleLine
-    .replace(SENSITIVE_TOKEN_PATTERN, "[redacted]")
-    .replace(SENSITIVE_ASSIGNMENT_PATTERN, "[redacted]");
-  return redacted.length > MAX_FAILURE_REASON_LENGTH
-    ? `${redacted.slice(0, MAX_FAILURE_REASON_LENGTH)}…`
-    : redacted;
-}
-
-/** Deterministic, code-only failure acknowledgement -- never LLM-composed. */
-function formatLineVideoFailureReply(reason: string): string {
-  return [
-    "❌ สร้างวิดีโอไม่สำเร็จ",
-    `สาเหตุ: ${reason}`,
-    "",
-    "งานนี้ถูกปิดสถานะเป็น Failed แล้ว",
-    "สามารถสร้าง Draft ใหม่ได้",
-  ].join("\n");
-}
-
-async function loadSourceImageAsset(path: string): Promise<VideoGenerationSourceAsset | undefined> {
+  let models: OpenRouterVideoModel[];
   try {
-    const buffer = await fs.readFile(path);
-    return { buffer };
+    models = await loadOpenRouterVideoModels({ apiKey, fetchImpl: deps.fetchImpl });
   } catch {
-    return undefined;
+    return {
+      kind: "refused",
+      text: "ตรวจสอบ video model ไม่สำเร็จ ลองยืนยันใหม่อีกครั้งได้ไหม?",
+    };
   }
+  const model = models.find((entry) => entry.id === draft.model);
+  if (!model) {
+    return { kind: "refused", text: `video model ${draft.model} ไม่พร้อมใช้งานแล้ว` };
+  }
+  if (
+    (model.supportedAspectRatios.length > 0 &&
+      !model.supportedAspectRatios.includes(draft.aspectRatio)) ||
+    (model.supportedResolutions.length > 0 &&
+      !model.supportedResolutions.includes(draft.resolution)) ||
+    (model.supportedDurationSeconds.length > 0 &&
+      !model.supportedDurationSeconds.includes(draft.durationSeconds))
+  ) {
+    return {
+      kind: "refused",
+      text: "การตั้งค่าของ draft นี้ไม่รองรับแล้ว กรุณาสร้าง draft ใหม่",
+    };
+  }
+  const costGuard = evaluateLineVideoCostGuard({
+    model,
+    selector: {
+      durationSeconds: draft.durationSeconds,
+      ...((size) => (size ? { size } : {}))(
+        resolveLineVideoOutputSize({
+          supportedSizes: model.supportedSizes,
+          resolution: draft.resolution,
+          aspectRatio: draft.aspectRatio,
+        }),
+      ),
+      resolution: draft.resolution,
+      audio: draft.audio,
+    },
+    cfg: deps.cfg,
+  });
+  if (!costGuard.allowed) {
+    return {
+      kind: "refused",
+      text:
+        costGuard.reason === "unknown_cost"
+          ? "ไม่สามารถประเมินค่าใช้จ่ายได้อย่างปลอดภัย ยกเลิกการสร้างวิดีโอ"
+          : `ค่าใช้จ่ายโดยประมาณ ($${costGuard.estimatedCostUsd.toFixed(2)}) เกินวงเงินที่ตั้งไว้ ($${costGuard.maxAllowedUsd.toFixed(2)})`,
+    };
+  }
+  return priceUnchanged(draft, costGuard.estimatedCostUsd);
 }
 
-/** Runs the actual paid submission + delivery in the background (never awaited by the webhook handler). */
-async function executeConfirmedLineVideoJob(params: {
-  draft: LineVideoDraft;
-  model: OpenRouterVideoModel;
-  jobStore: LineVideoJobStore;
-  activeJobLockStore: LineVideoActiveJobLockStore;
-  jobId: string;
-  jobCreatedAt: number;
-  account: ReturnType<typeof resolveLineAccount>;
-  createNotionLibrary: (target: LineVideoNotionTarget) => LineVideoLibrary;
-  videoLibraryTarget: LineVideoNotionTarget;
-  ugcScope?: LineVideoUgcScope;
-  now: () => number;
-}): Promise<void> {
-  const cfg = getRuntimeConfig();
-  const account = params.account;
-
-  // Whatever happens below -- success, provider rejection, or a polling
-  // failure -- the job reaches a terminal state and the active-job lock is
-  // released in the same pass, so a failed job can never remain an active
-  // blocker: the very next draft attempt for this conversation sees no lock.
-  let notionLibrary: LineVideoLibrary | undefined;
-  let notionRecord: LineVideoLibraryRecord | undefined;
-  try {
-    const inputImages: VideoGenerationSourceAsset[] = [];
-    if (params.ugcScope) {
-      inputImages.push(
-        ...(await materializeLineVideoUgcReferences(params.ugcScope, {
-          correlationId: params.jobId,
-        })),
-      );
-    }
-    if (params.draft.sourceImagePath) {
-      const asset = await loadSourceImageAsset(params.draft.sourceImagePath);
-      if (asset) {
-        inputImages.push(asset);
-      }
-    }
-    const conversationId = normalizeLineVideoConversationId(params.draft.deliveryTo);
-    if (!conversationId) {
-      throw new Error("LINE video conversation identity is unavailable");
-    }
-    // Validate the one-time administrator-provisioned database before the
-    // paid provider call. A missing or incompatible Notion target therefore
-    // fails closed without spending money or weakening confirmation policy.
-    notionLibrary = params.createNotionLibrary(params.videoLibraryTarget);
-    await notionLibrary.validate();
-    if (params.ugcScope) {
-      if (!notionLibrary.markUgcProcessing) {
-        throw new Error("UGC video library workflow is unavailable");
-      }
-      await notionLibrary.markUgcProcessing(params.ugcScope);
-    }
-
-    const result = await generateVideo({
-      cfg,
-      prompt: params.draft.prompt,
-      agentDir: resolveOpenClawAgentDir(),
-      modelOverride: `openrouter/${params.draft.model}`,
-      aspectRatio: params.draft.aspectRatio,
-      resolution: params.draft.resolution,
-      durationSeconds: params.draft.durationSeconds,
-      audio: params.draft.audio,
-      inputImages: inputImages.length > 0 ? inputImages : undefined,
-      // The confirmed draft is model/provider-locked; a silent fallback
-      // substitution here would violate "the confirmed prompt/settings must
-      // be exactly what gets submitted".
-      autoProviderFallback: false,
-    });
-    const video = result.videos[0];
-    if (!video) {
-      throw new Error("OpenRouter video generation returned no video asset");
-    }
-    const actualCostUsd = readOpenRouterUsageCost(result.metadata);
-
-    // The provider has completed successfully, but R2 work has not started:
-    // create the one persistent audit row in Processing first, keyed by the
-    // immutable SQLite video job id for duplicate-safe recovery.
-    notionRecord = await notionLibrary.createProcessing({
-      jobId: params.jobId,
-      accountId: params.draft.accountId,
-      conversationId,
-      model: params.draft.model,
-      prompt: params.draft.prompt,
-      durationSeconds: params.draft.durationSeconds,
-      resolution: params.draft.resolution,
-      aspectRatio: params.draft.aspectRatio,
-      audio: params.draft.audio,
-      estimatedCostUsd: params.draft.estimatedCostUsd,
-      ...(actualCostUsd !== undefined ? { actualCostUsd } : {}),
-      createdAt: params.jobCreatedAt,
-      ...(params.ugcScope ? { ugcScope: params.ugcScope } : {}),
-    });
-    await updateLineVideoJob({
-      store: params.jobStore,
-      jobId: params.jobId,
-      patch: {
-        notionPageId: notionRecord.pageId,
-        ...(actualCostUsd !== undefined ? { actualCostUsd } : {}),
-      },
-    });
-
-    const generatedSource = video.buffer ?? video.url;
-    if (!generatedSource) {
-      throw new Error("Generated video has neither a buffer nor a deliverable URL");
-    }
-    // Both provider buffers and transient provider URLs converge here. URL
-    // results are downloaded through the SSRF guard and their validated bytes
-    // are archived in the existing R2 bucket before LINE sees any URL.
-    const stagedVideo = await stageLineOutboundVideo(generatedSource);
-    const videoUrl = stagedVideo.url;
-
-    await notionLibrary.markCompleted(notionRecord, {
-      r2Url: videoUrl,
-      r2ObjectKey: stagedVideo.objectKey,
-      ...(actualCostUsd !== undefined ? { actualCostUsd } : {}),
-      completedAt: params.now(),
-    });
-    if (params.ugcScope) {
-      if (!notionLibrary.markUgcCompleted) {
-        throw new Error("UGC video library workflow is unavailable");
-      }
-      // Scene ledger records the archived R2 key, not the transient provider
-      // URL, and only for the scene this confirmation approved.
-      await notionLibrary.markUgcCompleted(params.ugcScope, actualCostUsd, {
-        r2ObjectKey: stagedVideo.objectKey,
-        assetUrl: videoUrl,
-        completedAt: params.now(),
-        model: params.draft.model,
-      });
-    }
-
-    if (params.draft.deliveryTo) {
-      const preview = await stageLineVideoPreviewImage();
-      const costLine =
-        actualCostUsd !== undefined ? `\nActual cost: $${actualCostUsd.toFixed(2)}` : "";
-      await sendMessageLine(params.draft.deliveryTo, `🎬 วิดีโอเสร็จแล้ว${costLine}`, {
-        cfg,
-        accountId: account.accountId,
-        channelAccessToken: account.channelAccessToken,
-        mediaUrl: videoUrl,
-        mediaKind: "video",
-        previewImageUrl: preview.url,
-      });
-    }
-    await updateLineVideoJob({
-      store: params.jobStore,
-      jobId: params.jobId,
-      patch: {
-        status: "completed",
-        videoUrl,
-        r2ObjectKey: stagedVideo.objectKey,
-        ...(actualCostUsd !== undefined ? { actualCostUsd } : {}),
-      },
-    });
-  } catch (error) {
-    const reason = sanitizeLineVideoFailureReason(error);
-    if (notionLibrary && notionRecord) {
-      await notionLibrary.markFailed(notionRecord, reason).catch(() => {});
-    }
-    if (notionLibrary?.markUgcFailed && params.ugcScope) {
-      await notionLibrary.markUgcFailed(params.ugcScope, reason).catch(() => {});
-    }
-    await updateLineVideoJob({
-      store: params.jobStore,
-      jobId: params.jobId,
-      patch: { status: "failed", error: reason },
-    });
-    if (params.draft.deliveryTo) {
-      await sendMessageLine(params.draft.deliveryTo, formatLineVideoFailureReply(reason), {
-        cfg,
-        accountId: account.accountId,
-        channelAccessToken: account.channelAccessToken,
-      }).catch(() => {});
-    }
-  } finally {
-    // Releases unconditionally on every exit path (success and failure
-    // alike), so a failed generation never leaves the conversation's active
-    // lock held -- the next line_video_draft call sees no lock and proceeds.
-    await releaseLineVideoActiveJobLock({
-      store: params.activeJobLockStore,
-      conversationKey: params.draft.conversationKey,
-    });
+/**
+ * Re-checks a fal-routed draft against fal's rate.
+ *
+ * No catalog call: fal publishes no live catalog, and the endpoint's accepted
+ * values are fixed by its own schema, which `prepareLineStoryboardVideoDraft`
+ * already validated when the draft was minted. What CAN change between quote
+ * and confirmation is the operator's configured rate, so that is what is
+ * re-read -- and an unconfigured rate refuses here exactly as it did there,
+ * rather than submitting a job whose cost is unknown.
+ */
+function revalidateFalDraft(
+  draft: LineVideoDraft,
+  cfg: { videoGeneration?: { maxEstimatedCostUsd?: number } } & FalVideoPricingConfig,
+): ConfirmedDraftRevalidation {
+  const price = estimateFalSeedanceCostUsd({ cfg, durationSeconds: draft.durationSeconds });
+  if (price.kind !== "available") {
+    return {
+      kind: "refused",
+      text: "ไม่สามารถประเมินค่าใช้จ่ายได้อย่างปลอดภัย ยกเลิกการสร้างวิดีโอ",
+    };
   }
+  const maxAllowedUsd = resolveLineVideoMaxEstimatedCostUsd(cfg);
+  if (price.amountUsd > maxAllowedUsd) {
+    return {
+      kind: "refused",
+      text: `ค่าใช้จ่ายโดยประมาณ ($${price.amountUsd.toFixed(2)}) เกินวงเงินที่ตั้งไว้ ($${maxAllowedUsd.toFixed(2)})`,
+    };
+  }
+  return priceUnchanged(draft, price.amountUsd);
+}
+
+/** The quote the owner confirmed is the only price that may be submitted. */
+function priceUnchanged(
+  draft: LineVideoDraft,
+  estimatedCostUsd: number,
+): ConfirmedDraftRevalidation {
+  return estimatedCostUsd === draft.estimatedCostUsd
+    ? { kind: "ok", estimatedCostUsd }
+    : {
+        kind: "refused",
+        text: "ค่าใช้จ่ายของ video draft เปลี่ยนไป กรุณาสร้าง draft ใหม่ก่อนยืนยัน",
+      };
 }
 
 export function createLineVideoConfirmationGate(params: {
@@ -483,65 +357,25 @@ export function createLineVideoConfirmationGate(params: {
       return { handled: true, text: "UGC video draft scope ไม่ถูกต้องหรือถูกเปลี่ยน" };
     }
 
-    const apiKey = await resolveApiKey();
-    if (!apiKey?.trim()) {
-      return { handled: true, text: "ยังไม่ได้ตั้งค่า OpenRouter API key" };
-    }
-    let models: OpenRouterVideoModel[];
-    try {
-      models = await loadOpenRouterVideoModels({ apiKey, fetchImpl: params.fetchImpl });
-    } catch {
-      return { handled: true, text: "ตรวจสอบ video model ไม่สำเร็จ ลองยืนยันใหม่อีกครั้งได้ไหม?" };
-    }
-    const model = models.find((entry) => entry.id === draft.model);
-    if (!model) {
-      return { handled: true, text: `video model ${draft.model} ไม่พร้อมใช้งานแล้ว` };
-    }
-    if (
-      (model.supportedAspectRatios.length > 0 &&
-        !model.supportedAspectRatios.includes(draft.aspectRatio)) ||
-      (model.supportedResolutions.length > 0 &&
-        !model.supportedResolutions.includes(draft.resolution)) ||
-      (model.supportedDurationSeconds.length > 0 &&
-        !model.supportedDurationSeconds.includes(draft.durationSeconds))
-    ) {
-      return { handled: true, text: "การตั้งค่าของ draft นี้ไม่รองรับแล้ว กรุณาสร้าง draft ใหม่" };
-    }
-
     const account = resolveAccount({ cfg, accountId });
-    // Re-estimate against the SAME dimensions the draft froze, so the
-    // pre-submit ceiling check matches what the owner confirmed.
-    const costGuard = evaluateLineVideoCostGuard({
-      model,
-      selector: {
-        durationSeconds: draft.durationSeconds,
-        ...((size) => (size ? { size } : {}))(
-          resolveLineVideoOutputSize({
-            supportedSizes: model.supportedSizes,
-            resolution: draft.resolution,
-            aspectRatio: draft.aspectRatio,
-          }),
-        ),
-        resolution: draft.resolution,
-        audio: draft.audio,
-      },
-      cfg: { videoGeneration: account.config.videoGeneration },
-    });
-    if (!costGuard.allowed) {
-      return {
-        handled: true,
-        text:
-          costGuard.reason === "unknown_cost"
-            ? "ไม่สามารถประเมินค่าใช้จ่ายได้อย่างปลอดภัย ยกเลิกการสร้างวิดีโอ"
-            : `ค่าใช้จ่ายโดยประมาณ ($${costGuard.estimatedCostUsd.toFixed(2)}) เกินวงเงินที่ตั้งไว้ ($${costGuard.maxAllowedUsd.toFixed(2)})`,
-      };
+    // Re-validate against the SAME provider the draft is locked to, using the
+    // SAME dimensions it froze, so the pre-submit ceiling check matches what
+    // the owner was quoted. A fal-routed draft is checked against fal's own
+    // schema and rate; running it past the OpenRouter catalog would validate a
+    // request that provider will never receive.
+    const route = confirmedDraftRoute(draft);
+    const revalidated =
+      route.provider === "fal"
+        ? revalidateFalDraft(draft, { videoGeneration: account.config.videoGeneration })
+        : await revalidateOpenRouterDraft(draft, {
+            resolveApiKey,
+            ...(params.fetchImpl ? { fetchImpl: params.fetchImpl } : {}),
+            cfg: { videoGeneration: account.config.videoGeneration },
+          });
+    if (revalidated.kind === "refused") {
+      return { handled: true, text: revalidated.text };
     }
-    if (costGuard.estimatedCostUsd !== draft.estimatedCostUsd) {
-      return {
-        handled: true,
-        text: "ค่าใช้จ่ายของ video draft เปลี่ยนไป กรุณาสร้าง draft ใหม่ก่อนยืนยัน",
-      };
-    }
+    const estimatedCostUsd = revalidated.estimatedCostUsd;
 
     // Defense in depth against a lock-claim race (two drafts confirmed for
     // the same conversation before video-draft-tool.ts's own active-lock
@@ -592,7 +426,8 @@ export function createLineVideoConfirmationGate(params: {
       aspectRatio: draft.aspectRatio,
       resolution: draft.resolution,
       audio: draft.audio,
-      estimatedCostUsd: costGuard.estimatedCostUsd,
+      estimatedCostUsd,
+      provider: route.provider,
       now: params.now,
     });
     await claimLineVideoActiveJobLock({
@@ -612,7 +447,6 @@ export function createLineVideoConfirmationGate(params: {
     scheduleBackgroundWork(() =>
       executeConfirmedLineVideoJob({
         draft,
-        model,
         jobStore: params.jobStore,
         activeJobLockStore: params.activeJobLockStore,
         jobId: job.jobId,
@@ -627,7 +461,7 @@ export function createLineVideoConfirmationGate(params: {
 
     return {
       handled: true,
-      text: `🎬 เริ่มสร้างวิดีโอแล้ว (ประมาณ $${costGuard.estimatedCostUsd.toFixed(2)}) จะส่งให้เมื่อเสร็จ`,
+      text: `🎬 เริ่มสร้างวิดีโอแล้ว (ประมาณ $${estimatedCostUsd.toFixed(2)}) จะส่งให้เมื่อเสร็จ`,
     };
   };
 }
