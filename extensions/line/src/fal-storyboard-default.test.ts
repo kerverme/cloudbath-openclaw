@@ -34,6 +34,7 @@ function scene(overrides: Partial<FalVideoRequirements> = {}): FalVideoRequireme
     audio: "full",
     spokenDialogue: false,
     identityReferenceCount: 1,
+    inputMode: "reference_to_video",
     ...overrides,
   };
 }

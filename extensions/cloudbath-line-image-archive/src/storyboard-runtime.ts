@@ -20,6 +20,7 @@ import {
 import {
   CloudbathStoryboardLineRouter,
   type StoryboardProjectResolver,
+  type StoryboardLineRouterDeps,
 } from "./storyboard-line-router.js";
 import type { StoryboardLlmPlanner } from "./storyboard-planner.js";
 import {
@@ -38,6 +39,7 @@ import type {
   StoryboardHead,
   StoryboardVersion,
 } from "./storyboard-types.js";
+import type { StoryboardVisualService } from "./storyboard-visual.js";
 import type {
   AsyncKeyedStore,
   FrozenUgcVideoScope,
@@ -118,6 +120,9 @@ export function createCloudbathStoryboardLineRouter(deps: {
   draftScopes?: AsyncKeyedStore<FrozenUgcVideoScope>;
   ugcCapabilities?: Readonly<Record<UgcCapabilityId, NotionTarget>>;
   planner?: StoryboardLlmPlanner;
+  visuals?: StoryboardVisualService;
+  publicAssetBaseUrl?: string;
+  sendVisualImage?: StoryboardLineRouterDeps["sendVisualImage"];
 }): CloudbathStoryboardLineRouter {
   const now = deps.now ?? Date.now;
   return new CloudbathStoryboardLineRouter({
@@ -161,6 +166,9 @@ export function createCloudbathStoryboardLineRouter(deps: {
     now,
     logger: deps.logger,
     ...(deps.planner ? { planner: deps.planner } : {}),
+    ...(deps.visuals ? { visuals: deps.visuals } : {}),
+    ...(deps.publicAssetBaseUrl ? { publicAssetBaseUrl: deps.publicAssetBaseUrl } : {}),
+    ...(deps.sendVisualImage ? { sendVisualImage: deps.sendVisualImage } : {}),
     ...(deps.draftScopes ? { draftScopes: deps.draftScopes } : {}),
     ...(deps.ugcCapabilities ? { ugcCapabilities: deps.ugcCapabilities } : {}),
   });

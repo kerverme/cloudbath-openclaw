@@ -122,6 +122,8 @@ function request(
         displayName: "F1",
       },
     ],
+    inputMode: "reference_to_video",
+    renderStrategy: "quick_video",
     ...overrides,
   };
 }
