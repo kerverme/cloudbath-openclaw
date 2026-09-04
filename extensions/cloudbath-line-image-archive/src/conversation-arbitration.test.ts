@@ -444,9 +444,15 @@ describe("the context this all reads from", () => {
     expect(context.activeStoryboardId).toBeTruthy();
     expect(context.activeProjectId).toBe("proj-instance-1");
     expect(context.tasks.map((task) => task.taskType)).toContain("video_generation");
-    // The storyboard body, the job's prompt and its cost all live in their own
-    // stores; nothing here duplicates them.
-    expect(JSON.stringify(context)).not.toContain("ขวดน้ำ");
+    // The storyboard document, the job's prompt and its cost all live in their
+    // own stores; nothing here duplicates them. The owner's own utterances ARE
+    // held, bounded — they exist nowhere else, because a LINE group's persisted
+    // user turns carry no author to attribute them by.
+    const serialized = JSON.stringify(context);
+    expect(serialized).not.toContain("beats");
+    expect(serialized).not.toContain("estimatedCostUsd");
+    expect(serialized).not.toContain("document");
+    expect(context.recentOwnerTurns?.length ?? 0).toBeLessThanOrEqual(6);
     expect(STORYBOARD_CONFIRMATION_TTL_MS).toBeGreaterThan(0);
   });
 });

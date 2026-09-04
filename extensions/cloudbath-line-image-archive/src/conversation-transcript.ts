@@ -21,7 +21,23 @@ import { getSessionEntry } from "openclaw/plugin-sdk/session-store-runtime";
 import { readVisibleSessionTranscriptMessageEntries } from "openclaw/plugin-sdk/session-transcript-runtime";
 
 /** One remembered turn. Newest last, as the resolver's prompt expects. */
-export type ConversationTurn = Readonly<{ role: "owner" | "assistant"; text: string }>;
+export type ConversationTurn = Readonly<{
+  role: "owner" | "assistant";
+  text: string;
+  /** Epoch ms, when the source dated it. Used only to interleave two sources. */
+  at?: number;
+}>;
+
+/**
+ * Whether every human turn on this session provably came from one person.
+ *
+ * A LINE group routes on the group id, so one session key carries EVERY
+ * member's turns. `shared` therefore means a persisted `user` message cannot be
+ * attributed and must not be presented as the owner's; `single-sender` (a
+ * direct chat) means the session has exactly one human and attribution is
+ * structural.
+ */
+export type ConversationSenderScope = "single-sender" | "shared";
 
 /** Enough to resolve a reference back; short enough to stay a hint, not a dump. */
 export const CONVERSATION_RECENT_TURN_LIMIT = 8;
@@ -40,6 +56,7 @@ export type ConversationTranscriptReader = Readonly<{
     sessionKey: string;
     agentId?: string;
     limit: number;
+    senderScope: ConversationSenderScope;
   }): Promise<readonly ConversationTurn[]>;
 }>;
 
@@ -74,10 +91,27 @@ function readTurnText(message: unknown): string | undefined {
   return parts.join("\n").trim() || undefined;
 }
 
-function toRole(role: unknown): ConversationTurn["role"] | undefined {
-  // Only the two sides of the conversation. System and tool messages are
-  // machinery: they are not what "เมื่อกี้" refers to.
-  return role === "user" ? "owner" : role === "assistant" ? "assistant" : undefined;
+/**
+ * Which persisted roles may be read, given who shares this session.
+ *
+ * An `assistant` turn is the bot's own output and is attributable whatever the
+ * conversation shape. A `user` turn is NOT: the canonical `UserMessage` carries
+ * `role`, `content` and `timestamp` and no author, and in a group every
+ * member's turns land on the same session key. Where the group's sender id
+ * survives at all it survives as a rendered prefix inside the envelope body —
+ * a prompt rendering, not a data contract, and `BodyForAgent` often persists
+ * the clean text without it. Reading an author out of that would be guessing
+ * from free-form text, so a shared session drops user turns instead. System and
+ * tool messages are machinery and never appear either.
+ */
+function toRole(
+  role: unknown,
+  senderScope: ConversationSenderScope,
+): ConversationTurn["role"] | undefined {
+  if (role === "assistant") {
+    return "assistant";
+  }
+  return role === "user" && senderScope === "single-sender" ? "owner" : undefined;
 }
 
 /**
@@ -89,7 +123,7 @@ function toRole(role: unknown): ConversationTurn["role"] | undefined {
  */
 export function createConversationTranscriptReader(): ConversationTranscriptReader {
   return {
-    readRecentTurns: async ({ sessionKey, agentId, limit }) => {
+    readRecentTurns: async ({ sessionKey, agentId, limit, senderScope }) => {
       try {
         const entry = getSessionEntry({
           sessionKey,
@@ -105,8 +139,13 @@ export function createConversationTranscriptReader(): ConversationTranscriptRead
           ...(agentId ? { agentId } : {}),
         });
         return projectRecentTurns(
-          entries.map((row) => ({ role: row.role, message: row.message })),
+          entries.map((row) => ({
+            role: row.role,
+            message: row.message,
+            createdAt: row.createdAt,
+          })),
           limit,
+          senderScope,
         );
       } catch {
         // History is an enhancement, never a precondition: arbitration still
@@ -125,19 +164,47 @@ export function createConversationTranscriptReader(): ConversationTranscriptRead
  * than a friendlier one that would hide a bug here.
  */
 export function projectRecentTurns(
-  rows: readonly Readonly<{ role: unknown; message: unknown }>[],
+  rows: readonly Readonly<{ role: unknown; message: unknown; createdAt?: string | undefined }>[],
   limit: number,
+  senderScope: ConversationSenderScope,
 ): readonly ConversationTurn[] {
   const turns: ConversationTurn[] = [];
   // Walked newest-first so the cap keeps the MOST recent turns, then reversed
   // back into reading order.
   for (let index = rows.length - 1; index >= 0 && turns.length < limit; index -= 1) {
     const row = rows[index]!;
-    const role = toRole(row.role);
+    const role = toRole(row.role, senderScope);
     const text = readTurnText(row.message);
-    if (role && text) {
-      turns.push({ role, text: text.slice(0, CONVERSATION_TURN_MAX_CHARS) });
+    if (!role || !text) {
+      continue;
     }
+    const at = row.createdAt ? Date.parse(row.createdAt) : Number.NaN;
+    turns.push({
+      role,
+      text: text.slice(0, CONVERSATION_TURN_MAX_CHARS),
+      ...(Number.isFinite(at) ? { at } : {}),
+    });
   }
   return Object.freeze(turns.toReversed());
+}
+
+/**
+ * Interleaves the two attributable sources into one reading order.
+ *
+ * Assistant turns come from the transcript; owner turns come from the
+ * conversation record, which knows who spoke because it only ever records the
+ * bound owner's own turns. Dated turns sort by time; an undated one keeps its
+ * relative position ahead of them rather than being invented a timestamp.
+ */
+export function mergeConversationTurns(
+  transcriptTurns: readonly ConversationTurn[],
+  ownerTurns: readonly ConversationTurn[],
+  limit: number,
+): readonly ConversationTurn[] {
+  const all = [...transcriptTurns, ...ownerTurns];
+  const undated = all.filter((turn) => turn.at === undefined);
+  const dated = all
+    .filter((turn) => turn.at !== undefined)
+    .toSorted((left, right) => left.at! - right.at!);
+  return Object.freeze([...undated, ...dated].slice(-limit));
 }

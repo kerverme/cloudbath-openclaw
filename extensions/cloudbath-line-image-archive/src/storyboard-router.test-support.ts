@@ -52,6 +52,9 @@ import type {
 const ACCOUNT = "acct-1";
 const GROUP = "C1234567890abcdef";
 const OWNER = "U0987654321";
+/** Another member of the SAME LINE group, sharing its session key. */
+export const OTHER_MEMBER = "U1111111111";
+export const OWNER_SENDER_ID = OWNER;
 /** The session this LINE conversation's transcript lives under. */
 export const SESSION_KEY = `line:group:${GROUP}`;
 export const NAMES = ["Twong", "Twong2"] as const;
@@ -160,6 +163,8 @@ export function harness(
     characterHandler?: (content: string) => Promise<{ handled: true; text?: string } | undefined>;
     /** Character Library names, for the entity-matching cases. */
     resolverNames?: readonly string[];
+    /** Models a 1:1 chat, where the session provably has one human sender. */
+    directChat?: boolean;
   } = {},
 ) {
   const shared =
@@ -261,13 +266,15 @@ export function harness(
   /** The plugin's real before_dispatch order. */
   const dispatch = async (
     content: string,
-    over: { messageId?: string; senderId?: string } = {},
+    over: { messageId?: string; senderId?: string; senderIsOwner?: boolean } = {},
   ): Promise<DispatchOutcome> => {
     const event = {
       content,
       senderId: over.senderId ?? OWNER,
-      senderIsOwner: true,
-      isGroup: true,
+      // A different sender in the SAME group is not the bound owner, which is
+      // exactly what production resolves from the LINE webhook.
+      senderIsOwner: over.senderIsOwner ?? (over.senderId ?? OWNER) === OWNER,
+      isGroup: !options.directChat,
       ...(over.messageId ? { messageId: over.messageId } : {}),
     };
     const ctx = {

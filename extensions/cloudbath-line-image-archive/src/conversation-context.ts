@@ -143,6 +143,14 @@ export type ConversationQuestion = Readonly<{
   askedAt: string;
 }>;
 
+/** One remembered owner message. `at` is epoch ms, for interleaving. */
+export type ConversationOwnerTurn = Readonly<{ text: string; at: number }>;
+
+/** Enough to resolve a reference back, and short enough to stay a hint. */
+const MAX_OWNER_TURNS = 6;
+/** One turn is a line of chat; a longer one is cut, not dropped. */
+const OWNER_TURN_MAX_CHARS = 400;
+
 /** How many tasks are remembered. Older ones are re-derivable from their store. */
 const MAX_REMEMBERED_TASKS = 5;
 
@@ -166,6 +174,21 @@ export type ActiveConversationContext = Readonly<{
   /** Where the flow stands, for a status answer that has no job to read. */
   currentStage?: string;
   question?: ConversationQuestion;
+  /**
+   * The bound owner's own recent messages, newest last.
+   *
+   * Attributed BY CONSTRUCTION, not by inference: a turn only reaches this
+   * record after the arbiter has verified it came from the bound owner of this
+   * account + conversation, so every entry has a proven author. That is the
+   * whole reason it exists — a LINE group routes every member onto one session
+   * key, and the canonical transcript's user messages carry no author, so
+   * reading owner turns back out of the transcript would attribute another
+   * member's words to the owner.
+   *
+   * It is not a transcript: bounded, text only, owner side only, and never read
+   * by anything but the semantic step's prompt.
+   */
+  recentOwnerTurns?: readonly ConversationOwnerTurn[];
   updatedAt: string;
 }>;
 
@@ -250,6 +273,28 @@ export function recordConversationTask(
     ...context,
     tasks: Object.freeze([task, ...rest].slice(0, MAX_REMEMBERED_TASKS)),
     updatedAt,
+  });
+}
+
+/**
+ * Appends one message the arbiter has already proven the owner authored.
+ *
+ * Consecutive duplicates are collapsed so a retried webhook delivery cannot
+ * make the owner look like they said the same thing twice.
+ */
+export function recordOwnerTurn(
+  context: ActiveConversationContext,
+  text: string,
+  at: number,
+): ActiveConversationContext {
+  const trimmed = text.trim().slice(0, OWNER_TURN_MAX_CHARS);
+  const existing = context.recentOwnerTurns ?? [];
+  if (!trimmed || existing.at(-1)?.text === trimmed) {
+    return context;
+  }
+  return Object.freeze({
+    ...context,
+    recentOwnerTurns: Object.freeze([...existing, { text: trimmed, at }].slice(-MAX_OWNER_TURNS)),
   });
 }
 

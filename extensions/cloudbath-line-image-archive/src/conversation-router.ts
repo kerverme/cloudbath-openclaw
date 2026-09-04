@@ -29,6 +29,7 @@ import {
   mergeConversationContext,
   ownsConversationContext,
   recordConversationTask,
+  recordOwnerTurn,
   unresolvedConversationTasks,
   type ActiveConversationContext,
   type ConversationChoice,
@@ -51,6 +52,8 @@ import {
 import { describeVideoJobStatus } from "./conversation-status.js";
 import {
   CONVERSATION_RECENT_TURN_LIMIT,
+  mergeConversationTurns,
+  type ConversationSenderScope,
   type ConversationTranscriptReader,
   type ConversationTurn,
 } from "./conversation-transcript.js";
@@ -169,7 +172,7 @@ export class CloudbathConversationRouter {
       return { kind: "pass" };
     }
     const content = event.content ?? "";
-    const stored = await this.readContext(claim);
+    let stored = await this.readContext(claim);
 
     // 1. A chip is the owner pressing a control this flow rendered, so it needs
     // no interpretation at all — and a chip from an older step is refused here
@@ -186,6 +189,14 @@ export class CloudbathConversationRouter {
     if (!utterance) {
       return { kind: "pass" };
     }
+    // Everything above proved this turn came from the bound owner of this
+    // account + conversation, so here — and only here — the message has a
+    // provable author. Nothing downstream, and nothing in the persisted
+    // transcript, can tell one group member's turn from another's later, which
+    // is why the owner half of the history is captured at this point instead of
+    // read back out. A chip is not language and is deliberately not recorded.
+    stored = recordOwnerTurn(stored, utterance.text, this.deps.now());
+    await this.write(claim, stored);
     const entities = await this.detectEntities(content, claim);
 
     // 2. Something named outright outranks anything remembered. "F99 บันทึกเสร็จยัง"
@@ -262,7 +273,7 @@ export class CloudbathConversationRouter {
         ? { kind: "clarify", text: AMBIGUOUS_REFERENT_REPLY }
         : { kind: "pass" };
     }
-    const recentTurns = await this.readRecentTurns(context);
+    const recentTurns = await this.readRecentTurns(event, context, stored);
     const resolution = await this.deps.semanticResolver.resolve({
       message: utterance.text,
       context: stored,
@@ -449,22 +460,36 @@ export class CloudbathConversationRouter {
    * history is not reachable rather than filtered out afterwards.
    */
   private async readRecentTurns(
+    event: StoryboardDispatchEvent,
     context: StoryboardDispatchContext,
+    stored: ActiveConversationContext,
   ): Promise<readonly ConversationTurn[]> {
+    // The turn being resolved was just recorded, and it already reaches the
+    // resolver as `message`; the window is what came BEFORE it.
+    const ownerTurns: readonly ConversationTurn[] = (stored.recentOwnerTurns ?? [])
+      .slice(0, -1)
+      .map((turn) => ({ role: "owner" as const, text: turn.text, at: turn.at }));
     const sessionKey = context.sessionKey?.trim();
     if (!this.deps.transcript || !sessionKey) {
-      return [];
+      return ownerTurns;
     }
-    return await this.deps.transcript
+    // A LINE group puts every member on one session key, so persisted user
+    // turns there have no provable author and the reader drops them; the owner
+    // half comes from this layer's own record, where authorship is structural.
+    const senderScope: ConversationSenderScope =
+      event.isGroup === false ? "single-sender" : "shared";
+    const transcriptTurns = await this.deps.transcript
       .readRecentTurns({
         sessionKey,
         ...(context.agentId?.trim() ? { agentId: context.agentId.trim() } : {}),
         limit: CONVERSATION_RECENT_TURN_LIMIT,
+        senderScope,
       })
       .catch(() => {
         this.deps.logger?.warn("conversation_recent_turns_read_failed");
         return [] as readonly ConversationTurn[];
       });
+    return mergeConversationTurns(transcriptTurns, ownerTurns, CONVERSATION_RECENT_TURN_LIMIT);
   }
 
   private async rememberJob(

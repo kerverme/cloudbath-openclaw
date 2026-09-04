@@ -27,7 +27,7 @@ import {
 } from "./conversation-transcript.js";
 import type { StoryboardPaidDraftRuntime } from "./storyboard-paid-draft-runtime.js";
 import { StoryboardLlmPlanner } from "./storyboard-planner.js";
-import { harness, SESSION_KEY } from "./storyboard-router.test-support.js";
+import { harness, OTHER_MEMBER, SESSION_KEY } from "./storyboard-router.test-support.js";
 
 /** Opens a storyboard the deictic messages below can refer back to. */
 const NATURAL_REQUEST = "เอา Twong ทำวิดีโอ เดินอยู่ในสวน แล้วเตะขวดน้ำ";
@@ -99,7 +99,7 @@ function transcriptFor(
   const asked: string[] = [];
   return {
     asked,
-    readRecentTurns: async ({ sessionKey, limit }) => {
+    readRecentTurns: async ({ sessionKey, limit, senderScope }) => {
       asked.push(sessionKey);
       return projectRecentTurns(
         // Transcript roles, not this module's own: production feeds `user` /
@@ -110,6 +110,7 @@ function transcriptFor(
           message: { content: [{ type: "text", text: turn.text }] },
         })),
         limit,
+        senderScope,
       );
     },
   };
@@ -219,10 +220,13 @@ describe("B: 'แก้อันเมื่อกี้ให้ตอนท้
     expect(semantic.seen).toHaveLength(1);
     const turns = semantic.seen[0]!.recentTurns;
     expect(turns.length).toBeGreaterThan(0);
-    // Newest last, both sides present, text only.
-    expect(turns.at(-1)).toEqual({ role: "owner", text: "15" });
+    // Both sides are present and it is real dialogue, not [].
     expect(turns.map((turn) => turn.role)).toContain("assistant");
-    expect(turns.every((turn) => typeof turn.text === "string")).toBe(true);
+    expect(turns.map((turn) => turn.text)).toContain(NATURAL_REQUEST);
+    // Newest last, and the turn being resolved is not repeated into its own
+    // history — it reaches the resolver as `message`.
+    expect(turns.at(-1)!.text).toBe("ไม่มี");
+    expect(turns.map((turn) => turn.text)).not.toContain("แก้อันเมื่อกี้ให้ตอนท้ายแรงขึ้น");
   });
 });
 
@@ -279,8 +283,10 @@ describe("E: history belonging to a different LINE conversation", () => {
     await h.dispatch("แก้อันเมื่อกี้ให้ตอนท้ายแรงขึ้น");
 
     expect(transcript.asked).toEqual([SESSION_KEY]);
-    expect(semantic.seen[0]!.recentTurns).toEqual([]);
+    // The other group's history is not merely filtered out — it was never
+    // asked for. What remains is this owner's own recorded turns.
     expect(JSON.stringify(semantic.seen)).not.toContain("ความลับ");
+    expect(semantic.seen[0]!.recentTurns.every((turn) => turn.role === "owner")).toBe(true);
   });
 });
 
@@ -422,5 +428,88 @@ describe("a Character whose name sits inside another", () => {
 
     expect(asked.source).toBe("conversation");
     expect(asked.text).toContain("VIDEO 9566");
+  });
+});
+
+describe("one LINE group, two senders, one session key", () => {
+  /**
+   * The leak this guards against. A group routes on the group id, so U1 and U2
+   * share a session key, and the canonical transcript's user messages carry no
+   * author. Presenting U2's words to the resolver as the owner's would put
+   * another member in charge of U1's work.
+   */
+  it("never presents another member's message as an owner turn", async () => {
+    const semantic = semanticStub(REVISE);
+    // The transcript holds the WHOLE group, exactly as production would: both
+    // members' user turns and the assistant's reply, on one session key.
+    const transcript = transcriptFor({
+      [SESSION_KEY]: [
+        { role: "user", text: NATURAL_REQUEST },
+        { role: "user", text: "ไม่เอาอันนั้น ใช้ตัวเดิม" },
+        { role: "assistant", text: "ต้องการความยาวเท่าไร?" },
+      ],
+    });
+    const h = harness({
+      paidDraftRuntime: stubPaidRuntime(),
+      planner: stubPlanner(),
+      semanticResolver: semantic,
+      transcript,
+    });
+
+    // U1 (the bound owner) speaks, then U2 (another member), then U1 again.
+    await h.dispatch(NATURAL_REQUEST);
+    await h.dispatch("ไม่เอาอันนั้น ใช้ตัวเดิม", { senderId: OTHER_MEMBER });
+    await h.dispatch("15");
+    await h.dispatch("ไม่มี");
+    semantic.seen.length = 0;
+
+    await h.dispatch("แบบเมื่อกี้");
+
+    expect(semantic.seen).toHaveLength(1);
+    const turns = semantic.seen[0]!.recentTurns;
+    // U1's own words are there, and the assistant's.
+    expect(turns.map((turn) => turn.text)).toContain(NATURAL_REQUEST);
+    expect(turns.map((turn) => turn.role)).toContain("assistant");
+    // U2's message is absent entirely — not merely present under another role.
+    expect(turns.map((turn) => turn.text)).not.toContain("ไม่เอาอันนั้น ใช้ตัวเดิม");
+    expect(JSON.stringify(turns)).not.toContain("ไม่เอาอันนั้น");
+    for (const turn of turns) {
+      expect(["owner", "assistant"]).toContain(turn.role);
+    }
+  });
+
+  it("does not record a non-owner turn into the owner's own history at all", async () => {
+    const h = harness({ paidDraftRuntime: stubPaidRuntime(), planner: stubPlanner() });
+
+    await h.dispatch(NATURAL_REQUEST);
+    await h.dispatch("ความลับของสมาชิกอีกคน", { senderId: OTHER_MEMBER });
+
+    const [entry] = await h.conversationContext.entries();
+    const recorded = (entry?.value.recentOwnerTurns ?? []).map((turn) => turn.text);
+    expect(recorded).toContain(NATURAL_REQUEST);
+    expect(recorded).not.toContain("ความลับของสมาชิกอีกคน");
+  });
+
+  it("takes user turns from the transcript when the session has one sender", async () => {
+    const semantic = semanticStub(REVISE);
+    const transcript = transcriptFor({
+      [SESSION_KEY]: [{ role: "user", text: "ในแชทส่วนตัว" }],
+    });
+    const h = harness({
+      paidDraftRuntime: stubPaidRuntime(),
+      planner: stubPlanner(),
+      semanticResolver: semantic,
+      transcript,
+      directChat: true,
+    });
+    await h.dispatch("เอา Twong ทำวิดีโอ เดินอยู่ในสวน แล้วเตะขวดน้ำ");
+    await h.dispatch("15");
+    await h.dispatch("ไม่มี");
+    semantic.seen.length = 0;
+
+    await h.dispatch("แก้อันเมื่อกี้ให้ตอนท้ายแรงขึ้น");
+
+    // A direct chat IS the sender, so a persisted user turn is attributable.
+    expect(semantic.seen[0]!.recentTurns.map((turn) => turn.text)).toContain("ในแชทส่วนตัว");
   });
 });
