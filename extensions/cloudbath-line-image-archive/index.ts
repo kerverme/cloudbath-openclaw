@@ -13,6 +13,7 @@ import { resolveArchiveConfig, resolveWorkspacePolicyConfig } from "./src/config
 import type { CloudbathConversationRouter } from "./src/conversation-router.js";
 import { createCloudbathConversationRouter } from "./src/conversation-runtime.js";
 import { createConversationSemanticResolver } from "./src/conversation-semantic-resolver.js";
+import { createConversationTranscriptReader } from "./src/conversation-transcript.js";
 import {
   isWorkspacePolicyCommand,
   LineGroupWorkspacePolicyRegistry,
@@ -366,6 +367,7 @@ export default definePluginEntry({
                 await workspaceRegistry?.lookup(accountId, groupId),
             },
             resolver: storyboardResolver,
+            transcript: createConversationTranscriptReader(),
             semanticResolver: createConversationSemanticResolver(
               async (request) =>
                 await api.runtime.llm.complete({
@@ -625,6 +627,20 @@ export default definePluginEntry({
       const conversation = await runtime.conversationRouter?.resolveTurn(event, ctx);
       if (conversation?.kind === "answer" || conversation?.kind === "clarify") {
         return { handled: true, text: conversation.text };
+      }
+      if (conversation?.kind === "route") {
+        // The referent was resolved here; the mutation is still the storyboard
+        // router's own code, reached through a bounded hint rather than through
+        // wording anything composed.
+        const routed = await runtime.storyboardLineRouter?.handleContextualRoute(
+          conversation.route,
+          event,
+          ctx,
+        );
+        if (routed) {
+          const presentation = await runtime.conversationRouter?.observeHandledTurn(event, ctx);
+          return presentation ? { ...routed, presentation } : routed;
+        }
       }
       const routedEvent =
         conversation?.kind === "rewrite"

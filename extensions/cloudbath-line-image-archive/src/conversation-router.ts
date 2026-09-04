@@ -50,6 +50,11 @@ import {
 } from "./conversation-semantic-resolver.js";
 import { describeVideoJobStatus } from "./conversation-status.js";
 import {
+  CONVERSATION_RECENT_TURN_LIMIT,
+  type ConversationTranscriptReader,
+  type ConversationTurn,
+} from "./conversation-transcript.js";
+import {
   classifyConversationUtterance,
   type ConversationUtterance,
 } from "./conversation-utterance.js";
@@ -60,6 +65,7 @@ import {
 import { storyboardDirectorKey, type StoryboardDirectorSession } from "./storyboard-director.js";
 import {
   resolveStoryboardAccessClaim,
+  type StoryboardContextualRoute,
   type StoryboardDispatchContext,
   type StoryboardDispatchEvent,
   type StoryboardProjectResolver,
@@ -69,6 +75,7 @@ import {
   type StoryboardPaidDraftRuntime,
   type StoryboardVideoJobSnapshot,
 } from "./storyboard-paid-draft-runtime.js";
+import { readStoryboardEnvironment } from "./storyboard-request.js";
 import { activeStoryboardKey } from "./storyboard-store.js";
 import type { ActiveStoryboardContext, StoryboardAccessClaim } from "./storyboard-types.js";
 import type { AsyncKeyedStore, SafeLogger } from "./types.js";
@@ -83,6 +90,8 @@ const VIDEO_CODE = /\bVIDEO\s*(\d{4})\b/iu;
  */
 const ANSWER_ONLY_MAX_CHARS = 24;
 
+const AMBIGUOUS_REFERENT_REPLY = "หมายถึงงานไหน? บอกชื่อ Character หรือรหัส VIDEO ได้เลย";
+
 const STALE_POSTBACK_REPLY = "ปุ่มนี้เป็นของขั้นตอนก่อนหน้า ใช้ไม่ได้แล้ว — พิมพ์คำตอบล่าสุดได้เลย";
 
 export type ConversationTurnResolution =
@@ -90,6 +99,11 @@ export type ConversationTurnResolution =
   | Readonly<{ kind: "rewrite"; canonicalText: string }>
   /** The arbiter answers. Only status and stale-chip replies take this path. */
   | Readonly<{ kind: "answer"; text: string }>
+  /**
+   * The referent was resolved, and the turn is work for a handler. Carries the
+   * owner's own words plus state-derived binding, never composed wording.
+   */
+  | Readonly<{ kind: "route"; route: StoryboardContextualRoute }>
   /** Two plausible referents; ask rather than pick one. */
   | Readonly<{ kind: "clarify"; text: string }>
   /** Not ours: the turn continues to the handlers unchanged. */
@@ -122,6 +136,11 @@ export type ConversationRouterDeps = Readonly<{
   paidDraftRuntime?: StoryboardPaidDraftRuntime | null;
   /** Absent, arbitration simply stops after the deterministic steps. */
   semanticResolver?: ConversationSemanticResolver;
+  /**
+   * Recent dialogue for the semantic step. Absent, that step still runs on
+   * structured state alone — history is a hint, never a precondition.
+   */
+  transcript?: ConversationTranscriptReader;
   now: () => number;
   /** Question nonces. Must be unguessable enough that chips do not collide. */
   randomId: () => string;
@@ -232,24 +251,37 @@ export class CloudbathConversationRouter {
       return { kind: "pass" };
     }
     const unresolved = unresolvedConversationTasks(stored);
-    if (!question && unresolved.length === 0) {
-      return { kind: "pass" };
+    // A reference back needs SOMETHING to point at. With no active storyboard
+    // and nothing unresolved, "แบบเมื่อกี้" in a fresh conversation is not a
+    // referent this flow can bind, and carrying one over from whatever is
+    // lying around is exactly the guess this layer exists to prevent.
+    const bindable =
+      Boolean(question) || unresolved.length > 0 || Boolean(stored.activeStoryboardId);
+    if (!bindable) {
+      return utterance.deixis
+        ? { kind: "clarify", text: AMBIGUOUS_REFERENT_REPLY }
+        : { kind: "pass" };
     }
+    const recentTurns = await this.readRecentTurns(context);
     const resolution = await this.deps.semanticResolver.resolve({
       message: utterance.text,
       context: stored,
       unresolvedTasks: unresolved,
       ...(question ? { question } : {}),
-      recentTurns: [],
+      recentTurns,
       entities,
     });
     if (!resolution) {
       return { kind: "pass" };
     }
     if (resolution.needsClarification || resolution.confidence < SEMANTIC_CONFIDENCE_FLOOR) {
-      return question
-        ? { kind: "clarify", text: `ยังไม่แน่ใจว่าหมายถึงอะไร — ${question.prompt}` }
-        : { kind: "pass" };
+      // Naming the open question is more useful than a generic ask, but an
+      // unresolved referent with no question open still gets asked about
+      // rather than guessed.
+      return {
+        kind: "clarify",
+        text: question ? `ยังไม่แน่ใจว่าหมายถึงอะไร — ${question.prompt}` : AMBIGUOUS_REFERENT_REPLY,
+      };
     }
     // The model may only pick a door this flow already opened: an action it did
     // not copy verbatim from the offered choices is discarded, which is what
@@ -259,6 +291,32 @@ export class CloudbathConversationRouter {
     );
     if (resolution.intent === "answer_question" && offered) {
       return { kind: "rewrite", canonicalText: offered.canonicalText };
+    }
+    if (resolution.intent === "revise_active_storyboard" && stored.activeStoryboardId) {
+      // Bound to the storyboard OUR state says is active, never to an id the
+      // model named, and carrying the owner's message unchanged: the planner
+      // reads it as the edit instruction it already is.
+      return {
+        kind: "route",
+        route: { kind: "revise_active_storyboard", request: utterance.text },
+      };
+    }
+    if (resolution.intent === "new_request") {
+      const characterNames = stored.activeCharacters ?? [];
+      // New work still needs a cast, and the only cast this layer may supply is
+      // the one already frozen into the active project. Without it there is
+      // nothing to open, so the turn goes to the handler's own classifier.
+      return characterNames.length > 0
+        ? {
+            kind: "route",
+            route: {
+              kind: "new_scene_request",
+              request: utterance.text,
+              characterNames,
+              environment: readStoryboardEnvironment(utterance.text),
+            },
+          }
+        : { kind: "pass" };
     }
     if (resolution.intent === "task_status" && job) {
       return { kind: "answer", text: describeVideoJobStatus(job) };
@@ -384,6 +442,31 @@ export class CloudbathConversationRouter {
       });
   }
 
+  /**
+   * The recent dialogue for THIS turn's session, or nothing.
+   *
+   * Scoped by the session key the turn arrived on, so another conversation's
+   * history is not reachable rather than filtered out afterwards.
+   */
+  private async readRecentTurns(
+    context: StoryboardDispatchContext,
+  ): Promise<readonly ConversationTurn[]> {
+    const sessionKey = context.sessionKey?.trim();
+    if (!this.deps.transcript || !sessionKey) {
+      return [];
+    }
+    return await this.deps.transcript
+      .readRecentTurns({
+        sessionKey,
+        ...(context.agentId?.trim() ? { agentId: context.agentId.trim() } : {}),
+        limit: CONVERSATION_RECENT_TURN_LIMIT,
+      })
+      .catch(() => {
+        this.deps.logger?.warn("conversation_recent_turns_read_failed");
+        return [] as readonly ConversationTurn[];
+      });
+  }
+
   private async rememberJob(
     claim: StoryboardAccessClaim,
     stored: ActiveConversationContext,
@@ -423,15 +506,75 @@ export class CloudbathConversationRouter {
     const names = await this.deps.resolver
       .listCharacterNames(claim)
       .catch(() => [] as readonly string[]);
-    const lowered = content.toLowerCase();
-    for (const name of names) {
-      const needle = name.trim().toLowerCase();
-      if (needle && lowered.includes(needle)) {
-        mentions.push({ kind: "character", id: name, label: name });
-      }
+    for (const name of matchCharacterNames(content, names)) {
+      mentions.push({ kind: "character", id: name, label: name });
     }
     return mentions;
   }
+}
+
+/**
+ * A name is too short to be evidence of anything on its own.
+ *
+ * One character matches inside nearly every message, and a Character Library
+ * entry that short cannot be told apart from ordinary text in either script.
+ */
+const CHARACTER_NAME_MIN_CHARS = 2;
+
+/** Latin letters and digits, the run a name must not be spliced into. */
+const LATIN_WORD_CHAR = /[0-9A-Za-z]/u;
+
+/**
+ * Whether `name` occurs in `text` as a name rather than as a fragment.
+ *
+ * Latin and digit names carry real collision risk — "F9" sits inside "F99", and
+ * a code is exactly the kind of name owners pick — so a match may not be
+ * extended by another Latin word character on either side. Thai script has no
+ * word boundaries to test, so a Thai name is matched by containment; the
+ * longest-name rule below is what protects those.
+ */
+function occursAsName(text: string, name: string): boolean {
+  const haystack = text.toLowerCase();
+  const needle = name.toLowerCase();
+  let from = 0;
+  for (;;) {
+    const at = haystack.indexOf(needle, from);
+    if (at < 0) {
+      return false;
+    }
+    const before = haystack[at - 1];
+    const after = haystack[at + needle.length];
+    const splicedLeft =
+      LATIN_WORD_CHAR.test(needle[0]!) && before !== undefined && LATIN_WORD_CHAR.test(before);
+    const splicedRight =
+      LATIN_WORD_CHAR.test(needle[needle.length - 1]!) &&
+      after !== undefined &&
+      LATIN_WORD_CHAR.test(after);
+    if (!splicedLeft && !splicedRight) {
+      return true;
+    }
+    from = at + 1;
+  }
+}
+
+/**
+ * Character names this message actually names.
+ *
+ * Longest wins: when "Twong" and "Twong2" both match, only "Twong2" is a
+ * mention, because the shorter name matched only as part of the longer one.
+ * That single rule covers Thai names, where no boundary test is possible, and
+ * doubles as a second guard for Latin ones.
+ */
+export function matchCharacterNames(content: string, names: readonly string[]): readonly string[] {
+  const candidates = names
+    .map((name) => name.trim())
+    .filter((name) => name.length >= CHARACTER_NAME_MIN_CHARS && occursAsName(content, name));
+  return candidates.filter(
+    (name) =>
+      !candidates.some(
+        (other) => other !== name && other.toLowerCase().includes(name.toLowerCase()),
+      ),
+  );
 }
 
 /**
