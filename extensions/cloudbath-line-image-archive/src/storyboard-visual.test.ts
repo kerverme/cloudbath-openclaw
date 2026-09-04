@@ -17,7 +17,9 @@ class MemoryStore<T> {
     this.values.set(key, value);
   }
   async registerIfAbsent(key: string, value: T) {
-    if (this.values.has(key)) return false;
+    if (this.values.has(key)) {
+      return false;
+    }
     this.values.set(key, value);
     return true;
   }
@@ -99,7 +101,9 @@ function harness(failShot?: number) {
         "characters/f99/front.jpg",
         "characters/f99/side.jpg",
       ]);
-      if (shotIndex === failShot) throw new Error("mock generation failed");
+      if (shotIndex === failShot) {
+        throw new Error("mock generation failed");
+      }
       return {
         bytes: Buffer.from(`provider-image-${shotIndex}`),
         mimeType: "image/webp",
@@ -126,7 +130,9 @@ describe("storyboard visual artifacts", () => {
     const result = await h.service.generate({ version: version(), claim });
 
     expect(result.kind).toBe("ready");
-    if (result.kind !== "ready") throw new Error("expected ready visuals");
+    if (result.kind !== "ready") {
+      throw new Error("expected ready visuals");
+    }
     expect(result.artifacts).toHaveLength(2);
     expect(h.persisted).toHaveLength(4);
     expect(result.artifacts[0]).toMatchObject({
@@ -161,7 +167,9 @@ describe("storyboard visual artifacts", () => {
       failedShotIndexes: [2],
     });
     const retry = harness();
-    for (const [key, value] of failed.artifacts.values) retry.artifacts.values.set(key, value);
+    for (const [key, value] of failed.artifacts.values) {
+      retry.artifacts.values.set(key, value);
+    }
     const result = await retry.service.generate({ version: version(), claim, shotIndexes: [2] });
     expect(result.kind).toBe("ready");
   });

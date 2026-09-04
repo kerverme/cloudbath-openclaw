@@ -119,6 +119,10 @@ export type FalVideoInputMode =
   | "reference_to_video"
   | "storyboard_shot_to_video";
 
+function falInputModes(...modes: FalVideoInputMode[]): readonly FalVideoInputMode[] {
+  return Object.freeze(modes);
+}
+
 /**
  * A brand the owner can name.
  *
@@ -231,7 +235,7 @@ function seedance20ReferenceModel(params: {
       provenance: "fal_client_schema",
     }),
     references: SEEDANCE_2_0_REFERENCES,
-    inputModes: Object.freeze(["reference_to_video"]),
+    inputModes: falInputModes("reference_to_video"),
     durationEncoding: "string_seconds",
     verifiedFrom: "@fal-ai/client@1.11.0-alpha.2",
   });
@@ -292,7 +296,7 @@ function minimaxH3ReferenceModel(params: {
       maxTotalFiles: 12,
       provenance: "fal_model_page",
     }),
-    inputModes: Object.freeze(["reference_to_video"]),
+    inputModes: falInputModes("reference_to_video"),
     durationEncoding: "number",
     verifiedFrom: "fal official model page",
   });
@@ -359,7 +363,15 @@ export const FAL_VIDEO_MODELS: readonly FalVideoModel[] = Object.freeze([
       maxTotalFiles: 50,
       provenance: "fal_api_page",
     }),
-    inputModes: Object.freeze(["reference_to_video"]),
+    // Seedance 2.5's multimodal endpoint accepts prompt-only, first-frame,
+    // identity-reference, and storyboard-shot requests. Keep the modes
+    // explicit so H3's reference-required contract can never inherit them.
+    inputModes: falInputModes(
+      "text_to_video",
+      "image_to_video",
+      "reference_to_video",
+      "storyboard_shot_to_video",
+    ),
     durationEncoding: "string_seconds",
     verifiedFrom: "fal official API reference",
   }),
@@ -412,7 +424,7 @@ export const FAL_VIDEO_MODELS: readonly FalVideoModel[] = Object.freeze([
       maxImages: 3,
       provenance: "fal_client_schema",
     }),
-    inputModes: Object.freeze(["reference_to_video"]),
+    inputModes: falInputModes("reference_to_video"),
     durationEncoding: "string_seconds",
     verifiedFrom: "@fal-ai/client@1.11.0-alpha.2",
   }),

@@ -227,7 +227,9 @@ async function pushLineMessages(
 
   if (opts.mediaAlreadyPersistent) {
     for (const message of messages) {
-      if (message.type !== "image") continue;
+      if (message.type !== "image") {
+        continue;
+      }
       for (const value of [message.originalContentUrl, message.previewImageUrl]) {
         const url = new URL(value);
         if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash) {

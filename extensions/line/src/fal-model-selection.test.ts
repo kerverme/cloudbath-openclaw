@@ -48,13 +48,24 @@ function requirements(overrides: Partial<FalVideoRequirements> = {}): FalVideoRe
 }
 
 describe("fal's currently deployed endpoint set", () => {
-  it("rejects every reference-only endpoint for text-to-video with no media", () => {
-    expect(
-      listCompatibleFalModels(
-        CFG,
-        requirements({ identityReferenceCount: 0, inputMode: "text_to_video" }),
-      ),
-    ).toEqual([]);
+  it("keeps reference-required H3 out of text-to-video with no media", () => {
+    const ids = listCompatibleFalModels(
+      CFG,
+      requirements({ identityReferenceCount: 0, inputMode: "text_to_video" }),
+    ).map((model) => model.modelId);
+    expect(ids).toContain(SEEDANCE_25);
+    expect(ids).not.toContain(H3);
+    expect(ids).not.toContain(H3_MAX);
+  });
+
+  it("does not reinterpret a first-frame image as an H3 identity reference", () => {
+    const ids = listCompatibleFalModels(
+      CFG,
+      requirements({ identityReferenceCount: 0, inputMode: "image_to_video" }),
+    ).map((model) => model.modelId);
+    expect(ids).toContain(SEEDANCE_25);
+    expect(ids).not.toContain(H3);
+    expect(ids).not.toContain(H3_MAX);
   });
 
   it("carries Seedance 2.5 as its own endpoint, never aliased onto 2.0", () => {
