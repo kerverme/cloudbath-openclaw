@@ -85,6 +85,7 @@ import {
   prepareStoryboardFinalVideoDraft,
   type PrepareFinalVideoDraftParams,
 } from "./storyboard-video-plan.js";
+import { storyboardVisualUrl, type StoryboardVisualService } from "./storyboard-visual.js";
 import type {
   AsyncKeyedStore,
   FrozenUgcVideoScope,
@@ -114,13 +115,30 @@ export type StoryboardDispatchEvent = {
  * state. Nothing here is free-form, so nothing here can name a new action.
  */
 export type StoryboardContextualRoute =
-  | Readonly<{ kind: "revise_active_storyboard"; request: string }>
+  | Readonly<{
+      kind: "revise_active_storyboard";
+      request: string;
+      referent: ResolvedStoryboardReferent;
+    }>
   | Readonly<{
       kind: "new_scene_request";
       request: string;
       characterNames: readonly string[];
       environment: string;
     }>;
+
+export type ResolvedStoryboardReferent = Readonly<{
+  workId: string;
+  workKind: "storyboard";
+  storyboardId: string;
+  storyboardVersionNumber: number;
+  projectInstanceId: string;
+  accountId: string;
+  conversationId: string;
+  ownerSenderId: string;
+  status: "open";
+  resolvedFrom: "conversation_context";
+}>;
 
 export type StoryboardDispatchContext = {
   messageId?: string;
@@ -184,6 +202,14 @@ export type StoryboardLineRouterDeps = Readonly<{
    * storyboard still renders but confirming it is not offered.
    */
   modelSelection?: StoryboardModelSelectionStore;
+  visuals?: StoryboardVisualService;
+  publicAssetBaseUrl?: string;
+  sendVisualImage?: (params: {
+    to: string;
+    originalContentUrl: string;
+    previewImageUrl: string;
+    accountId: string;
+  }) => Promise<void>;
   /**
    * Warning is required; `info` is optional so a narrow test double stays
    * valid. Routed-and-answered is ordinary operation and logs at info — only
@@ -214,6 +240,9 @@ function storyboardVideoRequirements(version: StoryboardVersion): StoryboardVide
       (total, lock) => total + lock.identityReferences.length,
       0,
     ),
+    inputMode: version.characterLocks.some((lock) => lock.identityReferences.length > 0)
+      ? "reference_to_video"
+      : "text_to_video",
   });
 }
 
@@ -360,6 +389,45 @@ export class CloudbathStoryboardLineRouter {
 
   constructor(private readonly deps: StoryboardLineRouterDeps) {}
 
+  /** Resolves a context candidate through the authoritative owner-scoped store. */
+  async resolveStoryboardReferent(params: {
+    storyboardId: string;
+    claim: StoryboardAccessClaim;
+  }): Promise<ResolvedStoryboardReferent | undefined> {
+    const version = await this.deps.store
+      .readLatest({ storyboardId: params.storyboardId, claim: params.claim })
+      .catch(() => undefined);
+    return version
+      ? Object.freeze({
+          workId: version.projectInstanceId,
+          workKind: "storyboard" as const,
+          storyboardId: version.storyboardId,
+          storyboardVersionNumber: version.versionNumber,
+          projectInstanceId: version.projectInstanceId,
+          accountId: version.accountId,
+          conversationId: version.lineGroupId,
+          ownerSenderId: version.ownerSenderId,
+          status: "open" as const,
+          resolvedFrom: "conversation_context" as const,
+        })
+      : undefined;
+  }
+
+  /** Classifies revision shape only; referent identity is resolved separately. */
+  async isStoryboardRevisionCandidate(params: {
+    request: string;
+    claim: StoryboardAccessClaim;
+  }): Promise<boolean> {
+    const knownCharacterNames = await this.deps.resolver
+      .listCharacterNames(params.claim)
+      .catch(() => [] as readonly string[]);
+    const intent = parseStoryboardIntent({
+      content: params.request,
+      knownCharacterNames,
+    });
+    return Boolean(intent && revisesActiveStoryboard(intent));
+  }
+
   /**
    * Handles a storyboard intent, or returns undefined to leave the turn alone.
    *
@@ -404,6 +472,16 @@ export class CloudbathStoryboardLineRouter {
       if (answered) {
         return { handled: true, text: answered };
       }
+    }
+    if (
+      /^(?:สร้าง|ทำ|ทำใหม่).*(?:visual\s*storyboard|ภาพ.*storyboard|ภาพ.*ช็อต)/iu.test(
+        event.content ?? "",
+      )
+    ) {
+      const active = await this.readActive(claim);
+      return active
+        ? { handled: true, text: await this.generateVisualStoryboard(claim, active) }
+        : undefined;
     }
     if (isStoryboardConfirmation(event.content ?? "")) {
       const confirmed = await this.confirmStoryboard(claim);
@@ -473,6 +551,51 @@ export class CloudbathStoryboardLineRouter {
     } finally {
       this.inFlight.delete(dedupeKey);
     }
+  }
+
+  private async generateVisualStoryboard(
+    claim: StoryboardAccessClaim,
+    active: ActiveStoryboardContext,
+  ): Promise<string> {
+    if (!this.deps.visuals || !this.deps.publicAssetBaseUrl || !this.deps.sendVisualImage) {
+      return "ยังไม่พร้อมสร้าง Visual Storyboard ในระบบนี้";
+    }
+    const version = await this.deps.store.readLatest({ storyboardId: active.storyboardId, claim });
+    if (!version) {
+      return REPLY.missingVersion;
+    }
+    const status = await this.deps.visuals.generate({ version, claim });
+    if (status.kind !== "ready" && status.kind !== "partial") {
+      return "สร้าง Visual Storyboard ไม่สำเร็จ กรุณาลองอีกครั้ง";
+    }
+    // Rendering is a visible interaction with this exact work. Refresh the
+    // canonical pointer before delivery so later conversation observes it as current.
+    await this.touchActive(active);
+    for (const artifact of status.artifacts) {
+      await this.deps.sendVisualImage({
+        to: claim.lineGroupId,
+        accountId: claim.accountId,
+        originalContentUrl: storyboardVisualUrl({
+          publicAssetBaseUrl: this.deps.publicAssetBaseUrl,
+          artifactId: artifact.artifactId,
+          variant: "original",
+        }),
+        previewImageUrl: storyboardVisualUrl({
+          publicAssetBaseUrl: this.deps.publicAssetBaseUrl,
+          artifactId: artifact.artifactId,
+          variant: "preview",
+        }),
+      });
+      this.deps.logger?.info?.("storyboard_visual_sent_to_line", {
+        storyboardId: version.storyboardId,
+        storyboardVersion: version.versionNumber,
+        shotIndex: artifact.shotIndex,
+        artifactId: artifact.artifactId,
+      });
+    }
+    return status.kind === "ready"
+      ? `Visual Storyboard v${version.versionNumber} พร้อมแล้ว (${status.artifacts.length} ช็อต)\nยืนยัน Storyboard หรือบอกจุดที่ต้องการแก้`
+      : `Visual Storyboard v${version.versionNumber} สำเร็จบางส่วน ลองทำภาพช็อต ${status.failedShotIndexes.join(", ")} ใหม่`;
   }
 
   /**
@@ -1094,6 +1217,12 @@ export class CloudbathStoryboardLineRouter {
     if (!latest) {
       return REPLY.missingVersion;
     }
+    if (this.deps.visuals) {
+      const visuals = await this.deps.visuals.status({ version: latest, claim });
+      if (visuals.kind !== "ready") {
+        return "Storyboard เวอร์ชันนี้ยังไม่มีภาพครบ กรุณาสร้าง Visual Storyboard ก่อนยืนยัน";
+      }
+    }
     const offer = await this.videoRuntime()?.offerDefaultVideoModel?.(
       claim.accountId,
       storyboardVideoRequirements(latest),
@@ -1403,14 +1532,53 @@ export class CloudbathStoryboardLineRouter {
     if (binding?.policyId !== "UGC" || binding.boundByOwnerId !== claim.ownerSenderId) {
       return undefined;
     }
-    const active = await this.readActive(claim);
     if (route.kind === "revise_active_storyboard") {
-      // The referent is the storyboard this owner is on. If it aged out between
-      // resolution and here, there is nothing to revise and the turn is left
-      // alone rather than being applied to whatever comes next.
-      if (!active) {
-        return undefined;
+      const { referent } = route;
+      const identityMatches =
+        referent.accountId === claim.accountId &&
+        referent.conversationId === claim.lineGroupId &&
+        referent.ownerSenderId === claim.ownerSenderId;
+      const before = identityMatches
+        ? await this.deps.store
+            .readVersion({
+              storyboardId: referent.storyboardId,
+              versionNumber: referent.storyboardVersionNumber,
+              claim,
+            })
+            .catch(() => undefined)
+        : undefined;
+      const latest = before
+        ? await this.deps.store
+            .readLatest({ storyboardId: referent.storyboardId, claim })
+            .catch(() => undefined)
+        : undefined;
+      if (
+        !before ||
+        !latest ||
+        latest.versionNumber !== referent.storyboardVersionNumber ||
+        latest.projectInstanceId !== referent.projectInstanceId
+      ) {
+        this.deps.logger?.warn("contextual_revision_referent_unprovable", {
+          routeKind: route.kind,
+          resolvedWorkKind: referent.workKind,
+          storyboardId: referent.storyboardId,
+          storyboardVersionNumber: referent.storyboardVersionNumber,
+          resolutionSource: referent.resolvedFrom,
+          currentWorkStatus: referent.status,
+          referentProven: false,
+          clarificationReason: identityMatches ? "referent_stale_or_missing" : "scope_mismatch",
+        });
+        return { handled: true, text: "ไม่พบงานล่าสุดที่กำลังคุยอยู่ กรุณาระบุ Storyboard ที่ต้องการแก้" };
       }
+      const active: ActiveStoryboardContext = Object.freeze({
+        version: 1,
+        storyboardId: referent.storyboardId,
+        projectInstanceId: referent.projectInstanceId,
+        accountId: referent.accountId,
+        lineGroupId: referent.conversationId,
+        ownerSenderId: referent.ownerSenderId,
+        updatedAt: new Date(this.deps.now()).toISOString(),
+      });
       // A document-level change — a new length, a new environment, sound on or
       // off — is read by the SAME parser the plainly-worded path uses, and
       // applied by the same handler. Going straight to the beat planner meant
@@ -1419,9 +1587,6 @@ export class CloudbathStoryboardLineRouter {
       const knownCharacterNames = await this.deps.resolver
         .listCharacterNames(claim)
         .catch(() => [] as readonly string[]);
-      const before = await this.deps.store
-        .readLatest({ storyboardId: active.storyboardId, claim })
-        .catch(() => undefined);
       // The marker-gated parser first, for every shape it already knows. Then a
       // named length: the general parser demands a replacement marker
       // ("ขอ 15 วิแทน") to tell a revision from a fresh request, and a
@@ -1431,7 +1596,7 @@ export class CloudbathStoryboardLineRouter {
       const named = readRevisionDuration(route.request);
       const revision =
         parseStoryboardRevision({ content: route.request, knownCharacterNames }) ??
-        (named !== undefined && named !== before?.document.durationSeconds
+        (named !== undefined && named !== before.document.durationSeconds
           ? ({ kind: "duration", durationSeconds: named } as const)
           : undefined);
       const text = revision
@@ -1441,7 +1606,7 @@ export class CloudbathStoryboardLineRouter {
         claim,
         active,
         conversationId: context.conversationId,
-        beforeVersionNumber: before?.versionNumber,
+        beforeVersionNumber: before.versionNumber,
       });
       this.logContextualRoute(route, text, after);
       return { handled: true, text };

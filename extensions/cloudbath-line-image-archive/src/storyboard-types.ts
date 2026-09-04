@@ -277,6 +277,8 @@ export type StoryboardFinalVideoDraft = Readonly<{
   resolution: string;
   model: StoryboardVideoModelSelection;
   estimatedCost: StoryboardCostEstimate;
+  inputMode: "text_to_video" | "image_to_video" | "reference_to_video" | "storyboard_shot_to_video";
+  renderStrategy: "quick_video" | "best_quality_shot_by_shot";
   plan: StoryboardVideoPlan;
   confirmation: StoryboardDraftConfirmation;
   createdAt: string;

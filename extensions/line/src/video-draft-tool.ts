@@ -361,6 +361,7 @@ export function createLineVideoDraftTool(params: CreateLineVideoDraftToolParams)
         // This path carries at most the owner's own attached image, which is
         // not a Character Library identity lock.
         identityReferenceCount: 0,
+        inputMode: imagePath ? ("image_to_video" as const) : ("text_to_video" as const),
       };
       const offer = offerFalStoryboardDefault(cfg, requirements);
       if (offer.kind !== "offered") {

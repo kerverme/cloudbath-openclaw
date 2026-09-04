@@ -48,6 +48,8 @@ export type StoryboardPaidDraftRequest = Readonly<{
     characterCode?: string;
     displayName?: string;
   }>[];
+  inputMode: "text_to_video" | "image_to_video" | "reference_to_video" | "storyboard_shot_to_video";
+  renderStrategy: "quick_video" | "best_quality_shot_by_shot";
   /** Endpoint the owner chose. Absent means the capability-aware default. */
   requestedModelId?: string;
 }>;
@@ -90,6 +92,7 @@ export type StoryboardVideoRequirements = Readonly<{
   audio: "off" | "ambient" | "full";
   spokenDialogue: boolean;
   identityReferenceCount: number;
+  inputMode: StoryboardPaidDraftRequest["inputMode"];
 }>;
 
 export type StoryboardRuntimeModelOption = Readonly<{

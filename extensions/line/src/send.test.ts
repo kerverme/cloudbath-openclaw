@@ -263,6 +263,27 @@ describe("LINE send helpers", () => {
     });
   });
 
+  it("sends separately persisted storyboard original and preview URLs without restaging", async () => {
+    const original =
+      "https://cloudbath.example/plugins/cloudbath/storyboard-visual/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/original";
+    const preview =
+      "https://cloudbath.example/plugins/cloudbath/storyboard-visual/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/preview";
+
+    await sendModule.sendMessageLine("line:group:C1", "", {
+      cfg: LINE_TEST_CFG,
+      mediaUrl: original,
+      previewImageUrl: preview,
+      mediaAlreadyPersistent: true,
+    });
+
+    expect(stageLineOutboundMessageImagesMock).not.toHaveBeenCalled();
+    expect(pushMessageMock).toHaveBeenCalledWith({
+      to: "C1",
+      messages: [{ type: "image", originalContentUrl: original, previewImageUrl: preview }],
+    });
+    expect(JSON.stringify(pushMessageMock.mock.calls)).not.toContain("temporary-provider.example");
+  });
+
   it("replies when reply token is provided", async () => {
     const result = await sendModule.sendMessageLine("line:group:C1", "Hello", {
       cfg: LINE_TEST_CFG,

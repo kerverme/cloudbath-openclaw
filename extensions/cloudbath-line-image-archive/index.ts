@@ -64,6 +64,15 @@ import {
   createCloudbathStoryboardLineRouter,
   openStoryboardConversationStores,
 } from "./src/storyboard-runtime.js";
+import {
+  createStoryboardVisualRouteHandler,
+  type StoryboardVisualRouteRuntime,
+} from "./src/storyboard-visual-route.js";
+import {
+  CLOUDBATH_STORYBOARD_VISUAL_NAMESPACE,
+  StoryboardVisualService,
+  type StoryboardVisualArtifact,
+} from "./src/storyboard-visual.js";
 import type {
   AgentProfile,
   ActiveUgcLineSession,
@@ -164,6 +173,7 @@ export default definePluginEntry({
     let previsService: CloudbathPrevisService | undefined;
     let previsLineRouter: CloudbathPrevisLineRouter | undefined;
     let storyboardLineRouter: CloudbathStoryboardLineRouter | undefined;
+    let storyboardVisualRoute: StoryboardVisualRouteRuntime | undefined;
     let conversationRouter: CloudbathConversationRouter | undefined;
     let activeConfig: ArchiveConfig | undefined;
 
@@ -174,6 +184,13 @@ export default definePluginEntry({
       handler: createCharacterViewRouteHandler(
         () => tryGetCloudbathWorkspacePolicyRuntime()?.characterAssetView,
       ),
+    });
+
+    api.registerHttpRoute({
+      path: "/plugins/cloudbath/storyboard-visual/",
+      auth: "plugin",
+      match: "prefix",
+      handler: createStoryboardVisualRouteHandler(() => storyboardVisualRoute),
     });
 
     api.registerHttpRoute({
@@ -283,6 +300,99 @@ export default definePluginEntry({
           });
           const ugcNotion = new UgcNotionWorkflowClient(config.notion.apiKey, config.retry, logger);
           const r2 = new R2ArchiveClient(config.r2, config.retry, logger);
+          const storyboardVisualArtifacts =
+            api.runtime.state.openKeyedStore<StoryboardVisualArtifact>({
+              namespace: CLOUDBATH_STORYBOARD_VISUAL_NAMESPACE,
+              maxEntries: 40_000,
+              overflowPolicy: "reject-new",
+            });
+          const storyboardVisuals = config.publicAssetBaseUrl
+            ? new StoryboardVisualService({
+                artifacts: storyboardVisualArtifacts,
+                now: Date.now,
+                logger,
+                generate: async ({ version, shotIndex, identityReferences }) => {
+                  const inputImages = await Promise.all(
+                    identityReferences.map(async (reference) => {
+                      if (reference.source !== "r2") {
+                        throw new Error("Visual storyboard identity reference must be an R2 asset");
+                      }
+                      const media = await r2.fetchPrivateObject({
+                        bucketName: config.r2.bucketName,
+                        objectKey: reference.locator,
+                        maxBytes: config.imageMaxBytes,
+                        contentTypePrefix: "image/",
+                      });
+                      return { buffer: Buffer.from(media.bytes), mimeType: media.contentType };
+                    }),
+                  );
+                  const beat = version.document.beats[shotIndex - 1]!;
+                  const generated = await api.runtime.imageGeneration.generate({
+                    cfg: api.runtime.config.current() as OpenClawConfig,
+                    prompt: [
+                      `Storyboard shot ${shotIndex} of ${version.document.beats.length}.`,
+                      `Environment: ${beat.environmentNote ?? version.document.environment}.`,
+                      `Framing: ${beat.framing}. Camera: ${beat.camera}. Action: ${beat.action}.`,
+                      "Preserve the identity and outfit of every ordered reference image exactly.",
+                    ].join(" "),
+                    inputImages,
+                    aspectRatio: version.document.aspectRatio,
+                    outputFormat: "jpeg",
+                    count: 1,
+                    autoProviderFallback: false,
+                  });
+                  const image = generated.images[0]!;
+                  const metadata = await api.runtime.media.getImageMetadata(image.buffer);
+                  if (!metadata?.width || !metadata.height) {
+                    throw new Error("Generated storyboard image metadata is unavailable");
+                  }
+                  return {
+                    bytes: image.buffer,
+                    mimeType: image.mimeType,
+                    width: metadata.width,
+                    height: metadata.height,
+                    provider: generated.provider,
+                    model: generated.model,
+                  };
+                },
+                normalize: async ({ bytes, maxWidth, maxHeight }) => {
+                  const resized = await api.runtime.media.resizeToJpeg({
+                    buffer: Buffer.from(bytes),
+                    maxSide: Math.min(maxWidth, maxHeight),
+                    quality: 88,
+                    withoutEnlargement: true,
+                  });
+                  const metadata = await api.runtime.media.getImageMetadata(resized);
+                  if (!metadata?.width || !metadata.height) {
+                    throw new Error("Normalized storyboard image metadata is unavailable");
+                  }
+                  return {
+                    bytes: resized,
+                    mimeType: "image/jpeg" as const,
+                    width: metadata.width,
+                    height: metadata.height,
+                  };
+                },
+                persist: async ({ objectKey, bytes, contentType, sha256 }) => {
+                  await r2.ensureObject({
+                    body: bytes,
+                    bucketName: config.r2.bucketName,
+                    objectKey,
+                    contentType,
+                    contentLength: bytes.byteLength,
+                    sha256,
+                  });
+                },
+              })
+            : undefined;
+          if (storyboardVisuals) {
+            storyboardVisualRoute = {
+              artifacts: storyboardVisualArtifacts,
+              r2,
+              bucketName: config.r2.bucketName,
+              maxBytes: config.imageMaxBytes,
+            };
+          }
           // Display names are durable per project instance and shared by both
           // flows, so the storyboard and previs resolvers must read the SAME
           // record rather than each keeping its own idea of who "Twong" is.
@@ -354,6 +464,27 @@ export default definePluginEntry({
             // so there is one scope contract rather than two.
             ...(ugcDraftScopes ? { draftScopes: ugcDraftScopes } : {}),
             ugcCapabilities: workspaceConfig.ugc.capabilities,
+            ...(storyboardVisuals && config.publicAssetBaseUrl
+              ? {
+                  visuals: storyboardVisuals,
+                  publicAssetBaseUrl: config.publicAssetBaseUrl,
+                  sendVisualImage: async (image) => {
+                    const adapter = await api.runtime.channel.outbound.loadAdapter("line");
+                    if (!adapter?.sendMedia) {
+                      throw new Error("LINE outbound image adapter is unavailable");
+                    }
+                    await adapter.sendMedia({
+                      cfg: api.runtime.config.current() as OpenClawConfig,
+                      to: image.to,
+                      text: "",
+                      mediaUrl: image.originalContentUrl,
+                      previewImageUrl: image.previewImageUrl,
+                      mediaAlreadyPersistent: true,
+                      accountId: image.accountId,
+                    });
+                  },
+                }
+              : {}),
           });
           // Referent arbitration runs AHEAD of every handler, and reads the
           // storyboard flow's own stores rather than a copy, so "which question
@@ -367,6 +498,10 @@ export default definePluginEntry({
                 await workspaceRegistry?.lookup(accountId, groupId),
             },
             resolver: storyboardResolver,
+            resolveStoryboardReferent: async (params) =>
+              await storyboardLineRouter?.resolveStoryboardReferent(params),
+            isStoryboardRevisionCandidate: async (params) =>
+              Boolean(await storyboardLineRouter?.isStoryboardRevisionCandidate(params)),
             transcript: createConversationTranscriptReader(),
             semanticResolver: createConversationSemanticResolver(
               async (request) =>
@@ -605,6 +740,7 @@ export default definePluginEntry({
         keepWatchingPipeline = undefined;
         workspaceRegistry = undefined;
         storyboardLineRouter = undefined;
+        storyboardVisualRoute = undefined;
         conversationRouter = undefined;
         ugcWorkflow = undefined;
         ugcCharacterWorkflow = undefined;
