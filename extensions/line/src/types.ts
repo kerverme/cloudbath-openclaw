@@ -151,8 +151,19 @@ export type LineTemplateMessagePayload =
       altText?: string;
     };
 
+/**
+ * One quick-reply chip.
+ *
+ * A bare string stays a `message` action: the label is sent back as text and
+ * re-read by whatever normally reads text. The object form is a `postback`:
+ * the owner sees `label`, the webhook receives `data`, and nothing about the
+ * decision has to survive a round trip through natural-language parsing. Use
+ * it for bounded decisions a handler must resolve exactly.
+ */
+export type LineQuickReplyItem = string | { label: string; data: string };
+
 export type LineChannelData = {
-  quickReplies?: string[];
+  quickReplies?: LineQuickReplyItem[];
   location?: {
     title: string;
     address: string;

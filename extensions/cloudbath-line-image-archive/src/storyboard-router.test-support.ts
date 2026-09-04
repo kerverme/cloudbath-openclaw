@@ -1,4 +1,12 @@
+import type { MessagePresentation } from "openclaw/plugin-sdk/interactive-runtime";
 import { expect, vi } from "vitest";
+import type { ActiveConversationContext } from "./conversation-context.js";
+import {
+  CloudbathConversationRouter,
+  type ConversationTurnResolution,
+} from "./conversation-router.js";
+import type { ConversationSemanticResolver } from "./conversation-semantic-resolver.js";
+import type { ConversationTranscriptReader } from "./conversation-transcript.js";
 import {
   CloudbathPrevisLineRouter,
   type PrevisDedupeStore,
@@ -44,6 +52,11 @@ import type {
 const ACCOUNT = "acct-1";
 const GROUP = "C1234567890abcdef";
 const OWNER = "U0987654321";
+/** Another member of the SAME LINE group, sharing its session key. */
+export const OTHER_MEMBER = "U1111111111";
+export const OWNER_SENDER_ID = OWNER;
+/** The session this LINE conversation's transcript lives under. */
+export const SESSION_KEY = `line:group:${GROUP}`;
 export const NAMES = ["Twong", "Twong2"] as const;
 
 /** The canonical production request this phase must support. */
@@ -105,9 +118,13 @@ export function resolver(
 }
 
 type DispatchOutcome = {
-  source: "storyboard" | "previs" | "model";
+  source: "conversation" | "character" | "storyboard" | "previs" | "model";
   handled: boolean;
   text?: string;
+  /** How arbitration read the turn, for suites that assert the ladder itself. */
+  conversation?: ConversationTurnResolution;
+  /** Controls attached to the reply, when the handler left a question open. */
+  presentation?: MessagePresentation;
 };
 
 export function harness(
@@ -132,9 +149,29 @@ export function harness(
     modelSelection?: StoryboardModelSelectionStore;
     ugcCapabilities?: Readonly<Record<UgcCapabilityId, NotionTarget>>;
     planner?: StoryboardLlmPlanner;
+    /** Absent, arbitration stops after its deterministic steps. */
+    semanticResolver?: ConversationSemanticResolver;
+    /** `null` models a LINE conversation this workspace policy does not bind. */
+    binding?: { policyId: string; boundByOwnerId: string } | null;
+    /** Recent dialogue for the semantic step. Absent, it runs on state alone. */
+    transcript?: ConversationTranscriptReader;
+    /**
+     * Stands where the Character/image workflow sits in the real chain, so a
+     * suite can prove a turn REACHED it rather than only that arbitration did
+     * not answer it wrongly.
+     */
+    characterHandler?: (content: string) => Promise<{ handled: true; text?: string } | undefined>;
+    /** Character Library names, for the entity-matching cases. */
+    resolverNames?: readonly string[];
+    /** Models a 1:1 chat, where the session provably has one human sender. */
+    directChat?: boolean;
   } = {},
 ) {
-  const shared = options.resolver ?? resolver();
+  const shared =
+    options.resolver ??
+    resolver(
+      options.resolverNames ? { listCharacterNames: async () => options.resolverNames! } : {},
+    );
   const storyboardVersions = mem<StoryboardVersion>();
   const storyboardHeads = mem<StoryboardHead>();
   const drafts = mem<StoryboardFinalVideoDraft>();
@@ -208,22 +245,78 @@ export function harness(
     ...(options.logger ? { logger: options.logger } : {}),
   });
 
+  const binding =
+    options.binding === undefined ? { policyId: "UGC", boundByOwnerId: OWNER } : options.binding;
+  const conversationContext = mem<ActiveConversationContext>();
+  let nextNonce = 0;
+  const conversationRouter = new CloudbathConversationRouter({
+    context: conversationContext,
+    registry: { lookup: async () => binding },
+    active,
+    director,
+    resolver: shared,
+    paidDraftRuntime: options.paidDraftRuntime ?? null,
+    now: () => Date.parse("2026-08-30T10:00:00.000Z"),
+    randomId: () => `nonce${(nextNonce += 1)}0000`,
+    ...(options.modelSelection ? { modelSelection: options.modelSelection } : {}),
+    ...(options.semanticResolver ? { semanticResolver: options.semanticResolver } : {}),
+    ...(options.transcript ? { transcript: options.transcript } : {}),
+  });
+
   /** The plugin's real before_dispatch order. */
   const dispatch = async (
     content: string,
-    over: { messageId?: string; senderId?: string } = {},
+    over: { messageId?: string; senderId?: string; senderIsOwner?: boolean } = {},
   ): Promise<DispatchOutcome> => {
     const event = {
       content,
       senderId: over.senderId ?? OWNER,
-      senderIsOwner: true,
-      isGroup: true,
+      // A different sender in the SAME group is not the bound owner, which is
+      // exactly what production resolves from the LINE webhook.
+      senderIsOwner: over.senderIsOwner ?? (over.senderId ?? OWNER) === OWNER,
+      isGroup: !options.directChat,
       ...(over.messageId ? { messageId: over.messageId } : {}),
     };
-    const ctx = { channelId: "line", accountId: ACCOUNT, conversationId: GROUP };
-    const storyboardResult = await storyboardRouter.handleBeforeDispatch(event, ctx);
+    const ctx = {
+      channelId: "line",
+      accountId: ACCOUNT,
+      conversationId: GROUP,
+      sessionKey: SESSION_KEY,
+      agentId: "main",
+    };
+    const conversation = await conversationRouter.resolveTurn(event, ctx);
+    if (conversation.kind === "answer" || conversation.kind === "clarify") {
+      return { source: "conversation", handled: true, text: conversation.text, conversation };
+    }
+    if (conversation.kind === "route") {
+      const routed = await storyboardRouter.handleContextualRoute(conversation.route, event, ctx);
+      if (routed) {
+        const presentation = await conversationRouter.observeHandledTurn(event, ctx);
+        return {
+          source: "storyboard",
+          ...routed,
+          conversation,
+          ...(presentation ? { presentation } : {}),
+        };
+      }
+    }
+    const routedEvent =
+      conversation.kind === "rewrite" ? { ...event, content: conversation.canonicalText } : event;
+    // Mirrors index.ts: the Character/image workflow is the first handler after
+    // arbitration, so a turn arbitration declined reaches it before storyboard.
+    const characterResult = await options.characterHandler?.(routedEvent.content);
+    if (characterResult) {
+      return { source: "character", ...characterResult, conversation };
+    }
+    const storyboardResult = await storyboardRouter.handleBeforeDispatch(routedEvent, ctx);
     if (storyboardResult) {
-      return { source: "storyboard", ...storyboardResult };
+      const presentation = await conversationRouter.observeHandledTurn(routedEvent, ctx);
+      return {
+        source: "storyboard",
+        ...storyboardResult,
+        conversation,
+        ...(presentation ? { presentation } : {}),
+      };
     }
     // Mirrors index.ts: previs answers an explicit request, or anything at all
     // while no storyboard is active. Calling it unconditionally would let the
@@ -234,9 +327,9 @@ export function harness(
       ? await previsRouter.handleBeforeDispatch(event, ctx)
       : undefined;
     if (previsResult) {
-      return { source: "previs", ...previsResult };
+      return { source: "previs", ...previsResult, conversation };
     }
-    return { source: "model", handled: false };
+    return { source: "model", handled: false, conversation };
   };
 
   const latest = async (): Promise<StoryboardVersion> => {
@@ -260,6 +353,8 @@ export function harness(
   return {
     dedupe,
     dispatch,
+    conversationRouter,
+    conversationContext,
     latest,
     versionAt,
     store,

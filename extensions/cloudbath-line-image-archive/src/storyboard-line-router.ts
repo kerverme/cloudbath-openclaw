@@ -100,12 +100,31 @@ export type StoryboardDispatchEvent = {
   messageId?: string;
 };
 
+/**
+ * What the conversation layer resolved a deictic turn INTO.
+ *
+ * Two shapes only, both bounded: revise the storyboard already in play, or open
+ * a fresh request for a cast that is already frozen. `request` is always the
+ * owner's own message; `characterNames` always comes from resolved project
+ * state. Nothing here is free-form, so nothing here can name a new action.
+ */
+export type StoryboardContextualRoute =
+  | Readonly<{ kind: "revise_active_storyboard"; request: string }>
+  | Readonly<{
+      kind: "new_scene_request";
+      request: string;
+      characterNames: readonly string[];
+      environment: string;
+    }>;
+
 export type StoryboardDispatchContext = {
   messageId?: string;
   channelId?: string;
   accountId?: string;
   conversationId?: string;
   sessionKey?: string;
+  /** Scopes the transcript read the conversation layer performs. */
+  agentId?: string;
 };
 
 /**
@@ -244,6 +263,27 @@ function nativeGroupId(conversationId: string | undefined): string | undefined {
   }
   const native = value.includes(":") ? value.slice(value.lastIndexOf(":") + 1) : value;
   return /^[CR][0-9a-f]{32}$|^C[0-9A-Za-z]{5,}$/u.test(native) ? native : undefined;
+}
+
+/**
+ * The trusted LINE identity triple, or undefined when the turn is not the
+ * bound owner speaking in a bound conversation.
+ *
+ * Exported so the conversation layer scopes its context to exactly the same
+ * triple the storyboard flow scopes its work to; a second derivation would be a
+ * second answer to "whose conversation is this?".
+ */
+export function resolveStoryboardAccessClaim(
+  event: StoryboardDispatchEvent,
+  context: StoryboardDispatchContext,
+): StoryboardAccessClaim | undefined {
+  const lineGroupId = nativeGroupId(context.conversationId);
+  const accountId = context.accountId?.trim();
+  const ownerSenderId = event.senderId?.trim();
+  if (!lineGroupId || !accountId || !ownerSenderId || event.senderIsOwner !== true) {
+    return undefined;
+  }
+  return { accountId, lineGroupId, ownerSenderId };
 }
 
 function toAspectRatio(value: string | undefined): StoryboardAspectRatio {
@@ -1112,13 +1152,7 @@ export class CloudbathStoryboardLineRouter {
     event: StoryboardDispatchEvent,
     context: StoryboardDispatchContext,
   ): StoryboardAccessClaim | undefined {
-    const lineGroupId = nativeGroupId(context.conversationId);
-    const accountId = context.accountId?.trim();
-    const ownerSenderId = event.senderId?.trim();
-    if (!lineGroupId || !accountId || !ownerSenderId || event.senderIsOwner !== true) {
-      return undefined;
-    }
-    return { accountId, lineGroupId, ownerSenderId };
+    return resolveStoryboardAccessClaim(event, context);
   }
 
   /** Stable per-inbound-message key, scoped to the owner so it cannot collide. */
@@ -1149,6 +1183,63 @@ export class CloudbathStoryboardLineRouter {
     }
     const claim = this.trustedClaim(event, context);
     return claim ? Boolean(await this.readActive(claim)) : false;
+  }
+
+  /**
+   * Runs a turn whose REFERENT the conversation layer resolved.
+   *
+   * The hint says which of this router's own paths to take and carries the
+   * owner's own words as the instruction; it never carries wording anything
+   * else composed. Everything that follows — the binding check, the active
+   * storyboard, the planner, the version write — is this router's existing
+   * code, so a contextual revision and a plainly-worded one are one
+   * implementation and neither can reach a paid action.
+   */
+  async handleContextualRoute(
+    route: StoryboardContextualRoute,
+    event: StoryboardDispatchEvent,
+    context: StoryboardDispatchContext,
+  ): Promise<{ handled: true; text?: string } | undefined> {
+    if (context.channelId?.trim().toLowerCase() !== "line") {
+      return undefined;
+    }
+    const claim = this.trustedClaim(event, context);
+    if (!claim) {
+      return undefined;
+    }
+    const binding = await this.deps.registry.lookup(claim.accountId, claim.lineGroupId);
+    if (binding?.policyId !== "UGC" || binding.boundByOwnerId !== claim.ownerSenderId) {
+      return undefined;
+    }
+    const active = await this.readActive(claim);
+    if (route.kind === "revise_active_storyboard") {
+      // The referent is the storyboard this owner is on. If it aged out between
+      // resolution and here, there is nothing to revise and the turn is left
+      // alone rather than being applied to whatever comes next.
+      return active
+        ? {
+            handled: true,
+            text: await this.naturalEdit(
+              { kind: "natural_edit", request: route.request },
+              claim,
+              active,
+            ),
+          }
+        : undefined;
+    }
+    return {
+      handled: true,
+      text: await this.openDirector(
+        {
+          kind: "director_open",
+          characterNames: route.characterNames,
+          unknownNames: [],
+          environment: route.environment,
+          scenePrompt: route.request,
+        },
+        claim,
+      ),
+    };
   }
 
   /** Re-registers the active pointer so its TTL tracks last use, not creation. */

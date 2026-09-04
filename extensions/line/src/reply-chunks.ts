@@ -1,13 +1,14 @@
 // Line plugin module implements reply chunks behavior.
 import type { messagingApi } from "@line/bot-sdk";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
+import type { LineQuickReplyItem } from "./types.js";
 
 type LineReplyMessage = messagingApi.TextMessage;
 
 export type SendLineReplyChunksParams = {
   to: string;
   chunks: string[];
-  quickReplies?: string[];
+  quickReplies?: readonly LineQuickReplyItem[];
   replyToken?: string | null;
   replyTokenUsed?: boolean;
   cfg: OpenClawConfig;
@@ -25,10 +26,13 @@ export type SendLineReplyChunksParams = {
   pushTextMessageWithQuickReplies: (
     to: string,
     text: string,
-    quickReplies: string[],
+    quickReplies: readonly LineQuickReplyItem[],
     opts: { cfg: OpenClawConfig; accountId?: string },
   ) => Promise<unknown>;
-  createTextMessageWithQuickReplies: (text: string, quickReplies: string[]) => LineReplyMessage;
+  createTextMessageWithQuickReplies: (
+    text: string,
+    quickReplies: readonly LineQuickReplyItem[],
+  ) => LineReplyMessage;
   onReplyError?: (err: unknown) => void;
 };
 

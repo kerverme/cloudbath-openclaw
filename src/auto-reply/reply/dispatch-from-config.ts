@@ -3365,9 +3365,10 @@ async function dispatchReplyFromConfigInner(
         const text = beforeDispatchResult.text;
         let queuedFinal = false;
         let routedFinalCount = 0;
+        const presentation = beforeDispatchResult.presentation;
         if (text && !suppressDelivery) {
           const handledReply = await sendFinalPayload(
-            { text },
+            { text, ...(presentation ? { presentation } : {}) },
             {
               abortSignal: getPreDispatchAbortSignal(),
               deliveryId: "before-dispatch",

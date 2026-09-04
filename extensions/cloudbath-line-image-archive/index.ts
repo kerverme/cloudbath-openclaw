@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import type { OpenClawPluginApi, PluginLogger } from "openclaw/plugin-sdk/plugin-entry";
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
@@ -9,6 +10,10 @@ import {
 } from "./src/character-view-route.js";
 import { CLOUDBATH_CHARACTER_VIEW_ROUTE } from "./src/character-view-url.js";
 import { resolveArchiveConfig, resolveWorkspacePolicyConfig } from "./src/config.js";
+import type { CloudbathConversationRouter } from "./src/conversation-router.js";
+import { createCloudbathConversationRouter } from "./src/conversation-runtime.js";
+import { createConversationSemanticResolver } from "./src/conversation-semantic-resolver.js";
+import { createConversationTranscriptReader } from "./src/conversation-transcript.js";
 import {
   isWorkspacePolicyCommand,
   LineGroupWorkspacePolicyRegistry,
@@ -55,7 +60,10 @@ import { R2ArchiveClient } from "./src/r2.js";
 import { isExplicitPrevisRequest } from "./src/storyboard-intent.js";
 import type { CloudbathStoryboardLineRouter } from "./src/storyboard-line-router.js";
 import { StoryboardLlmPlanner } from "./src/storyboard-planner.js";
-import { createCloudbathStoryboardLineRouter } from "./src/storyboard-runtime.js";
+import {
+  createCloudbathStoryboardLineRouter,
+  openStoryboardConversationStores,
+} from "./src/storyboard-runtime.js";
 import type {
   AgentProfile,
   ActiveUgcLineSession,
@@ -156,6 +164,7 @@ export default definePluginEntry({
     let previsService: CloudbathPrevisService | undefined;
     let previsLineRouter: CloudbathPrevisLineRouter | undefined;
     let storyboardLineRouter: CloudbathStoryboardLineRouter | undefined;
+    let conversationRouter: CloudbathConversationRouter | undefined;
     let activeConfig: ArchiveConfig | undefined;
 
     api.registerHttpRoute({
@@ -346,6 +355,30 @@ export default definePluginEntry({
             ...(ugcDraftScopes ? { draftScopes: ugcDraftScopes } : {}),
             ugcCapabilities: workspaceConfig.ugc.capabilities,
           });
+          // Referent arbitration runs AHEAD of every handler, and reads the
+          // storyboard flow's own stores rather than a copy, so "which question
+          // is open" has exactly one answer. The paid seam is resolved per call:
+          // a build without the LINE plugin simply has no job to report on.
+          conversationRouter = createCloudbathConversationRouter({
+            state: api.runtime.state,
+            ...openStoryboardConversationStores(api.runtime.state),
+            registry: {
+              lookup: async (accountId, groupId) =>
+                await workspaceRegistry?.lookup(accountId, groupId),
+            },
+            resolver: storyboardResolver,
+            transcript: createConversationTranscriptReader(),
+            semanticResolver: createConversationSemanticResolver(
+              async (request) =>
+                await api.runtime.llm.complete({
+                  ...request,
+                  messages: [...request.messages],
+                }),
+            ),
+            now: Date.now,
+            randomId: () => randomUUID().replaceAll("-", "").slice(0, 16),
+            logger,
+          });
           if (
             config.publicAssetBaseUrl &&
             config.r2.bucketName &&
@@ -490,6 +523,7 @@ export default definePluginEntry({
             ...(previsService ? { previsService } : {}),
             ...(previsLineRouter ? { previsLineRouter } : {}),
             ...(storyboardLineRouter ? { storyboardLineRouter } : {}),
+            ...(conversationRouter ? { conversationRouter } : {}),
             ...(keepWatchingPipeline ? { keepWatchingPipeline } : {}),
             ...(pipeline ? { pipeline } : {}),
             ...(activeConfig ? { activeConfig } : {}),
@@ -567,6 +601,7 @@ export default definePluginEntry({
         keepWatchingPipeline = undefined;
         workspaceRegistry = undefined;
         storyboardLineRouter = undefined;
+        conversationRouter = undefined;
         ugcWorkflow = undefined;
         ugcCharacterWorkflow = undefined;
         characterAssetView = undefined;
@@ -583,7 +618,38 @@ export default definePluginEntry({
           ? { handled: true, text: "Workspace policy service is unavailable." }
           : undefined;
       }
-      const characterResult = await runtime.ugcCharacterWorkflow?.handleBeforeDispatch(event, ctx);
+      // Referent arbitration runs before every handler: whichever handler
+      // recognises a word first must NOT be what decides who a message is for.
+      // It either answers a bounded thing itself (job status, a chip that has
+      // gone stale) or rewrites the turn into the wording the owning handler
+      // already parses, so the handlers below keep exactly one implementation
+      // of every decision.
+      const conversation = await runtime.conversationRouter?.resolveTurn(event, ctx);
+      if (conversation?.kind === "answer" || conversation?.kind === "clarify") {
+        return { handled: true, text: conversation.text };
+      }
+      if (conversation?.kind === "route") {
+        // The referent was resolved here; the mutation is still the storyboard
+        // router's own code, reached through a bounded hint rather than through
+        // wording anything composed.
+        const routed = await runtime.storyboardLineRouter?.handleContextualRoute(
+          conversation.route,
+          event,
+          ctx,
+        );
+        if (routed) {
+          const presentation = await runtime.conversationRouter?.observeHandledTurn(event, ctx);
+          return presentation ? { ...routed, presentation } : routed;
+        }
+      }
+      const routedEvent =
+        conversation?.kind === "rewrite"
+          ? { ...event, content: conversation.canonicalText }
+          : event;
+      const characterResult = await runtime.ugcCharacterWorkflow?.handleBeforeDispatch(
+        routedEvent,
+        ctx,
+      );
       if (characterResult) {
         return characterResult;
       }
@@ -593,9 +659,16 @@ export default definePluginEntry({
       // has no active storyboard. Once a storyboard IS active it also answers
       // bare time-range edits; an explicit `PREVIS <range> ...` still reaches
       // the previs router below.
-      const storyboardResult = await runtime.storyboardLineRouter?.handleBeforeDispatch(event, ctx);
+      const storyboardResult = await runtime.storyboardLineRouter?.handleBeforeDispatch(
+        routedEvent,
+        ctx,
+      );
       if (storyboardResult) {
-        return storyboardResult;
+        // Whatever the handler just did, the question now open is read back out
+        // of ITS stores — never out of the reply text — and its controls travel
+        // with the reply as portable actions the channel maps.
+        const presentation = await runtime.conversationRouter?.observeHandledTurn(routedEvent, ctx);
+        return presentation ? { ...storyboardResult, presentation } : storyboardResult;
       }
       // Previs is now LEGACY. It still sees an explicit request, and it still
       // sees everything else when this owner has NO active storyboard -- which
