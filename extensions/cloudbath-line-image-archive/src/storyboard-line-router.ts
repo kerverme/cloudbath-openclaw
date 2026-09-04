@@ -63,6 +63,7 @@ import {
   STORYBOARD_DEFAULT_DURATION_SECONDS,
   STORYBOARD_DEFAULT_RESOLUTION,
   STORYBOARD_MAX_DURATION_SECONDS,
+  readStoryboardEnvironment,
 } from "./storyboard-request.js";
 import {
   requoteActiveStoryboardDraft,
@@ -85,7 +86,9 @@ import {
   type StoryboardCastMember,
   type StoryboardFinalVideoDraft,
   type StoryboardResolution,
+  type StoryboardSourceImage,
   type StoryboardVersion,
+  resolveStoryboardInputMode,
 } from "./storyboard-types.js";
 import {
   prepareStoryboardFinalVideoDraft,
@@ -158,7 +161,8 @@ export type ResolvedStoryboardReferent = Readonly<{
   workKind: "storyboard";
   storyboardId: string;
   storyboardVersionNumber: number;
-  projectInstanceId: string;
+  /** Absent for standalone work; `workId` then names the storyboard itself. */
+  projectInstanceId?: string;
   accountId: string;
   conversationId: string;
   ownerSenderId: string;
@@ -229,6 +233,19 @@ export type StoryboardLineRouterDeps = Readonly<{
    */
   modelSelection?: StoryboardModelSelectionStore;
   visuals?: StoryboardVisualService;
+  /**
+   * The image the owner has EXPLICITLY put forward as this scene's first frame.
+   *
+   * Injected rather than read from a media store here, because "which image did
+   * they mean" is the owning flow's judgement. It must answer `none` when it
+   * cannot prove an explicit selection: an unrelated recent attachment silently
+   * becoming a first frame is the failure this seam exists to prevent.
+   */
+  resolveSelectedSourceImage?: (
+    claim: StoryboardAccessClaim,
+  ) => Promise<
+    Readonly<{ kind: "selected"; mediaId: string }> | Readonly<{ kind: "none" }> | undefined
+  >;
   publicAssetBaseUrl?: string;
   sendVisualImage?: (params: {
     to: string;
@@ -266,9 +283,7 @@ function storyboardVideoRequirements(version: StoryboardVersion): StoryboardVide
       (total, lock) => total + lock.identityReferences.length,
       0,
     ),
-    inputMode: version.characterLocks.some((lock) => lock.identityReferences.length > 0)
-      ? "reference_to_video"
-      : "text_to_video",
+    inputMode: resolveStoryboardInputMode(version),
   });
 }
 
@@ -281,8 +296,9 @@ const REPLY = {
   directorUnavailable: "ยังไม่สามารถรับคำขอแบบสนทนาได้ กรุณาระบุความยาว เช่น 10 วิ",
   noCompatibleModel:
     "ยังไม่มีโมเดลที่รองรับ Storyboard นี้ได้ (ความยาว/เสียง/ตัวละครอ้างอิง) กรุณาปรับ Storyboard",
-  /** A video request this flow will own, once it knows who is in the scene. */
-  castNeeded: "ได้เลย เริ่มทำ Storyboard ให้ครับ\nจะใช้ตัวละครไหนในคลิปนี้? (เช่น F99)",
+  /** One short clarification; never a guess at which image was meant. */
+  sourceImageAmbiguous:
+    "ยังไม่แน่ใจว่าจะใช้ภาพไหนเป็นเฟรมแรก\nกรุณาส่งภาพที่ต้องการมาอีกครั้ง หรือตอบ 1 เพื่อทำจากข้อความอย่างเดียว",
 } as const;
 
 /**
@@ -427,11 +443,14 @@ export class CloudbathStoryboardLineRouter {
       .catch(() => undefined);
     return version
       ? Object.freeze({
-          workId: version.projectInstanceId,
+          // Standalone work is identified by the storyboard itself: there is
+          // no project to name it by, and the version chain is what a revision
+          // has to be proven against either way.
+          workId: version.project?.projectInstanceId ?? version.storyboardId,
           workKind: "storyboard" as const,
           storyboardId: version.storyboardId,
           storyboardVersionNumber: version.versionNumber,
-          projectInstanceId: version.projectInstanceId,
+          ...(version.project ? { projectInstanceId: version.project.projectInstanceId } : {}),
           accountId: version.accountId,
           conversationId: version.lineGroupId,
           ownerSenderId: version.ownerSenderId,
@@ -528,11 +547,6 @@ export class CloudbathStoryboardLineRouter {
       .catch(() => [] as readonly string[]);
     const intent = parseStoryboardIntent({ content: event.content ?? "", knownCharacterNames });
     const active = await this.readActive(claim);
-    // An owner asking for a video is storyboard-first work, always. Nothing
-    // below can open a storyboard without a cast, and the parser's own
-    // create/director paths handle the requests that already name one — so the
-    // rest are claimed HERE and told what is missing. Falling through is what
-    // sent them to a single-shot legacy draft that skipped the storyboard.
     // An owner asking for a video is storyboard-first work, always. The parser
     // opens a storyboard only when the request already names a cast, and every
     // other reading below needs an active one — so a video request that fits
@@ -540,12 +554,11 @@ export class CloudbathStoryboardLineRouter {
     const opensStoryboard = intent?.kind === "create" || intent?.kind === "director_open";
     if (!opensStoryboard && utterance?.videoRequest) {
       if (!active) {
-        return {
-          handled: true,
-          text: authorization.projectCapable
-            ? REPLY.castNeeded
-            : STORYBOARD_PROJECT_CAPABILITY_REPLY,
-        };
+        // Nothing about the workspace yet: the missing thing is what the scene
+        // is made OF, and only the Character branch of that answer needs a
+        // project. Asking for UGC here would refuse text-only work that never
+        // needed it.
+        return { handled: true, text: await this.openStandaloneDirector(event, claim) };
       }
       // With a scene already open, only a turn the parser has NO reading for is
       // a continuation. Everything it does recognise — "สร้างวิดีโอ" prepares
@@ -748,12 +761,17 @@ export class CloudbathStoryboardLineRouter {
   private async create(
     intent: Extract<StoryboardIntent, { kind: "create" }>,
     claim: StoryboardAccessClaim,
+    /** The first frame the owner chose, when the director collected one. */
+    sourceImage?: StoryboardSourceImage,
   ): Promise<string> {
-    // Casting and project freezing are the steps that genuinely need the UGC
-    // workspace, so this is where its absence is reported — not at the door,
-    // where it used to cost the owner the whole storyboard flow.
+    // Casting from the Character Library is the ONE thing that genuinely needs
+    // the UGC workspace: it freezes real identities into a real Notion project.
+    // A scene that names nobody needs none of that, so it plans standalone
+    // rather than being refused at the door.
     const authorization = await this.authorize(claim);
-    if (authorization.kind !== "owner_scoped" || !authorization.projectCapable) {
+    const projectCapable = authorization.kind === "owner_scoped" && authorization.projectCapable;
+    const namesCast = intent.characterNames.length > 0 || intent.unknownNames.length > 0;
+    if (!projectCapable && namesCast) {
       return STORYBOARD_PROJECT_CAPABILITY_REPLY;
     }
     // A named-but-unknown character fails closed: dropping it silently would
@@ -765,21 +783,25 @@ export class CloudbathStoryboardLineRouter {
       return durationTooLongReply(intent.durationSeconds!);
     }
     try {
-      const resolved = await this.deps.resolver.resolveProject({
-        claim,
-        characterNames: intent.characterNames,
-        scenePrompt: intent.scenePrompt,
-        // A cast that ADDS someone the active project never froze is new work,
-        // whatever phrasing named it, and the storyboard flow has no other way
-        // to open a project. The workflow owns that judgement: it opens a new
-        // project only when the request names someone new, and a strict subset
-        // still fails loudly on the cast-lock guard. Gating this on
-        // `explicitCasting` meant only "ใช้ X กับ Y" phrasing qualified, so
-        // "เอา F99 ทำวิดีโอ ..." tried to CONTINUE a project frozen to another
-        // cast and died on that guard instead of starting F99's own project.
-        startNewProjectOnCastChange: true,
-      });
-      const cast = buildCast(resolved.characterLocks, resolved.displayNames);
+      const resolved = !projectCapable
+        ? undefined
+        : await this.deps.resolver.resolveProject({
+            claim,
+            characterNames: intent.characterNames,
+            scenePrompt: intent.scenePrompt,
+            // A cast that ADDS someone the active project never froze is new work,
+            // whatever phrasing named it, and the storyboard flow has no other way
+            // to open a project. The workflow owns that judgement: it opens a new
+            // project only when the request names someone new, and a strict subset
+            // still fails loudly on the cast-lock guard. Gating this on
+            // `explicitCasting` meant only "ใช้ X กับ Y" phrasing qualified, so
+            // "เอา F99 ทำวิดีโอ ..." tried to CONTINUE a project frozen to another
+            // cast and died on that guard instead of starting F99's own project.
+            startNewProjectOnCastChange: true,
+          });
+      // No project, no frozen locks: a standalone scene is described in the
+      // owner's own words and carries no Character identity at all.
+      const cast = resolved ? buildCast(resolved.characterLocks, resolved.displayNames) : [];
       const durationSeconds = intent.durationSeconds ?? STORYBOARD_DEFAULT_DURATION_SECONDS;
       const planned = this.deps.planner
         ? await this.deps.planner.planCreate({
@@ -802,20 +824,27 @@ export class CloudbathStoryboardLineRouter {
           parseStoryboardAudioIntent(intent.scenePrompt),
         ),
         ...(planned ? { plannedBeats: planned.beats } : {}),
+        ...(sourceImage ? { sourceImage } : {}),
       });
       const created = await this.deps.store.createStoryboard({
         document,
         claim,
-        projectInstanceId: resolved.projectInstanceId,
-        projectPageId: resolved.projectPageId,
-        sceneId: resolved.sceneId,
-        scenePageId: resolved.scenePageId,
-        characterLocks: resolved.characterLocks,
+        ...(resolved
+          ? {
+              project: {
+                projectInstanceId: resolved.projectInstanceId,
+                projectPageId: resolved.projectPageId,
+                sceneId: resolved.sceneId,
+                scenePageId: resolved.scenePageId,
+              },
+            }
+          : {}),
+        characterLocks: resolved?.characterLocks ?? [],
       });
       await this.deps.active.register(activeStoryboardKey(claim), {
         version: 1,
         storyboardId: created.head.storyboardId,
-        projectInstanceId: resolved.projectInstanceId,
+        ...(resolved ? { projectInstanceId: resolved.projectInstanceId } : {}),
         accountId: claim.accountId,
         lineGroupId: claim.lineGroupId,
         ownerSenderId: claim.ownerSenderId,
@@ -837,6 +866,15 @@ export class CloudbathStoryboardLineRouter {
   ): Promise<string> {
     if (intent.unknownNames[0]) {
       return unknownCharacterReply(intent.unknownNames[0]);
+    }
+    // Naming a Character IS the request for project-backed identity, so the
+    // capability is reported here rather than after two more questions the
+    // owner would answer for a scene that could never be frozen.
+    if (intent.characterNames.length > 0) {
+      const authorization = await this.authorize(claim);
+      if (authorization.kind !== "owner_scoped" || !authorization.projectCapable) {
+        return STORYBOARD_PROJECT_CAPABILITY_REPLY;
+      }
     }
     const store = this.deps.director;
     if (!store) {
@@ -883,6 +921,63 @@ export class CloudbathStoryboardLineRouter {
     if (answer.kind === "duration_too_long") {
       return durationTooLongAnswerReply(answer.durationSeconds);
     }
+    // Asking for "the image" without one on record is the ambiguity this flow
+    // must not resolve by guessing. One short question, and the slot stays open.
+    if (answer.kind === "media_ambiguous") {
+      const selected = await this.deps.resolveSelectedSourceImage?.(claim);
+      if (selected?.kind !== "selected") {
+        return REPLY.sourceImageAmbiguous;
+      }
+      return await this.advanceDirector(claim, session, {
+        kind: "media",
+        media: { kind: "source_image", mediaId: selected.mediaId },
+      });
+    }
+    // The Character Library is the one branch that needs the project space.
+    if (answer.kind === "media" && answer.media.kind === "character_library") {
+      const authorization = await this.authorize(claim);
+      if (authorization.kind !== "owner_scoped" || !authorization.projectCapable) {
+        return STORYBOARD_PROJECT_CAPABILITY_REPLY;
+      }
+    }
+    return await this.advanceDirector(claim, session, answer);
+  }
+
+  /**
+   * Opens a director for a video request that named no cast.
+   *
+   * The session carries the owner's own words as the scene prompt and asks what
+   * the scene is built from first, because that answer — text, a chosen first
+   * frame, or a Character — decides both the provider input mode and whether a
+   * project is needed at all.
+   */
+  private async openStandaloneDirector(
+    event: StoryboardDispatchEvent,
+    claim: StoryboardAccessClaim,
+  ): Promise<string> {
+    const store = this.deps.director;
+    if (!store) {
+      return REPLY.directorUnavailable;
+    }
+    const scenePrompt = (event.content ?? "").trim();
+    const session = openDirectorSession({
+      claim,
+      scenePrompt,
+      characterNames: [],
+      environment: readStoryboardEnvironment(scenePrompt),
+      updatedAt: new Date(this.deps.now()).toISOString(),
+      mediaRequired: true,
+    });
+    await store.register(storyboardDirectorKey(claim), session);
+    return DIRECTOR_QUESTION.media;
+  }
+
+  /** Writes one answered slot and asks the next question, or completes. */
+  private async advanceDirector(
+    claim: StoryboardAccessClaim,
+    session: StoryboardDirectorSession,
+    answer: Parameters<typeof applyDirectorAnswer>[1],
+  ): Promise<string> {
     const updated = applyDirectorAnswer(session, answer, new Date(this.deps.now()).toISOString());
     const next = nextDirectorSlot(updated);
     if (!next) {
@@ -920,6 +1015,13 @@ export class CloudbathStoryboardLineRouter {
         ...(session.resolution === undefined ? {} : { resolution: session.resolution }),
       },
       claim,
+      session.media?.kind === "source_image"
+        ? Object.freeze({
+            kind: "owner_selected" as const,
+            mediaId: session.media.mediaId,
+            selectedAt: session.updatedAt,
+          })
+        : undefined,
     );
   }
 
@@ -1688,7 +1790,7 @@ export class CloudbathStoryboardLineRouter {
         !before ||
         !latest ||
         latest.versionNumber !== referent.storyboardVersionNumber ||
-        latest.projectInstanceId !== referent.projectInstanceId
+        latest.project?.projectInstanceId !== referent.projectInstanceId
       ) {
         this.deps.logger?.warn("contextual_revision_referent_unprovable", {
           routeKind: route.kind,
@@ -1705,7 +1807,7 @@ export class CloudbathStoryboardLineRouter {
       const active: ActiveStoryboardContext = Object.freeze({
         version: 1,
         storyboardId: referent.storyboardId,
-        projectInstanceId: referent.projectInstanceId,
+        ...(referent.projectInstanceId ? { projectInstanceId: referent.projectInstanceId } : {}),
         accountId: referent.accountId,
         lineGroupId: referent.conversationId,
         ownerSenderId: referent.ownerSenderId,

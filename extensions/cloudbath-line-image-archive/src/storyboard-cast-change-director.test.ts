@@ -183,7 +183,7 @@ describe("a fresh natural request naming a Character the project never froze", (
     expect(project.calls).toEqual([{ characterNames: ["F99"], startNew: true }]);
     expect(project.created).toHaveLength(1);
     const version = await h.latest();
-    expect(version.projectInstanceId).not.toBe(FROZEN_PROJECT);
+    expect(version.project?.projectInstanceId).not.toBe(FROZEN_PROJECT);
     expect(version.document.cast.map((member) => member.characterId)).toEqual([NEW_CODE]);
     expect(version.document.durationSeconds).toBe(15);
   });
@@ -203,7 +203,7 @@ describe("a fresh natural request naming a Character the project never froze", (
     const versions = await h.storyboardVersions.entries();
     expect(versions.length).toBeGreaterThan(0);
     for (const { value } of versions) {
-      expect(value.projectInstanceId).not.toBe(FROZEN_PROJECT);
+      expect(value.project?.projectInstanceId).not.toBe(FROZEN_PROJECT);
       expect(value.document.cast.map((member) => member.characterId)).not.toContain(FROZEN_CODE);
     }
   });

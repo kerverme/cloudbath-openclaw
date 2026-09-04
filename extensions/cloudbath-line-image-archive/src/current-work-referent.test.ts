@@ -139,7 +139,7 @@ describe("carried current-work referent", () => {
       await h.active.register(activeStoryboardKey(CLAIM), {
         version: 1,
         storyboardId: workA.storyboardId,
-        projectInstanceId: workA.projectInstanceId,
+        projectInstanceId: workA.project?.projectInstanceId,
         ...CLAIM,
         updatedAt: "2026-09-04T00:00:00.000Z",
       });
@@ -152,7 +152,7 @@ describe("carried current-work referent", () => {
           referent: {
             storyboardId: workB.storyboardId,
             storyboardVersionNumber: 1,
-            projectInstanceId: workB.projectInstanceId,
+            projectInstanceId: workB.project?.projectInstanceId,
           },
         },
       });
@@ -181,7 +181,7 @@ describe("carried current-work referent", () => {
     await h.active.register(activeStoryboardKey(CLAIM), {
       version: 1,
       storyboardId: workA.storyboardId,
-      projectInstanceId: workA.projectInstanceId,
+      projectInstanceId: workA.project?.projectInstanceId,
       ...CLAIM,
       updatedAt: "2026-09-04T00:00:00.000Z",
     });
@@ -208,7 +208,7 @@ describe("carried current-work referent", () => {
     await h.active.register(activeStoryboardKey(CLAIM), {
       version: 1,
       storyboardId: workA.storyboardId,
-      projectInstanceId: workA.projectInstanceId,
+      projectInstanceId: workA.project?.projectInstanceId,
       ...CLAIM,
       updatedAt: "2026-09-04T00:00:00.000Z",
     });

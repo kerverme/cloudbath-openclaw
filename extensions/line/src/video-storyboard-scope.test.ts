@@ -70,17 +70,20 @@ function lock(code: string, pageId: string) {
 }
 
 /** A draft shaped exactly as the storyboard router hands one to the scope builder. */
-function draft(overrides: Record<string, unknown> = {}) {
+function draft(overrides: Record<string, unknown> = {}, project: Record<string, unknown> = {}) {
   const characterLocks = [lock("CHAR-6", "page-char-6"), lock("CHAR-7", "page-char-7")];
   return {
     version: 1,
     draftId: "sb-draft-1",
     storyboardId: "sb_1",
     storyboardVersionNumber: 2,
-    projectInstanceId: "proj-instance-1",
-    projectPageId: "page-project-1",
-    sceneId: "SCENE-3",
-    scenePageId: "page-scene-3",
+    project: {
+      projectInstanceId: "proj-instance-1",
+      projectPageId: "page-project-1",
+      sceneId: "SCENE-3",
+      scenePageId: "page-scene-3",
+      ...project,
+    },
     accountId: ACCOUNT,
     lineGroupId: GROUP,
     ownerSenderId: OWNER,
@@ -192,7 +195,7 @@ describe("a storyboard draft's scope satisfies the paid gate's own validator", (
   it("declines to build a scope for a scene it cannot number", () => {
     expect(
       buildStoryboardDraftScope({
-        draft: draft({ sceneId: "SCENE-UNKNOWN" }),
+        draft: draft({}, { sceneId: "SCENE-UNKNOWN" }),
         claim: CLAIM,
         capabilities: CAPABILITIES,
         createdAt: "2026-08-30T10:00:00.000Z",

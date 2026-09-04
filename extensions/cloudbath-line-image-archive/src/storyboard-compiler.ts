@@ -18,6 +18,7 @@ import type {
   StoryboardCastMember,
   StoryboardDocument,
   StoryboardResolution,
+  StoryboardSourceImage,
 } from "./storyboard-types.js";
 
 /** Relative screen time each beat kind earns when the duration is divided up. */
@@ -208,6 +209,8 @@ export type CompileStoryboardParams = Readonly<{
    * for gets no invented sound direction.
    */
   audio?: StoryboardAudioMode;
+  /** The first frame the owner chose, when this scene is built from one. */
+  sourceImage?: StoryboardSourceImage;
   /** Already schema-validated and canonically mapped by StoryboardLlmPlanner. */
   plannedBeats?: readonly StoryboardBeat[];
 }>;
@@ -228,6 +231,7 @@ export function compileStoryboardDocument(params: CompileStoryboardParams): Stor
     audio: "off",
     cast: Object.freeze([...params.cast]),
     beats: Object.freeze(beats),
+    ...(params.sourceImage ? { sourceImage: params.sourceImage } : {}),
   } satisfies StoryboardDocument);
   // One place decides audio, and it is the same one a later revision goes
   // through, so a spoken beat always arrives with its sound design attached

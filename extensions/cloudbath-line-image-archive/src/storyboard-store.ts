@@ -12,6 +12,7 @@ import type {
   StoryboardDocument,
   StoryboardHead,
   StoryboardVersion,
+  StoryboardProjectLink,
 } from "./storyboard-types.js";
 import type { AsyncKeyedStore, UgcCharacterLock } from "./types.js";
 
@@ -61,10 +62,8 @@ export type StoryboardStoreDeps = Readonly<{
 export type CreateStoryboardParams = Readonly<{
   document: StoryboardDocument;
   claim: StoryboardAccessClaim;
-  projectInstanceId: string;
-  projectPageId: string;
-  sceneId: string;
-  scenePageId: string;
+  /** Absent for standalone work: no UGC project backs this storyboard. */
+  project?: StoryboardProjectLink;
   characterLocks: readonly UgcCharacterLock[];
 }>;
 
@@ -81,10 +80,7 @@ export class StoryboardStore {
       version: 1,
       storyboardId,
       versionNumber: 1,
-      projectInstanceId: params.projectInstanceId,
-      projectPageId: params.projectPageId,
-      sceneId: params.sceneId,
-      scenePageId: params.scenePageId,
+      ...(params.project ? { project: params.project } : {}),
       accountId: params.claim.accountId,
       lineGroupId: params.claim.lineGroupId,
       ownerSenderId: params.claim.ownerSenderId,
@@ -95,7 +91,7 @@ export class StoryboardStore {
     const head: StoryboardHead = Object.freeze({
       version: 1,
       storyboardId,
-      projectInstanceId: params.projectInstanceId,
+      ...(params.project ? { projectInstanceId: params.project.projectInstanceId } : {}),
       accountId: params.claim.accountId,
       lineGroupId: params.claim.lineGroupId,
       ownerSenderId: params.claim.ownerSenderId,

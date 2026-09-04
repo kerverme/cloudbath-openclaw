@@ -20,6 +20,7 @@
  */
 import { describe, expect, it, vi } from "vitest";
 import type { StoryboardModelSelectionState } from "./storyboard-confirmation.js";
+import { DIRECTOR_QUESTION } from "./storyboard-director.js";
 import type { StoryboardPaidDraftRuntime } from "./storyboard-paid-draft-runtime.js";
 import { StoryboardLlmPlanner } from "./storyboard-planner.js";
 import { harness } from "./storyboard-router.test-support.js";
@@ -316,21 +317,24 @@ describe("B. a conversation with no workspace binding gets the same product", ()
     },
   );
 
-  it("names the capability it needs rather than silently doing nothing", async () => {
+  it("opens the director instead of demanding a workspace", async () => {
+    // The missing thing is what the scene is made OF, not a workspace. Asking
+    // for UGC here would refuse text-only work that never needed it.
     const h = harness({ binding: null });
 
     const answered = await h.dispatch(ASK_VIDEO[0]);
 
-    expect(answered.text).toContain("UGC");
+    expect(answered.text).toBe(DIRECTOR_QUESTION.media);
+    expect(answered.text).not.toContain("UGC");
   });
 
-  it("asks who is in the scene when the workspace IS bound", async () => {
+  it("opens the same director when the workspace IS bound", async () => {
     const h = harness({ paidDraftRuntime: paidRuntime() });
 
     const answered = await h.dispatch(ASK_VIDEO[0]);
 
     expect(answered.source).toBe("storyboard");
-    expect(answered.text).toContain("Storyboard");
+    expect(answered.text).toBe(DIRECTOR_QUESTION.media);
   });
 });
 

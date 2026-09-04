@@ -16,6 +16,7 @@ import {
   type StoryboardPaidDraftResult,
   type StoryboardPaidDraftRuntime,
 } from "./storyboard-paid-draft-runtime.js";
+import { resolveStoryboardInputMode } from "./storyboard-types.js";
 import type {
   StoryboardCostEstimate,
   StoryboardDraftConfirmation,
@@ -338,10 +339,7 @@ export async function prepareStoryboardFinalVideoDraftWithOutcome(
     draftId,
     storyboardId: version.storyboardId,
     storyboardVersionNumber: version.versionNumber,
-    projectInstanceId: version.projectInstanceId,
-    projectPageId: version.projectPageId,
-    sceneId: version.sceneId,
-    scenePageId: version.scenePageId,
+    ...(version.project ? { project: version.project } : {}),
     accountId: version.accountId,
     lineGroupId: version.lineGroupId,
     ownerSenderId: version.ownerSenderId,
@@ -351,9 +349,7 @@ export async function prepareStoryboardFinalVideoDraftWithOutcome(
     resolution,
     model,
     estimatedCost,
-    inputMode: version.characterLocks.some((lock) => lock.identityReferences.length > 0)
-      ? "reference_to_video"
-      : "text_to_video",
+    inputMode: resolveStoryboardInputMode(version),
     renderStrategy: "quick_video",
     plan,
     // Never minted here. A `ready` code is always the one the LINE plugin
@@ -415,9 +411,7 @@ async function requestPaidDraft(
         Object.freeze({ code: lock.code, pageId: lock.pageId }),
       ),
       referenceAssets: paidReferenceAssets(version),
-      inputMode: version.characterLocks.some((lock) => lock.identityReferences.length > 0)
-        ? "reference_to_video"
-        : "text_to_video",
+      inputMode: resolveStoryboardInputMode(version),
       renderStrategy: "quick_video",
       ...(params.requestedModelId ? { requestedModelId: params.requestedModelId } : {}),
     });

@@ -170,6 +170,8 @@ export function harness(
     /** Enables authoritative per-shot visuals; absent, the flow has none. */
     visuals?: StoryboardVisualService;
     sendVisualImage?: StoryboardLineRouterDeps["sendVisualImage"];
+    /** Stands where the media store proves an EXPLICIT first-frame choice. */
+    resolveSelectedSourceImage?: StoryboardLineRouterDeps["resolveSelectedSourceImage"];
     publicAssetBaseUrl?: string;
   } = {},
 ) {
@@ -255,6 +257,9 @@ export function harness(
     ...(options.ugcCapabilities ? { ugcCapabilities: options.ugcCapabilities } : {}),
     ...(options.visuals ? { visuals: options.visuals } : {}),
     ...(options.sendVisualImage ? { sendVisualImage: options.sendVisualImage } : {}),
+    ...(options.resolveSelectedSourceImage
+      ? { resolveSelectedSourceImage: options.resolveSelectedSourceImage }
+      : {}),
     ...(options.publicAssetBaseUrl ? { publicAssetBaseUrl: options.publicAssetBaseUrl } : {}),
     ...(options.logger ? { logger: options.logger } : {}),
   });
@@ -373,6 +378,8 @@ export function harness(
   };
 
   return {
+    /** The trusted triple every store in this harness is scoped to. */
+    claim: { accountId: ACCOUNT, lineGroupId: GROUP, ownerSenderId: OWNER },
     dedupe,
     dispatch,
     conversationRouter,

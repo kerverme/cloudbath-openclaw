@@ -23,10 +23,17 @@ export function buildStoryboardDraftScope(params: {
   createdAt: string;
 }): FrozenUgcVideoScope | undefined {
   const { draft, claim } = params;
+  // A UGC scope describes a UGC project. Standalone work has none, and there is
+  // nothing to fabricate here: the LINE gate reads this scope only for drafts
+  // in a bound group, and a draft without one is confirmed on its own terms.
+  const project = draft.project;
+  if (!project) {
+    return undefined;
+  }
   // "SCENE-3" -> 3. A scene the gate cannot number is one it will reject, so
   // returning undefined leaves the draft unconfirmable rather than storing a
   // scope that fails validation later for a reason nobody can see.
-  const sceneNumber = Number(/(\d+)$/u.exec(draft.sceneId)?.[1]);
+  const sceneNumber = Number(/(\d+)$/u.exec(project.sceneId)?.[1]);
   if (!Number.isInteger(sceneNumber) || sceneNumber < 1) {
     return undefined;
   }
@@ -40,12 +47,12 @@ export function buildStoryboardDraftScope(params: {
     lineGroupId: claim.lineGroupId,
     ownerSenderId: claim.ownerSenderId,
     characterLocks: draft.characterLocks,
-    projectInstanceId: draft.projectInstanceId,
-    projectPageId: draft.projectPageId,
+    projectInstanceId: project.projectInstanceId,
+    projectPageId: project.projectPageId,
     // A storyboard's project record IS its instance id; there is no second
     // identifier for the same project.
-    projectRecordId: draft.projectInstanceId,
-    shotPageIds: Object.freeze([draft.scenePageId]),
+    projectRecordId: project.projectInstanceId,
+    shotPageIds: Object.freeze([project.scenePageId]),
     scene: Object.freeze({
       sceneNumber,
       characterPageIds: Object.freeze(draft.characterLocks.map((lock) => lock.pageId)),
@@ -53,7 +60,7 @@ export function buildStoryboardDraftScope(params: {
       prompt,
       durationSeconds: draft.durationSeconds,
     }),
-    scenePageId: draft.scenePageId,
+    scenePageId: project.scenePageId,
     referenceAssets: Object.freeze(
       draft.characterLocks.flatMap((lock) => [...lock.identityReferences]),
     ),

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { DIRECTOR_QUESTION } from "./storyboard-director.js";
 import {
   CREATE_MESSAGE,
   expectNothingBillable,
@@ -25,10 +26,10 @@ describe("A. natural video request creates a storyboard", () => {
     expect(version.document.cast.map((member) => member.displayName)).toEqual(["Twong", "Twong2"]);
 
     // Real UGC project and scene linkage, not a shadow project.
-    expect(version.projectInstanceId).toBe("proj-instance-1");
-    expect(version.projectPageId).toBe("page-project-1");
-    expect(version.sceneId).toBe("SCENE-1");
-    expect(version.scenePageId).toBe("page-scene-1");
+    expect(version.project?.projectInstanceId).toBe("proj-instance-1");
+    expect(version.project?.projectPageId).toBe("page-project-1");
+    expect(version.project?.sceneId).toBe("SCENE-1");
+    expect(version.project?.scenePageId).toBe("page-scene-1");
 
     // No previs, no CozyClay render, nothing billable.
     expect((await h.previsVersions.entries()).length).toBe(0);
@@ -87,8 +88,8 @@ describe("B. storyboard edit appends a new version", () => {
     expect(v2?.parentVersionNumber).toBe(1);
     // Same storyboard and same real project identity.
     expect(v2?.storyboardId).toBe(v1Before?.storyboardId);
-    expect(v2?.projectInstanceId).toBe("proj-instance-1");
-    expect(v2?.scenePageId).toBe("page-scene-1");
+    expect(v2?.project?.projectInstanceId).toBe("proj-instance-1");
+    expect(v2?.project?.scenePageId).toBe("page-scene-1");
 
     // The edit is represented across exactly the requested window.
     const editedBeat = v2!.document.beats.find(
@@ -183,10 +184,10 @@ describe("D. สร้างวิดีโอ prepares a Final Video Draft", ()
     await h.dispatch("สร้างวิดีโอ", { messageId: "m2" });
     const draft = (await h.drafts.entries())[0]!.value;
 
-    expect(draft.projectInstanceId).toBe("proj-instance-1");
-    expect(draft.projectPageId).toBe("page-project-1");
-    expect(draft.sceneId).toBe("SCENE-1");
-    expect(draft.scenePageId).toBe("page-scene-1");
+    expect(draft.project?.projectInstanceId).toBe("proj-instance-1");
+    expect(draft.project?.projectPageId).toBe("page-project-1");
+    expect(draft.project?.sceneId).toBe("SCENE-1");
+    expect(draft.project?.scenePageId).toBe("page-scene-1");
     expect(draft.plan.characters.map((character) => character.characterId)).toEqual([
       "CHAR-6",
       "CHAR-7",
@@ -195,7 +196,7 @@ describe("D. สร้างวิดีโอ prepares a Final Video Draft", ()
     expect(draft.plan.beats.at(-1)!.endSeconds).toBe(15);
   });
 
-  it("asks who is in the scene rather than letting the request fall through", async () => {
+  it("opens the director rather than letting the request fall through", async () => {
     // With no active storyboard there is nothing to draft, but an owner asking
     // for a video is still storyboard-first work. Passing the turn on is what
     // let a single-shot legacy "🎬 Video draft" answer it instead.
@@ -204,7 +205,7 @@ describe("D. สร้างวิดีโอ prepares a Final Video Draft", ()
     const asked = await h.dispatch("สร้างวิดีโอ");
 
     expect(asked.source).toBe("storyboard");
-    expect(asked.text).toContain("Storyboard");
+    expect(asked.text).toBe(DIRECTOR_QUESTION.media);
     expect(asked.text).not.toContain("Video draft");
   });
 });
