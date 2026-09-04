@@ -95,7 +95,7 @@ function harness(failShot?: number) {
     artifacts,
     concurrency: 2,
     now: () => Date.parse("2026-09-04T00:00:00.000Z"),
-    randomId: () => `${String(++counter).padStart(36, "0")}`,
+    randomId: () => String(++counter).padStart(36, "0"),
     generate: vi.fn(async ({ shotIndex, identityReferences }) => {
       expect(identityReferences.map((reference) => reference.locator)).toEqual([
         "characters/f99/front.jpg",
