@@ -113,6 +113,8 @@ export function formatFinalVideoDraftForLine(draft: StoryboardFinalVideoDraft): 
   return [
     "🎬 Final Video Draft",
     `Storyboard v${draft.storyboardVersionNumber}`,
+    `Strategy: ${draft.renderStrategy === "quick_video" ? "Quick Video" : "Best Quality / Shot-by-Shot"}`,
+    `Input mode: ${draft.inputMode.replaceAll("_", "-")}`,
     `ความยาว: ${draft.durationSeconds} วิ · ${draft.aspectRatio} · ${draft.resolution}`,
     `โมเดล: ${formatModel(draft.model)}`,
     formatCost(draft.estimatedCost),

@@ -351,6 +351,10 @@ export async function prepareStoryboardFinalVideoDraftWithOutcome(
     resolution,
     model,
     estimatedCost,
+    inputMode: version.characterLocks.some((lock) => lock.identityReferences.length > 0)
+      ? "reference_to_video"
+      : "text_to_video",
+    renderStrategy: "quick_video",
     plan,
     // Never minted here. A `ready` code is always the one the LINE plugin
     // allocated in its own store; this side has no 4-digit allocator at all,
@@ -411,6 +415,10 @@ async function requestPaidDraft(
         Object.freeze({ code: lock.code, pageId: lock.pageId }),
       ),
       referenceAssets: paidReferenceAssets(version),
+      inputMode: version.characterLocks.some((lock) => lock.identityReferences.length > 0)
+        ? "reference_to_video"
+        : "text_to_video",
+      renderStrategy: "quick_video",
       ...(params.requestedModelId ? { requestedModelId: params.requestedModelId } : {}),
     });
   } catch {

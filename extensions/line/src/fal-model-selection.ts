@@ -17,6 +17,7 @@
  */
 import {
   listFalVideoModels,
+  type FalVideoInputMode,
   type FalVideoModel,
   type FalVideoModelConfig,
 } from "./fal-video-registry.js";
@@ -55,6 +56,7 @@ export type FalVideoRequirements = Readonly<{
   spokenDialogue: boolean;
   /** Character Library identity references the scene casts. */
   identityReferenceCount: number;
+  inputMode: FalVideoInputMode;
 }>;
 
 /** Why one model cannot execute this storyboard. Closed set; each is shown as-is. */
@@ -65,6 +67,7 @@ export type FalIncompatibility =
   | Readonly<{ kind: "audio_required" }>
   | Readonly<{ kind: "audio_must_be_silent" }>
   | Readonly<{ kind: "identity_references_unsupported" }>
+  | Readonly<{ kind: "input_mode"; requested: FalVideoInputMode }>
   | Readonly<{ kind: "too_many_references"; requested: number; supported: number }>;
 
 export type FalModelCompatibility =
@@ -169,6 +172,9 @@ export function evaluateFalModel(
   requirements: FalVideoRequirements,
 ): FalModelCompatibility {
   const reasons: FalIncompatibility[] = [
+    ...(model.inputModes.includes(requirements.inputMode)
+      ? []
+      : [{ kind: "input_mode" as const, requested: requirements.inputMode }]),
     ...durationReasons(model, requirements),
     ...audioReasons(model, requirements),
     ...referenceReasons(model, requirements),

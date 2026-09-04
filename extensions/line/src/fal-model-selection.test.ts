@@ -42,11 +42,21 @@ function requirements(overrides: Partial<FalVideoRequirements> = {}): FalVideoRe
     audio: "full",
     spokenDialogue: false,
     identityReferenceCount: 1,
+    inputMode: "reference_to_video",
     ...overrides,
   };
 }
 
 describe("fal's currently deployed endpoint set", () => {
+  it("rejects every reference-only endpoint for text-to-video with no media", () => {
+    expect(
+      listCompatibleFalModels(
+        CFG,
+        requirements({ identityReferenceCount: 0, inputMode: "text_to_video" }),
+      ),
+    ).toEqual([]);
+  });
+
   it("carries Seedance 2.5 as its own endpoint, never aliased onto 2.0", () => {
     const ids = listFalVideoModels({}).map((model) => model.modelId);
     expect(ids).toContain(SEEDANCE_25);

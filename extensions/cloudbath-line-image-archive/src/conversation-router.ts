@@ -69,6 +69,7 @@ import { storyboardDirectorKey, type StoryboardDirectorSession } from "./storybo
 import {
   resolveStoryboardAccessClaim,
   type StoryboardContextualRoute,
+  type ResolvedStoryboardReferent,
   type StoryboardDispatchContext,
   type StoryboardDispatchEvent,
   type StoryboardProjectResolver,
@@ -129,6 +130,14 @@ export type ConversationRouterDeps = Readonly<{
   director?: AsyncKeyedStore<StoryboardDirectorSession>;
   modelSelection?: StoryboardModelSelectionStore;
   active: AsyncKeyedStore<ActiveStoryboardContext>;
+  resolveStoryboardReferent?(params: {
+    storyboardId: string;
+    claim: StoryboardAccessClaim;
+  }): Promise<ResolvedStoryboardReferent | undefined>;
+  isStoryboardRevisionCandidate?(params: {
+    request: string;
+    claim: StoryboardAccessClaim;
+  }): Promise<boolean>;
   resolver: StoryboardProjectResolver;
   /**
    * LINE's paid seam, for the one job this conversation may be waiting on.
@@ -147,7 +156,7 @@ export type ConversationRouterDeps = Readonly<{
   now: () => number;
   /** Question nonces. Must be unguessable enough that chips do not collide. */
   randomId: () => string;
-  logger?: Pick<SafeLogger, "warn">;
+  logger?: Pick<SafeLogger, "info" | "warn">;
 }>;
 
 type EntityMention = Readonly<{ kind: SemanticReferentType; id: string; label: string }>;
@@ -232,7 +241,20 @@ export class CloudbathConversationRouter {
         return { kind: "answer", text: describeVideoJobStatus(job) };
       }
       if (!question) {
-        return { kind: "pass" };
+        const referent = stored.activeStoryboardId
+          ? await this.deps.resolveStoryboardReferent?.({
+              storyboardId: stored.activeStoryboardId,
+              claim,
+            })
+          : undefined;
+        return referent
+          ? {
+              kind: "answer",
+              text: `Storyboard v${referent.storyboardVersionNumber} ยังเป็นงานปัจจุบัน บอกจุดที่ต้องการแก้ได้เลย`,
+            }
+          : stored.activeStoryboardId
+            ? { kind: "clarify", text: AMBIGUOUS_REFERENT_REPLY }
+            : { kind: "pass" };
       }
     }
 
@@ -253,11 +275,17 @@ export class CloudbathConversationRouter {
     // reference back) yet did not resolve. A message with no such marker is new
     // work, and classifying new work is the storyboard router's job, not this
     // one's, so it is passed through untouched.
+    const revisionCandidate = stored.activeStoryboardId
+      ? await this.deps
+          .isStoryboardRevisionCandidate?.({ request: utterance.text, claim })
+          .catch(() => false)
+      : false;
     const conversational =
       utterance.polarity !== undefined ||
       utterance.ordinal !== undefined ||
       utterance.deixis !== undefined ||
-      utterance.progressInquiry;
+      utterance.progressInquiry ||
+      revisionCandidate;
     if (!conversational || !this.deps.semanticResolver) {
       return { kind: "pass" };
     }
@@ -307,9 +335,31 @@ export class CloudbathConversationRouter {
       // Bound to the storyboard OUR state says is active, never to an id the
       // model named, and carrying the owner's message unchanged: the planner
       // reads it as the edit instruction it already is.
+      const referent = await this.deps.resolveStoryboardReferent?.({
+        storyboardId: stored.activeStoryboardId,
+        claim,
+      });
+      if (!referent) {
+        this.deps.logger?.warn("contextual_revision_referent_unprovable", {
+          routeKind: "revise_active_storyboard",
+          resolvedWorkKind: "storyboard",
+          referentProven: false,
+          clarificationReason: "authoritative_storyboard_unavailable",
+        });
+        return { kind: "clarify", text: AMBIGUOUS_REFERENT_REPLY };
+      }
+      this.deps.logger?.info("contextual_revision_referent_resolved", {
+        routeKind: "revise_active_storyboard",
+        resolvedWorkKind: referent.workKind,
+        storyboardId: referent.storyboardId,
+        storyboardVersionNumber: referent.storyboardVersionNumber,
+        resolutionSource: referent.resolvedFrom,
+        currentWorkStatus: referent.status,
+        referentProven: true,
+      });
       return {
         kind: "route",
-        route: { kind: "revise_active_storyboard", request: utterance.text },
+        route: { kind: "revise_active_storyboard", request: utterance.text, referent },
       };
     }
     if (resolution.intent === "new_request") {

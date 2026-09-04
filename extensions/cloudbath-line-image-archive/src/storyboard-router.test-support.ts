@@ -255,12 +255,17 @@ export function harness(
     active,
     director,
     resolver: shared,
+    resolveStoryboardReferent: async (params) =>
+      await storyboardRouter.resolveStoryboardReferent(params),
+    isStoryboardRevisionCandidate: async (params) =>
+      await storyboardRouter.isStoryboardRevisionCandidate(params),
     paidDraftRuntime: options.paidDraftRuntime ?? null,
     now: () => Date.parse("2026-08-30T10:00:00.000Z"),
     randomId: () => `nonce${(nextNonce += 1)}0000`,
     ...(options.modelSelection ? { modelSelection: options.modelSelection } : {}),
     ...(options.semanticResolver ? { semanticResolver: options.semanticResolver } : {}),
     ...(options.transcript ? { transcript: options.transcript } : {}),
+    ...(options.logger ? { logger: options.logger } : {}),
   });
 
   /** The plugin's real before_dispatch order. */
