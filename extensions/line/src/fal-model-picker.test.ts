@@ -32,6 +32,7 @@ function requirements(overrides: Partial<FalVideoRequirements> = {}): FalVideoRe
     audio: "full",
     spokenDialogue: false,
     identityReferenceCount: 1,
+    inputMode: "reference_to_video",
     ...overrides,
   };
 }

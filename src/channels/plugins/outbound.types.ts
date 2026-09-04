@@ -23,6 +23,10 @@ export type ChannelOutboundContext = {
   to: string;
   text: string;
   mediaUrl?: string;
+  /** Optional channel-native preview for video/image media; ignored when unsupported. */
+  previewImageUrl?: string;
+  /** Caller proves the HTTPS media URLs are durable artifacts; channel may avoid restaging. */
+  mediaAlreadyPersistent?: boolean;
   audioAsVoice?: boolean;
   mediaAccess?: OutboundMediaAccess;
   mediaLocalRoots?: readonly string[];

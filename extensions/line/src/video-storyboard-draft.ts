@@ -89,6 +89,8 @@ export type LineStoryboardVideoDraftRequest = Readonly<{
   storyboardVersionNumber: number;
   characterLocks: readonly LineStoryboardCharacterLock[];
   referenceAssets: readonly LineStoryboardReferenceAsset[];
+  inputMode: "text_to_video" | "image_to_video" | "reference_to_video" | "storyboard_shot_to_video";
+  renderStrategy: "quick_video" | "best_quality_shot_by_shot";
   /**
    * Endpoint the owner picked. Absent means "use the capability-aware default".
    *
@@ -186,6 +188,7 @@ export function deriveFalRequirements(
     spokenDialogue: request.spokenDialogue,
     identityReferenceCount: request.referenceAssets.filter((asset) => asset.kind === "identity")
       .length,
+    inputMode: request.inputMode,
   });
 }
 
