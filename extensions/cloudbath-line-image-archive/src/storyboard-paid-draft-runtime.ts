@@ -173,6 +173,20 @@ export type StoryboardPaidDraftRuntime = {
     accountId: string;
     conversationId: string;
   }): Promise<StoryboardVideoJobSnapshot | undefined>;
+  /**
+   * Retires every unpaid code still outstanding for this storyboard.
+   *
+   * Called when the scene itself changes: the owner was quoted for content that
+   * no longer exists, so the code they were shown must stop being payable
+   * before anything else happens. A fresh code is minted only when the revised
+   * storyboard reaches a Final Video Draft again.
+   */
+  supersedeStoryboardDrafts?(params: {
+    accountId: string;
+    conversationId: string;
+    ownerSenderId: string;
+    storyboardId: string;
+  }): Promise<readonly string[]>;
   prepareStoryboardVideoDraft(
     request: StoryboardPaidDraftRequest,
   ): Promise<StoryboardPaidDraftResult>;

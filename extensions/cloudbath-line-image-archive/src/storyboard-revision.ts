@@ -40,7 +40,27 @@ const CAMERA_REVISION = /(?:ให้)?กล้อง\s*(.+)$|\bcamera\s+(?:sho
 /** "เพิ่ม Manju เข้ามาด้วย" — adds someone to the scene. */
 const CAST_ADD = /เพิ่ม|ใส่.*เข้ามา|เอา.*เข้ามา(?:ด้วย)?|\badd\b/iu;
 
+/**
+ * Sentence-final particles, plus the replacement marker that behaves like one.
+ * Only ever removed before reading a NUMBER, so no other parser sees the text
+ * without them.
+ */
+const FINAL_PARTICLES = /แทน(?:ที่)?|ได้(?:ไหม|มั้ย)|ไหม|มั้ย|หรือเปล่า|หรือยัง|ครับ|ค่ะ|คะ|นะ|หน่อย/gu;
+
 const MAX_REVISION_TEXT = 120;
+
+/**
+ * A length named in a message that is already known to be about the scene.
+ *
+ * Separate from the marker-gated revision below because the two answer
+ * different questions: this one is "did the owner name a length", and the
+ * caller supplies the evidence that they meant to CHANGE it — either the
+ * replacement marker here, or, for a contextually resolved turn, the fact that
+ * the referent was already bound to the active storyboard.
+ */
+export function readRevisionDuration(text: string): number | undefined {
+  return readStoryboardDuration(normalizeStoryboardText(text).replace(FINAL_PARTICLES, " "));
+}
 
 function trimmed(value: string | undefined): string | undefined {
   const text = value
@@ -79,7 +99,13 @@ export function parseStoryboardRevision(params: {
   // "ขอ 15 วิแทน" is one word to the duration reader: its unit guard rejects
   // "วิ" when a letter follows, and "แทน" is exactly that. Splitting the
   // replacement marker off lets the shared reader see "15 วิ" as it expects.
-  const seconds = readStoryboardDuration(text.replace(/แทน(?:ที่)?/gu, " "));
+  //
+  // Thai writes no spaces, so a sentence-final particle glues to the unit the
+  // same way — "15 วิได้ไหม" hid the length that "15 วิ" shows plainly. These
+  // are a closed grammatical class (question and politeness particles), not a
+  // list of phrases: stripping them is the Thai equivalent of dropping a
+  // trailing "?" before reading a number.
+  const seconds = readRevisionDuration(text);
   if (seconds !== undefined && DURATION_REVISION.test(text)) {
     return { kind: "duration", durationSeconds: seconds };
   }

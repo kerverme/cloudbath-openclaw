@@ -74,7 +74,7 @@ const lock = (code: string, pageId: string): UgcCharacterLock =>
     frozenAt: "2026-08-30T00:00:00.000Z",
   });
 
-export type LoggerWarn = (event: string, fields?: Record<string, unknown>) => void;
+export type StoryboardLogFn = (event: string, fields?: Record<string, unknown>) => void;
 
 function mem<T>(): AsyncKeyedStore<T> {
   const m = new Map<string, T>();
@@ -130,7 +130,7 @@ type DispatchOutcome = {
 export function harness(
   options: {
     resolver?: StoryboardProjectResolver;
-    logger?: { warn: LoggerWarn };
+    logger?: { info?: StoryboardLogFn; warn: StoryboardLogFn };
     /** Makes the storyboard dedupe write fail, without touching creation. */
     failDedupeWrite?: boolean;
     /**
@@ -308,7 +308,12 @@ export function harness(
     if (characterResult) {
       return { source: "character", ...characterResult, conversation };
     }
-    const storyboardResult = await storyboardRouter.handleBeforeDispatch(routedEvent, ctx);
+    let storyboardResult = await storyboardRouter.handleBeforeDispatch(routedEvent, ctx);
+    // Mirrors index.ts: a rewrite the target handler declined must not swallow
+    // the owner's own message.
+    if (!storyboardResult && conversation.kind === "rewrite") {
+      storyboardResult = await storyboardRouter.handleBeforeDispatch(event, ctx);
+    }
     if (storyboardResult) {
       const presentation = await conversationRouter.observeHandledTurn(routedEvent, ctx);
       return {
@@ -355,6 +360,7 @@ export function harness(
     dispatch,
     conversationRouter,
     conversationContext,
+    modelSelection: options.modelSelection,
     latest,
     versionAt,
     store,

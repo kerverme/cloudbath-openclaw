@@ -84,6 +84,16 @@ export type LineVideoDraft = {
    * and leaves the previous project's code untouched.
    */
   storyboardId?: string;
+  /**
+   * The storyboard VERSION this draft quotes, frozen with the rest of it.
+   *
+   * The confirmation gate proves this is still the storyboard's current
+   * version before it submits, so a code minted for a scene that has since
+   * been revised cannot be paid for. Absent on drafts minted before that proof
+   * existed, which the gate refuses rather than submits: an unproven quote is
+   * exactly what it is there to stop.
+   */
+  storyboardVersionNumber?: number;
   /** On a `superseded` tombstone, the code that replaced this one. */
   supersededByDraftId?: string;
   /**
@@ -129,6 +139,7 @@ export async function createLineVideoDraft(params: {
   estimatedCostUsd: number;
   deliveryTo?: string;
   storyboardId?: string;
+  storyboardVersionNumber?: number;
   now?: () => number;
   randomDraftCode?: () => number;
 }): Promise<LineVideoDraft> {
@@ -158,6 +169,9 @@ export async function createLineVideoDraft(params: {
     expiresAt: now + LINE_VIDEO_DRAFT_TTL_MS,
     status: "pending",
     ...(params.storyboardId ? { storyboardId: params.storyboardId } : {}),
+    ...(params.storyboardVersionNumber === undefined
+      ? {}
+      : { storyboardVersionNumber: params.storyboardVersionNumber }),
     ...(params.deliveryTo ? { deliveryTo: params.deliveryTo } : {}),
   };
   await params.store.register(draftId, draft, { ttlMs: LINE_VIDEO_DRAFT_TTL_MS });
@@ -179,7 +193,13 @@ export async function supersedeLineVideoDraftsForStoryboard(params: {
   conversationKey: string;
   ownerSenderId: string;
   storyboardId: string;
-  supersededByDraftId: string;
+  /**
+   * The draft that replaces them, when one exists. Omitted when the storyboard
+   * itself moved on: a revised scene retires its outstanding code immediately,
+   * long before any replacement is quoted, so the owner cannot pay for content
+   * they have already changed.
+   */
+  supersededByDraftId?: string;
   now?: () => number;
 }): Promise<readonly string[]> {
   const now = (params.now ?? Date.now)();
@@ -201,7 +221,11 @@ export async function supersedeLineVideoDraftsForStoryboard(params: {
     // could still be looking at the code it replaced.
     await params.store.register(
       draft.draftId,
-      { ...draft, status: "superseded", supersededByDraftId: params.supersededByDraftId },
+      {
+        ...draft,
+        status: "superseded",
+        ...(params.supersededByDraftId ? { supersededByDraftId: params.supersededByDraftId } : {}),
+      },
       { ttlMs: Math.max(1, draft.expiresAt - now) },
     );
     superseded.push(draft.draftId);

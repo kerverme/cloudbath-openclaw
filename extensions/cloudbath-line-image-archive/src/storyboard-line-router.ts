@@ -63,7 +63,12 @@ import {
   type StoryboardRequoteOverrides,
   type StoryboardRequoteResult,
 } from "./storyboard-requote.js";
-import type { StoryboardCastAddition, StoryboardDocumentRevision } from "./storyboard-revision.js";
+import {
+  parseStoryboardRevision,
+  readRevisionDuration,
+  type StoryboardCastAddition,
+  type StoryboardDocumentRevision,
+} from "./storyboard-revision.js";
 import { activeStoryboardKey, StoryboardStore } from "./storyboard-store.js";
 import {
   STORYBOARD_ASPECT_RATIOS,
@@ -179,7 +184,16 @@ export type StoryboardLineRouterDeps = Readonly<{
    * storyboard still renders but confirming it is not offered.
    */
   modelSelection?: StoryboardModelSelectionStore;
-  logger?: { warn: (event: string, fields?: Record<string, unknown>) => void };
+  /**
+   * Warning is required; `info` is optional so a narrow test double stays
+   * valid. Routed-and-answered is ordinary operation and logs at info — only
+   * a route that produced no reply is a warning, because that is the incident
+   * shape this router exists to make visible.
+   */
+  logger?: {
+    info?: (event: string, fields?: Record<string, unknown>) => void;
+    warn: (event: string, fields?: Record<string, unknown>) => void;
+  };
 }>;
 
 /**
@@ -253,6 +267,18 @@ function rangeReversedReply(from: number, to: number): string {
 
 function durationTooLongReply(seconds: number): string {
   return `ความยาว ${seconds} วิ เกินสูงสุด ${STORYBOARD_MAX_DURATION_SECONDS} วิ`;
+}
+
+/**
+ * Intents that can append a version to the ACTIVE storyboard.
+ *
+ * Named because the paid-retirement check keys off it: a cast addition opens a
+ * NEW storyboard rather than revising this one, and drafting or opening the
+ * director changes no version at all, so neither may retire an outstanding
+ * code.
+ */
+function revisesActiveStoryboard(intent: StoryboardIntent): boolean {
+  return intent.kind === "edit" || intent.kind === "natural_edit" || intent.kind === "revision";
 }
 
 /** Native LINE group id, or undefined for anything that is not a group. */
@@ -413,7 +439,10 @@ export class CloudbathStoryboardLineRouter {
 
     const dedupeKey = this.dedupeKey(event, context, claim);
     if (!dedupeKey) {
-      return { handled: true, text: await this.execute(intent, claim, active) };
+      return {
+        handled: true,
+        text: await this.executeAndRetire(intent, claim, active, context.conversationId),
+      };
     }
     const seen = await this.deps.dedupe.lookup(dedupeKey);
     if (seen) {
@@ -423,25 +452,56 @@ export class CloudbathStoryboardLineRouter {
     if (running) {
       return { handled: true, text: await running };
     }
-    const pending = this.execute(intent, claim, active).then(async (text) => {
-      // A failed dedupe write must not discard a storyboard that WAS created:
-      // rejecting here loses the owner's reply and leaves the retry free to
-      // mint a second Notion project and scene.
-      await this.deps.dedupe
-        .register(dedupeKey, { reply: text }, { ttlMs: DEDUPE_TTL_MS })
-        .catch((error: unknown) => {
-          this.deps.logger?.warn("storyboard_dedupe_write_failed", {
-            reason: error instanceof Error ? error.message : "unknown",
+    const pending = this.executeAndRetire(intent, claim, active, context.conversationId).then(
+      async (text) => {
+        // A failed dedupe write must not discard a storyboard that WAS created:
+        // rejecting here loses the owner's reply and leaves the retry free to
+        // mint a second Notion project and scene.
+        await this.deps.dedupe
+          .register(dedupeKey, { reply: text }, { ttlMs: DEDUPE_TTL_MS })
+          .catch((error: unknown) => {
+            this.deps.logger?.warn("storyboard_dedupe_write_failed", {
+              reason: error instanceof Error ? error.message : "unknown",
+            });
           });
-        });
-      return text;
-    });
+        return text;
+      },
+    );
     this.inFlight.set(dedupeKey, pending);
     try {
       return { handled: true, text: await pending };
     } finally {
       this.inFlight.delete(dedupeKey);
     }
+  }
+
+  /**
+   * Runs one intent and retires the paid state if it moved the scene.
+   *
+   * A plainly worded revision reaches the router here rather than through the
+   * contextual route, and it retires the outstanding code for exactly the same
+   * reason: the owner was quoted for content that no longer exists.
+   */
+  private async executeAndRetire(
+    intent: StoryboardIntent,
+    claim: StoryboardAccessClaim,
+    active: ActiveStoryboardContext | undefined,
+    conversationId: string | undefined,
+  ): Promise<string> {
+    if (!active || !revisesActiveStoryboard(intent)) {
+      return await this.execute(intent, claim, active);
+    }
+    const before = await this.deps.store
+      .readLatest({ storyboardId: active.storyboardId, claim })
+      .catch(() => undefined);
+    const text = await this.execute(intent, claim, active);
+    await this.retireIfVersionAdvanced({
+      claim,
+      active,
+      conversationId,
+      beforeVersionNumber: before?.versionNumber,
+    });
+    return text;
   }
 
   private async execute(
@@ -701,6 +761,110 @@ export class CloudbathStoryboardLineRouter {
     }
   }
 
+  /**
+   * What a contextual route actually produced.
+   *
+   * The production incident this exists for was a turn that reached here,
+   * completed, and reached the owner as silence — diagnosable only by the
+   * generic "no queued reply payloads" warning much later. Text is measured,
+   * never echoed: a scene prompt is owner content and has no place in a log.
+   */
+  private logContextualRoute(
+    route: StoryboardContextualRoute,
+    text: string | undefined,
+    version: StoryboardVersion | undefined,
+  ): void {
+    const fields = {
+      routeKind: route.kind,
+      handled: true,
+      replyTextPresent: Boolean(text?.trim()),
+      replyTextLength: text?.length ?? 0,
+      ...(version
+        ? {
+            storyboardVersion: version.versionNumber,
+            durationSeconds: version.document.durationSeconds,
+          }
+        : {}),
+    };
+    if (fields.replyTextPresent) {
+      this.deps.logger?.info?.("storyboard_contextual_route_handled", fields);
+      return;
+    }
+    // Claiming the turn with nothing to say is the failure mode itself, so it
+    // is reported HERE, naming the route, rather than surfacing downstream as
+    // an unattributed empty dispatch.
+    this.deps.logger?.warn("storyboard_contextual_route_empty_reply", fields);
+  }
+
+  /**
+   * Retires the outstanding paid state when a step actually advanced the
+   * version, and reports where the storyboard now stands.
+   *
+   * Every route that can revise the active storyboard goes through here, so
+   * "a changed scene retires its code" has one owner instead of one per route.
+   * A failed or no-op revision leaves the owner's existing code alone.
+   */
+  private async retireIfVersionAdvanced(params: {
+    claim: StoryboardAccessClaim;
+    active: ActiveStoryboardContext;
+    conversationId: string | undefined;
+    beforeVersionNumber: number | undefined;
+  }): Promise<StoryboardVersion | undefined> {
+    const after = await this.deps.store
+      .readLatest({ storyboardId: params.active.storyboardId, claim: params.claim })
+      .catch(() => undefined);
+    if (after && after.versionNumber !== params.beforeVersionNumber) {
+      await this.retirePaidStateForNewVersion(params.claim, params.active, params.conversationId);
+    }
+    return after;
+  }
+
+  /**
+   * Retires everything the PREVIOUS version had been priced and coded for.
+   *
+   * A new version means the owner is looking at different content, so the
+   * outstanding `VIDEO ####` must stop being payable and the frozen model step
+   * must go: a code minted for an 8-second scene may not execute a 15-second
+   * one, and the model was chosen against capabilities the new length can
+   * change. Doing it here makes the stale code visibly dead the moment the
+   * scene moves, which is what the owner is told.
+   *
+   * It is NOT what makes the old code unpayable. This is a proactive write and
+   * a write can fail, so a failure is logged and the revision still completes —
+   * the owner keeps the scene they asked for. The guarantee lives in the LINE
+   * confirmation gate, which proves a code's frozen storyboard version against
+   * the current one before it reaches anything paid, and refuses when it
+   * cannot. Both exist on purpose: this one keeps the conversation honest, that
+   * one keeps the money safe.
+   */
+  private async retirePaidStateForNewVersion(
+    claim: StoryboardAccessClaim,
+    active: ActiveStoryboardContext,
+    conversationId: string | undefined,
+  ): Promise<void> {
+    const step = await this.readModelSelection(claim);
+    if (step) {
+      await this.clearModelSelection(claim, step);
+    }
+    const runtime = this.videoRuntime();
+    if (!runtime?.supersedeStoryboardDrafts || !conversationId) {
+      return;
+    }
+    await runtime
+      .supersedeStoryboardDrafts({
+        accountId: claim.accountId,
+        conversationId,
+        ownerSenderId: claim.ownerSenderId,
+        storyboardId: active.storyboardId,
+      })
+      .catch((error: unknown) => {
+        this.deps.logger?.warn("storyboard_supersede_drafts_failed", {
+          reason: error instanceof Error ? error.message : "unknown",
+        });
+        return [] as readonly string[];
+      });
+  }
+
   /** Retires the session in place; the shared store offers no delete. */
   private async closeDirector(
     claim: StoryboardAccessClaim,
@@ -710,6 +874,34 @@ export class CloudbathStoryboardLineRouter {
       storyboardDirectorKey(claim),
       closeDirectorSession(session, new Date(this.deps.now()).toISOString()),
     );
+  }
+
+  /**
+   * This storyboard's current version number, for the LINE confirmation gate.
+   *
+   * The gate refuses any payable code whose frozen version is not this one, so
+   * every answer here is load-bearing: undefined must mean "could not be
+   * established" and never "unchanged". The claim is rebuilt from the trusted
+   * triple and the store checks it, so one owner can never resolve another's
+   * storyboard — and nothing here writes, retires or mints anything.
+   */
+  async readStoryboardVersionNumber(request: {
+    accountId: string;
+    conversationId: string;
+    ownerSenderId: string;
+    storyboardId: string;
+  }): Promise<number | undefined> {
+    const lineGroupId = nativeGroupId(request.conversationId);
+    const accountId = request.accountId.trim();
+    const ownerSenderId = request.ownerSenderId.trim();
+    const storyboardId = request.storyboardId.trim();
+    if (!lineGroupId || !accountId || !ownerSenderId || !storyboardId) {
+      return undefined;
+    }
+    const version = await this.deps.store
+      .readLatest({ storyboardId, claim: { accountId, lineGroupId, ownerSenderId } })
+      .catch(() => undefined);
+    return version?.versionNumber;
   }
 
   /**
@@ -1216,16 +1408,43 @@ export class CloudbathStoryboardLineRouter {
       // The referent is the storyboard this owner is on. If it aged out between
       // resolution and here, there is nothing to revise and the turn is left
       // alone rather than being applied to whatever comes next.
-      return active
-        ? {
-            handled: true,
-            text: await this.naturalEdit(
-              { kind: "natural_edit", request: route.request },
-              claim,
-              active,
-            ),
-          }
-        : undefined;
+      if (!active) {
+        return undefined;
+      }
+      // A document-level change — a new length, a new environment, sound on or
+      // off — is read by the SAME parser the plainly-worded path uses, and
+      // applied by the same handler. Going straight to the beat planner meant
+      // "เอาเป็น 15 วิ" produced a re-planned 8-second scene: a new length was
+      // never a beat instruction, so nothing on that path could apply it.
+      const knownCharacterNames = await this.deps.resolver
+        .listCharacterNames(claim)
+        .catch(() => [] as readonly string[]);
+      const before = await this.deps.store
+        .readLatest({ storyboardId: active.storyboardId, claim })
+        .catch(() => undefined);
+      // The marker-gated parser first, for every shape it already knows. Then a
+      // named length: the general parser demands a replacement marker
+      // ("ขอ 15 วิแทน") to tell a revision from a fresh request, and a
+      // contextually resolved turn has already settled that — the referent IS
+      // this storyboard — so a length that differs from the current one is the
+      // change being asked for, however it was phrased.
+      const named = readRevisionDuration(route.request);
+      const revision =
+        parseStoryboardRevision({ content: route.request, knownCharacterNames }) ??
+        (named !== undefined && named !== before?.document.durationSeconds
+          ? ({ kind: "duration", durationSeconds: named } as const)
+          : undefined);
+      const text = revision
+        ? await this.revise(revision, claim, active)
+        : await this.naturalEdit({ kind: "natural_edit", request: route.request }, claim, active);
+      const after = await this.retireIfVersionAdvanced({
+        claim,
+        active,
+        conversationId: context.conversationId,
+        beforeVersionNumber: before?.versionNumber,
+      });
+      this.logContextualRoute(route, text, after);
+      return { handled: true, text };
     }
     return {
       handled: true,

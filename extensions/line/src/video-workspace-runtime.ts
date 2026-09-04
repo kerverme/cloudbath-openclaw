@@ -24,6 +24,21 @@ export type LineVideoWorkspaceRuntime = {
     ownerSenderId: string;
     overrides?: LineRequoteOverrides;
   }): Promise<LineRequoteResult>;
+  /**
+   * The storyboard's CURRENT version number, owner-scoped, or undefined when it
+   * cannot be established.
+   *
+   * A read, never a write: the confirmation gate calls it to prove that a
+   * payable code still quotes the scene that exists now. Undefined therefore
+   * has to mean "not proven" — no such storyboard, not this owner's, or the
+   * service could not answer — because the gate turns it into a refusal.
+   */
+  readStoryboardVersionNumber(params: {
+    accountId: string;
+    conversationId: string;
+    ownerSenderId: string;
+    storyboardId: string;
+  }): Promise<number | undefined>;
 };
 
 const runtimeStore = createPluginRuntimeStore<LineVideoWorkspaceRuntime>({

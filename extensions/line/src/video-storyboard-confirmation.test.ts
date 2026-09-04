@@ -299,6 +299,15 @@ function harness(
       await draftScopes.lookup(ugcDraftScopeKey(draftId)),
     consumeUgcDraftScope: async (draftId: string) =>
       await draftScopes.consume(ugcDraftScopeKey(draftId)),
+    // The authoritative storyboard-currency read the gate proves a payable
+    // code against. Answered by the real router below, over the real seam:
+    // stubbing it would stub out the very guard these tests rely on.
+    readStoryboardVersionNumber: async (request: {
+      accountId: string;
+      conversationId: string;
+      ownerSenderId: string;
+      storyboardId: string;
+    }) => await storyboardRouter.readStoryboardVersionNumber(request),
   };
 
   const storyboardRouter = new CloudbathStoryboardLineRouter({

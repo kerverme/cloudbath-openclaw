@@ -304,6 +304,28 @@ export default defineBundledChannelEntry({
           conversationId,
         });
       },
+      supersedeStoryboardDrafts: async ({
+        accountId,
+        conversationId,
+        ownerSenderId,
+        storyboardId,
+      }) => {
+        const [{ supersedeLineVideoDraftsForStoryboard }, { buildLineVideoConversationKey }] =
+          await Promise.all([
+            import("./src/video-draft-store.js"),
+            import("./src/video-model-preference.js"),
+          ]);
+        const conversationKey = buildLineVideoConversationKey({ accountId, conversationId });
+        return conversationKey
+          ? await supersedeLineVideoDraftsForStoryboard({
+              store: videoDraftStore,
+              accountId,
+              conversationKey,
+              ownerSenderId,
+              storyboardId,
+            })
+          : [];
+      },
       prepareStoryboardVideoDraft: async (request) => {
         const [{ prepareLineStoryboardVideoDraft }, { resolveLineAccount }, { getRuntimeConfig }] =
           await Promise.all([
