@@ -63,7 +63,12 @@ import {
   type StoryboardRequoteOverrides,
   type StoryboardRequoteResult,
 } from "./storyboard-requote.js";
-import type { StoryboardCastAddition, StoryboardDocumentRevision } from "./storyboard-revision.js";
+import {
+  parseStoryboardRevision,
+  readRevisionDuration,
+  type StoryboardCastAddition,
+  type StoryboardDocumentRevision,
+} from "./storyboard-revision.js";
 import { activeStoryboardKey, StoryboardStore } from "./storyboard-store.js";
 import {
   STORYBOARD_ASPECT_RATIOS,
@@ -701,6 +706,79 @@ export class CloudbathStoryboardLineRouter {
     }
   }
 
+  /**
+   * What a contextual route actually produced.
+   *
+   * The production incident this exists for was a turn that reached here,
+   * completed, and reached the owner as silence — diagnosable only by the
+   * generic "no queued reply payloads" warning much later. Text is measured,
+   * never echoed: a scene prompt is owner content and has no place in a log.
+   */
+  private logContextualRoute(
+    route: StoryboardContextualRoute,
+    text: string | undefined,
+    version: StoryboardVersion | undefined,
+  ): void {
+    const fields = {
+      routeKind: route.kind,
+      handled: true,
+      replyTextPresent: Boolean(text?.trim()),
+      replyTextLength: text?.length ?? 0,
+      ...(version
+        ? {
+            storyboardVersion: version.versionNumber,
+            durationSeconds: version.document.durationSeconds,
+          }
+        : {}),
+    };
+    if (fields.replyTextPresent) {
+      this.deps.logger?.warn("storyboard_contextual_route_handled", fields);
+      return;
+    }
+    // Claiming the turn with nothing to say is the failure mode itself, so it
+    // is reported HERE, naming the route, rather than surfacing downstream as
+    // an unattributed empty dispatch.
+    this.deps.logger?.warn("storyboard_contextual_route_empty_reply", fields);
+  }
+
+  /**
+   * Retires everything the PREVIOUS version had been priced and coded for.
+   *
+   * A new version means the owner is looking at different content, so the
+   * outstanding `VIDEO ####` must stop being payable and the frozen model step
+   * must go: a code minted for an 8-second scene may not execute a 15-second
+   * one, and the model was chosen against capabilities the new length can
+   * change. Both are cleared here rather than lazily at confirmation time, so
+   * the stale code is dead the moment the scene moves.
+   */
+  private async retirePaidStateForNewVersion(
+    claim: StoryboardAccessClaim,
+    active: ActiveStoryboardContext,
+    conversationId: string | undefined,
+  ): Promise<void> {
+    const step = await this.readModelSelection(claim);
+    if (step) {
+      await this.clearModelSelection(claim, step);
+    }
+    const runtime = this.videoRuntime();
+    if (!runtime?.supersedeStoryboardDrafts || !conversationId) {
+      return;
+    }
+    await runtime
+      .supersedeStoryboardDrafts({
+        accountId: claim.accountId,
+        conversationId,
+        ownerSenderId: claim.ownerSenderId,
+        storyboardId: active.storyboardId,
+      })
+      .catch((error: unknown) => {
+        this.deps.logger?.warn("storyboard_supersede_drafts_failed", {
+          reason: error instanceof Error ? error.message : "unknown",
+        });
+        return [] as readonly string[];
+      });
+  }
+
   /** Retires the session in place; the shared store offers no delete. */
   private async closeDirector(
     claim: StoryboardAccessClaim,
@@ -1216,16 +1294,45 @@ export class CloudbathStoryboardLineRouter {
       // The referent is the storyboard this owner is on. If it aged out between
       // resolution and here, there is nothing to revise and the turn is left
       // alone rather than being applied to whatever comes next.
-      return active
-        ? {
-            handled: true,
-            text: await this.naturalEdit(
-              { kind: "natural_edit", request: route.request },
-              claim,
-              active,
-            ),
-          }
-        : undefined;
+      if (!active) {
+        return undefined;
+      }
+      // A document-level change — a new length, a new environment, sound on or
+      // off — is read by the SAME parser the plainly-worded path uses, and
+      // applied by the same handler. Going straight to the beat planner meant
+      // "เอาเป็น 15 วิ" produced a re-planned 8-second scene: a new length was
+      // never a beat instruction, so nothing on that path could apply it.
+      const knownCharacterNames = await this.deps.resolver
+        .listCharacterNames(claim)
+        .catch(() => [] as readonly string[]);
+      const before = await this.deps.store
+        .readLatest({ storyboardId: active.storyboardId, claim })
+        .catch(() => undefined);
+      // The marker-gated parser first, for every shape it already knows. Then a
+      // named length: the general parser demands a replacement marker
+      // ("ขอ 15 วิแทน") to tell a revision from a fresh request, and a
+      // contextually resolved turn has already settled that — the referent IS
+      // this storyboard — so a length that differs from the current one is the
+      // change being asked for, however it was phrased.
+      const named = readRevisionDuration(route.request);
+      const revision =
+        parseStoryboardRevision({ content: route.request, knownCharacterNames }) ??
+        (named !== undefined && named !== before?.document.durationSeconds
+          ? ({ kind: "duration", durationSeconds: named } as const)
+          : undefined);
+      const text = revision
+        ? await this.revise(revision, claim, active)
+        : await this.naturalEdit({ kind: "natural_edit", request: route.request }, claim, active);
+      const after = await this.deps.store
+        .readLatest({ storyboardId: active.storyboardId, claim })
+        .catch(() => undefined);
+      // Only when the scene actually moved: a failed or no-op revision leaves
+      // the owner's existing code alone.
+      if (after && after.versionNumber !== before?.versionNumber) {
+        await this.retirePaidStateForNewVersion(claim, active, context.conversationId);
+      }
+      this.logContextualRoute(route, text, after);
+      return { handled: true, text };
     }
     return {
       handled: true,

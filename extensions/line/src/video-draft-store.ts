@@ -179,7 +179,13 @@ export async function supersedeLineVideoDraftsForStoryboard(params: {
   conversationKey: string;
   ownerSenderId: string;
   storyboardId: string;
-  supersededByDraftId: string;
+  /**
+   * The draft that replaces them, when one exists. Omitted when the storyboard
+   * itself moved on: a revised scene retires its outstanding code immediately,
+   * long before any replacement is quoted, so the owner cannot pay for content
+   * they have already changed.
+   */
+  supersededByDraftId?: string;
   now?: () => number;
 }): Promise<readonly string[]> {
   const now = (params.now ?? Date.now)();
@@ -201,7 +207,11 @@ export async function supersedeLineVideoDraftsForStoryboard(params: {
     // could still be looking at the code it replaced.
     await params.store.register(
       draft.draftId,
-      { ...draft, status: "superseded", supersededByDraftId: params.supersededByDraftId },
+      {
+        ...draft,
+        status: "superseded",
+        ...(params.supersededByDraftId ? { supersededByDraftId: params.supersededByDraftId } : {}),
+      },
       { ttlMs: Math.max(1, draft.expiresAt - now) },
     );
     superseded.push(draft.draftId);

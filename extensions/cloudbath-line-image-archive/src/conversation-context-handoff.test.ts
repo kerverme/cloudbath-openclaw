@@ -188,9 +188,11 @@ describe("A: a deictic request that carries a change", () => {
     expect(after.document.cast.map((member) => member.characterId)).toEqual(
       before.document.cast.map((member) => member.characterId),
     );
-    expect(JSON.stringify(after.document.beats)).toContain("REVISED-ENDING");
-    // The owner's own words reached the planner; nothing composed a request.
-    expect(planner.editRequests.join("\n")).toContain("เอาแบบเมื่อกี้ แต่เปลี่ยนเป็นกลางคืน");
+    // "เปลี่ยนเป็นกลางคืน" is a document-level change, so the route hands it to
+    // the SAME environment revision the plainly-worded path uses rather than
+    // re-planning beats around it. That is what the owner asked for.
+    expect(after.document.environment).toBe("กลางคืน");
+    expect(planner.editRequests).toEqual([]);
     expect(paid.calls).toBe(0);
   });
 });

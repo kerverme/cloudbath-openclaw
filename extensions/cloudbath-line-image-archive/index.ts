@@ -659,10 +659,18 @@ export default definePluginEntry({
       // has no active storyboard. Once a storyboard IS active it also answers
       // bare time-range edits; an explicit `PREVIS <range> ...` still reaches
       // the previs router below.
-      const storyboardResult = await runtime.storyboardLineRouter?.handleBeforeDispatch(
+      let storyboardResult = await runtime.storyboardLineRouter?.handleBeforeDispatch(
         routedEvent,
         ctx,
       );
+      // A rewrite is a HINT, not a replacement. If the handler it was aimed at
+      // declines — its frozen step went stale, the menu it belonged to is gone
+      // — the owner's own words must still get their turn. Without this the
+      // substituted text simply vanished and the turn ended in silence, which
+      // is exactly how a "make it 15 seconds" reached nobody.
+      if (!storyboardResult && conversation?.kind === "rewrite") {
+        storyboardResult = await runtime.storyboardLineRouter?.handleBeforeDispatch(event, ctx);
+      }
       if (storyboardResult) {
         // Whatever the handler just did, the question now open is read back out
         // of ITS stores — never out of the reply text — and its controls travel

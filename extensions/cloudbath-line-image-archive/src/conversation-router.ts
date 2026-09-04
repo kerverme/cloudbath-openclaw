@@ -620,12 +620,14 @@ function matchQuestionChoice(
       return picked;
     }
   }
+  // A number the owner said is content the answer has to account for. If this
+  // question has no choice that MEANS that number, the message is not an answer
+  // to it at all — "เอาเป็น 15 วิ" while a model question is open is a duration
+  // request, not the agreement its "เอา" would otherwise look like. Declining
+  // here is what stops a substantive message being collapsed into a bare choice.
   const valued = readSpokenValue(utterance.text);
   if (valued !== undefined) {
-    const match = question.choices.find((choice) => choice.value === valued);
-    if (match) {
-      return match;
-    }
+    return question.choices.find((choice) => choice.value === valued);
   }
   // "keep what we already have" only means something when the question proposed
   // changing something; against "is there speech?" it is not an answer at all.
