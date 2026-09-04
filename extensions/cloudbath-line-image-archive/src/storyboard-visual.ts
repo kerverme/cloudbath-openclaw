@@ -104,6 +104,46 @@ export type StoryboardVisualServiceDeps = Readonly<{
   };
 }>;
 
+/**
+ * Whether a stored row is a real per-shot artifact this version can be judged on.
+ *
+ * Purpose is load-bearing, not decoration. A contact sheet is a DERIVED review
+ * preview of shots that already exist, and a generic image the assistant
+ * happened to attach is neither — treating either as a shot would let a
+ * storyboard look ready with no authoritative visual behind it, which is the
+ * exact separation this predicate closes. Scope is re-checked here too, so a
+ * row written for one owner's storyboard can never satisfy another's.
+ */
+function isAuthoritativeShotArtifact(
+  artifact: StoryboardVisualArtifact | undefined,
+): artifact is StoryboardVisualArtifact {
+  return (
+    artifact?.generationPurpose === "storyboard-shot" &&
+    artifact.status === "completed" &&
+    Number.isInteger(artifact.shotIndex) &&
+    artifact.shotIndex >= 1
+  );
+}
+
+/**
+ * A contact sheet as this flow is allowed to use it: a review preview DERIVED
+ * from artifacts that already exist, listed newest-shot-last.
+ *
+ * Returned only for a `ready` status on purpose. A sheet built from a partial
+ * set would show the owner a complete-looking storyboard whose shots are not
+ * all there, and this flow has exactly one definition of complete.
+ */
+export function deriveContactSheetPreview(
+  status: StoryboardVisualStatus,
+): Readonly<{ kind: "derived_preview"; shotArtifactIds: readonly string[] }> | undefined {
+  return status.kind === "ready"
+    ? Object.freeze({
+        kind: "derived_preview" as const,
+        shotArtifactIds: Object.freeze(status.artifacts.map((artifact) => artifact.artifactId)),
+      })
+    : undefined;
+}
+
 function requireAccess(version: StoryboardVersion, claim: StoryboardAccessClaim): void {
   if (
     version.accountId !== claim.accountId ||
@@ -146,7 +186,7 @@ export class StoryboardVisualService {
           ),
         ),
       )
-    ).filter((artifact): artifact is StoryboardVisualArtifact => Boolean(artifact));
+    ).filter(isAuthoritativeShotArtifact);
     if (artifacts.length === 0) {
       return params.version.versionNumber > 1
         ? { kind: "regeneration_required" }

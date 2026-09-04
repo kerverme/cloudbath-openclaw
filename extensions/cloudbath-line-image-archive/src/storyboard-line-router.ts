@@ -12,8 +12,14 @@
  * Draft performs no provider call and consumes no `VIDEO ####` code.
  */
 
+import { classifyConversationUtterance } from "./conversation-utterance.js";
 import type { PrevisProjectResolver } from "./previs-line-router.js";
 import { parseStoryboardAudioIntent } from "./storyboard-audio.js";
+import {
+  resolveStoryboardAuthorization,
+  STORYBOARD_PROJECT_CAPABILITY_REPLY,
+  type StoryboardAuthorization,
+} from "./storyboard-authorization.js";
 import { compileStoryboardDocument } from "./storyboard-compiler.js";
 import {
   isStoryboardConfirmation,
@@ -85,7 +91,11 @@ import {
   prepareStoryboardFinalVideoDraft,
   type PrepareFinalVideoDraftParams,
 } from "./storyboard-video-plan.js";
-import { storyboardVisualUrl, type StoryboardVisualService } from "./storyboard-visual.js";
+import {
+  deriveContactSheetPreview,
+  storyboardVisualUrl,
+  type StoryboardVisualService,
+} from "./storyboard-visual.js";
 import type {
   AsyncKeyedStore,
   FrozenUgcVideoScope,
@@ -118,6 +128,22 @@ export type StoryboardContextualRoute =
   | Readonly<{
       kind: "revise_active_storyboard";
       request: string;
+      referent: ResolvedStoryboardReferent;
+    }>
+  /** Render the resolved storyboard as authoritative per-shot artifacts. */
+  | Readonly<{
+      kind: "generate_storyboard_visuals";
+      referent: ResolvedStoryboardReferent;
+    }>
+  /**
+   * "Carry on toward the video" for the resolved storyboard.
+   *
+   * Deliberately not a synonym for confirming: it advances to whatever step is
+   * actually missing, which before visuals exist is rendering them, never a
+   * paid draft.
+   */
+  | Readonly<{
+      kind: "continue_toward_video";
       referent: ResolvedStoryboardReferent;
     }>
   | Readonly<{
@@ -255,6 +281,8 @@ const REPLY = {
   directorUnavailable: "ยังไม่สามารถรับคำขอแบบสนทนาได้ กรุณาระบุความยาว เช่น 10 วิ",
   noCompatibleModel:
     "ยังไม่มีโมเดลที่รองรับ Storyboard นี้ได้ (ความยาว/เสียง/ตัวละครอ้างอิง) กรุณาปรับ Storyboard",
+  /** A video request this flow will own, once it knows who is in the scene. */
+  castNeeded: "ได้เลย เริ่มทำ Storyboard ให้ครับ\nจะใช้ตัวละครไหนในคลิปนี้? (เช่น F99)",
 } as const;
 
 /**
@@ -445,8 +473,8 @@ export class CloudbathStoryboardLineRouter {
     if (!claim) {
       return undefined;
     }
-    const binding = await this.deps.registry.lookup(claim.accountId, claim.lineGroupId);
-    if (binding?.policyId !== "UGC" || binding.boundByOwnerId !== claim.ownerSenderId) {
+    const authorization = await this.authorize(claim);
+    if (authorization.kind === "denied") {
       return undefined;
     }
 
@@ -473,15 +501,22 @@ export class CloudbathStoryboardLineRouter {
         return { handled: true, text: answered };
       }
     }
-    if (
-      /^(?:สร้าง|ทำ|ทำใหม่).*(?:visual\s*storyboard|ภาพ.*storyboard|ภาพ.*ช็อต)/iu.test(
-        event.content ?? "",
-      )
-    ) {
+    // Asking to see the work as images, or to carry on with it, is a WAY OF
+    // SPEAKING rather than a phrase: the class comes from the shared utterance
+    // classifier, and the referent is this owner's active storyboard. The
+    // conversation layer routes the same two classes when it resolves them
+    // first; this path is what answers when no semantic resolver is wired.
+    const utterance = classifyConversationUtterance(event.content ?? "");
+    if (utterance?.visualRequest || utterance?.continuation) {
       const active = await this.readActive(claim);
-      return active
-        ? { handled: true, text: await this.generateVisualStoryboard(claim, active) }
-        : undefined;
+      if (active) {
+        return {
+          handled: true,
+          text: utterance.visualRequest
+            ? await this.generateVisualStoryboard(claim, active)
+            : await this.continueTowardVideo(claim, active),
+        };
+      }
     }
     if (isStoryboardConfirmation(event.content ?? "")) {
       const confirmed = await this.confirmStoryboard(claim);
@@ -492,12 +527,38 @@ export class CloudbathStoryboardLineRouter {
       .listCharacterNames(claim)
       .catch(() => [] as readonly string[]);
     const intent = parseStoryboardIntent({ content: event.content ?? "", knownCharacterNames });
+    const active = await this.readActive(claim);
+    // An owner asking for a video is storyboard-first work, always. Nothing
+    // below can open a storyboard without a cast, and the parser's own
+    // create/director paths handle the requests that already name one — so the
+    // rest are claimed HERE and told what is missing. Falling through is what
+    // sent them to a single-shot legacy draft that skipped the storyboard.
+    // An owner asking for a video is storyboard-first work, always. The parser
+    // opens a storyboard only when the request already names a cast, and every
+    // other reading below needs an active one — so a video request that fits
+    // neither used to fall through, and a single-shot legacy draft answered it.
+    const opensStoryboard = intent?.kind === "create" || intent?.kind === "director_open";
+    if (!opensStoryboard && utterance?.videoRequest) {
+      if (!active) {
+        return {
+          handled: true,
+          text: authorization.projectCapable
+            ? REPLY.castNeeded
+            : STORYBOARD_PROJECT_CAPABILITY_REPLY,
+        };
+      }
+      // With a scene already open, only a turn the parser has NO reading for is
+      // a continuation. Everything it does recognise — "สร้างวิดีโอ" prepares
+      // the Final Video Draft — keeps its own shipped path.
+      if (!intent) {
+        return { handled: true, text: await this.continueTowardVideo(claim, active) };
+      }
+    }
     if (!intent) {
       return undefined;
     }
     // An edit, revision or draft request without an active storyboard is not
     // ours: it must fall through so the existing previs routing keeps working.
-    const active = await this.readActive(claim);
     if (intent.kind !== "create" && intent.kind !== "director_open" && !active) {
       return undefined;
     }
@@ -593,9 +654,43 @@ export class CloudbathStoryboardLineRouter {
         artifactId: artifact.artifactId,
       });
     }
-    return status.kind === "ready"
-      ? `Visual Storyboard v${version.versionNumber} พร้อมแล้ว (${status.artifacts.length} ช็อต)\nยืนยัน Storyboard หรือบอกจุดที่ต้องการแก้`
+    // The review sheet is DERIVED, and only from a complete set: it summarises
+    // shots that already exist rather than standing in for them. When it cannot
+    // be derived the storyboard is not ready, and the reply says which shots
+    // are missing instead of claiming a version the owner cannot confirm.
+    const preview = deriveContactSheetPreview(status);
+    return preview
+      ? `Visual Storyboard v${version.versionNumber} พร้อมแล้ว (${preview.shotArtifactIds.length} ช็อต)\nยืนยัน Storyboard หรือบอกจุดที่ต้องการแก้`
       : `Visual Storyboard v${version.versionNumber} สำเร็จบางส่วน ลองทำภาพช็อต ${status.failedShotIndexes.join(", ")} ใหม่`;
+  }
+
+  /**
+   * Advances the storyboard by whatever step is actually missing.
+   *
+   * "ทำต่อ" names nothing, so it must never be read as consent to the NEXT
+   * thing in the happy path — least of all a paid one. Missing visuals are
+   * rendered; a complete storyboard is handed to the existing content
+   * confirmation, which is free and still requires the owner's own word before
+   * a model is chosen. No branch here reaches a quote or a code.
+   */
+  private async continueTowardVideo(
+    claim: StoryboardAccessClaim,
+    active: ActiveStoryboardContext,
+  ): Promise<string> {
+    const version = await this.deps.store
+      .readLatest({ storyboardId: active.storyboardId, claim })
+      .catch(() => undefined);
+    if (!version) {
+      return REPLY.missingVersion;
+    }
+    const visuals = this.deps.visuals
+      ? await this.deps.visuals.status({ version, claim })
+      : undefined;
+    if (visuals && visuals.kind !== "ready") {
+      return await this.generateVisualStoryboard(claim, active);
+    }
+    await this.touchActive(active);
+    return `Storyboard v${version.versionNumber} พร้อมภาพครบแล้ว\nพิมพ์ “ยืนยัน Storyboard” เพื่อไปเลือก Model ต่อ`;
   }
 
   /**
@@ -654,6 +749,13 @@ export class CloudbathStoryboardLineRouter {
     intent: Extract<StoryboardIntent, { kind: "create" }>,
     claim: StoryboardAccessClaim,
   ): Promise<string> {
+    // Casting and project freezing are the steps that genuinely need the UGC
+    // workspace, so this is where its absence is reported — not at the door,
+    // where it used to cost the owner the whole storyboard flow.
+    const authorization = await this.authorize(claim);
+    if (authorization.kind !== "owner_scoped" || !authorization.projectCapable) {
+      return STORYBOARD_PROJECT_CAPABILITY_REPLY;
+    }
     // A named-but-unknown character fails closed: dropping it silently would
     // recast the scene without the owner realising.
     if (intent.unknownNames[0]) {
@@ -1469,6 +1571,20 @@ export class CloudbathStoryboardLineRouter {
     }
   }
 
+  /**
+   * Ownership first, project capability second.
+   *
+   * Storyboard-first is the owner's default video flow in every conversation
+   * they own; the UGC workspace only decides whether Character Library casting
+   * and project freezing are reachable, which is asked at those steps instead.
+   */
+  private async authorize(claim: StoryboardAccessClaim): Promise<StoryboardAuthorization> {
+    return await resolveStoryboardAuthorization({
+      claim,
+      lookup: (accountId, groupId) => this.deps.registry.lookup(accountId, groupId),
+    });
+  }
+
   private trustedClaim(
     event: StoryboardDispatchEvent,
     context: StoryboardDispatchContext,
@@ -1528,9 +1644,25 @@ export class CloudbathStoryboardLineRouter {
     if (!claim) {
       return undefined;
     }
-    const binding = await this.deps.registry.lookup(claim.accountId, claim.lineGroupId);
-    if (binding?.policyId !== "UGC" || binding.boundByOwnerId !== claim.ownerSenderId) {
+    if ((await this.authorize(claim)).kind === "denied") {
       return undefined;
+    }
+    if (route.kind === "generate_storyboard_visuals" || route.kind === "continue_toward_video") {
+      const active = await this.readActive(claim);
+      // The referent the conversation layer resolved must still be the work
+      // this owner is on. A mismatch means the scene moved between resolution
+      // and here, and rendering the other one is exactly the wrong-referent
+      // failure the resolved referent exists to prevent.
+      if (!active || active.storyboardId !== route.referent.storyboardId) {
+        return undefined;
+      }
+      return {
+        handled: true,
+        text:
+          route.kind === "generate_storyboard_visuals"
+            ? await this.generateVisualStoryboard(claim, active)
+            : await this.continueTowardVideo(claim, active),
+      };
     }
     if (route.kind === "revise_active_storyboard") {
       const { referent } = route;

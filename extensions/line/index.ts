@@ -22,6 +22,7 @@ import {
   type LineVideoDraft,
 } from "./src/video-draft-store.js";
 import {
+  createLineLegacyVideoDraftGate,
   createLineVideoDraftTool,
   createLineVideoGenerationGuard,
   LINE_VIDEO_DRAFT_TOOL_NAME,
@@ -217,48 +218,57 @@ export default defineBundledChannelEntry({
       const relay = await loadVideoDraftReplyRelay();
       return relay.messageSending(event, ctx);
     });
+    // Storyboard-first is the owner's default video flow, so the legacy draft
+    // tool exists for one turn only when the owner asked for it by marker.
+    const legacyVideoDraftGate = createLineLegacyVideoDraftGate();
     api.on("before_dispatch", async (event, ctx) => {
+      legacyVideoDraftGate.beginTurn(event, ctx);
       const relay = await loadVideoDraftReplyRelay();
       relay.beginTurn(event, ctx);
     });
 
     api.registerTool(
       (ctx) =>
-        createLineVideoDraftTool({
-          messageChannel: ctx.messageChannel,
-          senderIsOwner: ctx.senderIsOwner,
-          requesterSenderId: ctx.requesterSenderId,
-          sessionId: ctx.sessionId,
-          nativeConversationId: ctx.nativeChannelId,
-          sessionKey: ctx.sessionKey,
-          // Awaited inside execute(): the relay must hold the text before the
-          // tool returns, or the model's reply could reach the outbound hook
-          // first and ship the paraphrase.
-          recordDeterministicText: async (entry) => {
-            const relay = await loadVideoDraftReplyRelay();
-            relay.record(entry);
-          },
-          accountId: ctx.agentAccountId,
-          deliveryTo: ctx.deliveryContext?.to,
-          cfg: ctx.config,
-          draftStore: videoDraftStore,
-          preferenceStore: videoModelPreferenceStore,
-          activeJobLockStore: videoActiveJobLockStore,
-          // No resolveApiKey override: the tool resolves OpenRouter credentials
-          // through the canonical provider-auth path, matching the LINE model
-          // and video-model switch routers. ctx.resolveApiKeyForProvider is
-          // deliberately NOT used -- it only reads saved auth profiles, so a
-          // deployment holding OpenRouter credentials in env or config got
-          // undefined from it and the draft failed as an auth error. Both
-          // context fields below feed diagnostics only.
-          hasProviderAuth: ctx.hasAuthForProvider,
-          contextApiKeyResolverAvailable: typeof ctx.resolveApiKeyForProvider === "function",
-        }),
-      // Non-optional: the owner-only draft tool is the ONLY sanctioned path to
-      // a paid LINE video request (the generic video_generate tool is blocked
-      // above), so it must always be present in the LINE agent's default tool
-      // set. Marking it optional would hide it behind tools.allow and leave the
-      // owner's "make me a video" request with no reachable tool at all.
+        // Absent the marker there is no legacy tool in this turn's tool set at
+        // all, so an ordinary "ทำวิดีโอให้หน่อย" cannot be answered with a
+        // single-shot "🎬 Video draft" that bypasses the storyboard flow.
+        !legacyVideoDraftGate.isLegacyTurn(ctx.sessionKey)
+          ? null
+          : createLineVideoDraftTool({
+              messageChannel: ctx.messageChannel,
+              senderIsOwner: ctx.senderIsOwner,
+              requesterSenderId: ctx.requesterSenderId,
+              sessionId: ctx.sessionId,
+              nativeConversationId: ctx.nativeChannelId,
+              sessionKey: ctx.sessionKey,
+              // Awaited inside execute(): the relay must hold the text before the
+              // tool returns, or the model's reply could reach the outbound hook
+              // first and ship the paraphrase.
+              recordDeterministicText: async (entry) => {
+                const relay = await loadVideoDraftReplyRelay();
+                relay.record(entry);
+              },
+              accountId: ctx.agentAccountId,
+              deliveryTo: ctx.deliveryContext?.to,
+              cfg: ctx.config,
+              draftStore: videoDraftStore,
+              preferenceStore: videoModelPreferenceStore,
+              activeJobLockStore: videoActiveJobLockStore,
+              // No resolveApiKey override: the tool resolves OpenRouter credentials
+              // through the canonical provider-auth path, matching the LINE model
+              // and video-model switch routers. ctx.resolveApiKeyForProvider is
+              // deliberately NOT used -- it only reads saved auth profiles, so a
+              // deployment holding OpenRouter credentials in env or config got
+              // undefined from it and the draft failed as an auth error. Both
+              // context fields below feed diagnostics only.
+              hasProviderAuth: ctx.hasAuthForProvider,
+              contextApiKeyResolverAvailable: typeof ctx.resolveApiKeyForProvider === "function",
+            }),
+      // Non-optional so the marker alone decides availability: hiding it behind
+      // tools.allow as well would make an explicitly marked legacy request fail
+      // for a second, invisible reason. The generic video_generate tool stays
+      // blocked above, and the paid trigger is unchanged either way — only the
+      // exact `ยืนยัน VIDEO ####` reaches generation.
       { names: [LINE_VIDEO_DRAFT_TOOL_NAME] },
     );
 

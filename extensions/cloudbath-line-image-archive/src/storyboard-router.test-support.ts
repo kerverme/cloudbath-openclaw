@@ -22,6 +22,7 @@ import { isExplicitPrevisRequest } from "./storyboard-intent.js";
 import {
   CloudbathStoryboardLineRouter,
   type StoryboardDedupeStore,
+  type StoryboardLineRouterDeps,
   type StoryboardProjectResolver,
 } from "./storyboard-line-router.js";
 import type { StoryboardPaidDraftRuntime } from "./storyboard-paid-draft-runtime.js";
@@ -33,6 +34,7 @@ import type {
   StoryboardHead,
   StoryboardVersion,
 } from "./storyboard-types.js";
+import type { StoryboardVisualService } from "./storyboard-visual.js";
 import type {
   AsyncKeyedStore,
   FrozenUgcVideoScope,
@@ -165,6 +167,10 @@ export function harness(
     resolverNames?: readonly string[];
     /** Models a 1:1 chat, where the session provably has one human sender. */
     directChat?: boolean;
+    /** Enables authoritative per-shot visuals; absent, the flow has none. */
+    visuals?: StoryboardVisualService;
+    sendVisualImage?: StoryboardLineRouterDeps["sendVisualImage"];
+    publicAssetBaseUrl?: string;
   } = {},
 ) {
   const shared =
@@ -227,6 +233,11 @@ export function harness(
         },
       }
     : baseDedupe;
+  // ONE binding for both routers. They are two halves of the same policy
+  // decision, so a harness that bound them differently could prove a routing
+  // outcome the product cannot actually produce.
+  const binding =
+    options.binding === undefined ? { policyId: "UGC", boundByOwnerId: OWNER } : options.binding;
   const storyboardRouter = new CloudbathStoryboardLineRouter({
     store,
     resolver: shared,
@@ -234,7 +245,7 @@ export function harness(
     drafts,
     director,
     dedupe,
-    registry: { lookup: async () => ({ policyId: "UGC", boundByOwnerId: OWNER }) },
+    registry: { lookup: async () => binding },
     now: () => Date.parse("2026-08-30T10:00:00.000Z"),
     randomId: () => `draft-${(nextDraft += 1)}`,
     paidDraftRuntime: options.paidDraftRuntime ?? null,
@@ -242,11 +253,12 @@ export function harness(
     ...(options.draftScopes ? { draftScopes: options.draftScopes } : {}),
     ...(options.modelSelection ? { modelSelection: options.modelSelection } : {}),
     ...(options.ugcCapabilities ? { ugcCapabilities: options.ugcCapabilities } : {}),
+    ...(options.visuals ? { visuals: options.visuals } : {}),
+    ...(options.sendVisualImage ? { sendVisualImage: options.sendVisualImage } : {}),
+    ...(options.publicAssetBaseUrl ? { publicAssetBaseUrl: options.publicAssetBaseUrl } : {}),
     ...(options.logger ? { logger: options.logger } : {}),
   });
 
-  const binding =
-    options.binding === undefined ? { policyId: "UGC", boundByOwnerId: OWNER } : options.binding;
   const conversationContext = mem<ActiveConversationContext>();
   let nextNonce = 0;
   const conversationRouter = new CloudbathConversationRouter({

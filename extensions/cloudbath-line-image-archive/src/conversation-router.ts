@@ -61,6 +61,7 @@ import {
   classifyConversationUtterance,
   type ConversationUtterance,
 } from "./conversation-utterance.js";
+import { resolveStoryboardAuthorization } from "./storyboard-authorization.js";
 import {
   storyboardModelSelectionKey,
   type StoryboardModelSelectionStore,
@@ -176,8 +177,14 @@ export class CloudbathConversationRouter {
     if (!claim) {
       return { kind: "pass" };
     }
-    const binding = await this.deps.registry.lookup(claim.accountId, claim.lineGroupId);
-    if (binding?.policyId !== "UGC" || binding.boundByOwnerId !== claim.ownerSenderId) {
+    // Ownership decides whether this layer may arbitrate at all; the UGC
+    // workspace only decides whether project-backed capability exists, and is
+    // checked where a project is actually needed.
+    const authorization = await resolveStoryboardAuthorization({
+      claim,
+      lookup: (accountId, groupId) => this.deps.registry.lookup(accountId, groupId),
+    });
+    if (authorization.kind === "denied") {
       return { kind: "pass" };
     }
     const content = event.content ?? "";
@@ -213,6 +220,34 @@ export class CloudbathConversationRouter {
     const namedVideoCode = entities.find((entity) => entity.kind === "video_job");
     if (entities.length > 0 && !namedVideoCode) {
       return { kind: "pass" };
+    }
+
+    // 3. Asking to SEE the work, or to carry on with it, is decided here rather
+    // than by the semantic step. Both classes name nothing, so a standing offer
+    // would otherwise capture them as its own answer — and "ทำต่อ" would freeze
+    // a storyboard whose images do not exist yet. Deterministic, referent-bound,
+    // and reaching only free steps.
+    if (utterance.visualRequest || utterance.continuation) {
+      const referent = stored.activeStoryboardId
+        ? await this.deps.resolveStoryboardReferent?.({
+            storyboardId: stored.activeStoryboardId,
+            claim,
+          })
+        : undefined;
+      if (referent) {
+        const kind = utterance.visualRequest
+          ? ("generate_storyboard_visuals" as const)
+          : ("continue_toward_video" as const);
+        this.deps.logger?.info("contextual_work_route_resolved", {
+          routeKind: kind,
+          resolvedWorkKind: referent.workKind,
+          storyboardId: referent.storyboardId,
+          storyboardVersionNumber: referent.storyboardVersionNumber,
+          resolutionSource: referent.resolvedFrom,
+          referentProven: true,
+        });
+        return { kind: "route", route: { kind, referent } };
+      }
     }
 
     const job = utterance.progressInquiry ? await this.readActiveJob(claim, context) : undefined;

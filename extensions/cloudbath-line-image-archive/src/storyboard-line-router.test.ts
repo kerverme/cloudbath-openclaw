@@ -195,8 +195,16 @@ describe("D. สร้างวิดีโอ prepares a Final Video Draft", ()
     expect(draft.plan.beats.at(-1)!.endSeconds).toBe(15);
   });
 
-  it("is not claimed when the owner has no active storyboard", async () => {
+  it("asks who is in the scene rather than letting the request fall through", async () => {
+    // With no active storyboard there is nothing to draft, but an owner asking
+    // for a video is still storyboard-first work. Passing the turn on is what
+    // let a single-shot legacy "🎬 Video draft" answer it instead.
     const h = harness();
-    expect((await h.dispatch("สร้างวิดีโอ")).source).toBe("model");
+
+    const asked = await h.dispatch("สร้างวิดีโอ");
+
+    expect(asked.source).toBe("storyboard");
+    expect(asked.text).toContain("Storyboard");
+    expect(asked.text).not.toContain("Video draft");
   });
 });
