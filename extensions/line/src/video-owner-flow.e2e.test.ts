@@ -100,6 +100,8 @@ const { resolver } =
 const { ugcDraftScopeKey } = await import("../../cloudbath-line-image-archive/src/ugc-workflow.js");
 const { createLineVideoConfirmationGate } = await import("./video-confirmation.js");
 const { prepareLineStoryboardVideoDraft } = await import("./video-storyboard-draft.js");
+const { supersedeLineVideoDraftsForStoryboard } = await import("./video-draft-store.js");
+const { buildLineVideoConversationKey } = await import("./video-model-preference.js");
 const { listFalStoryboardModels, matchFalStoryboardQuery, offerFalStoryboardDefault } =
   await import("./fal-storyboard-seam.js");
 import type { FalStoryboardConfig } from "./fal-storyboard-seam.js";
@@ -187,7 +189,14 @@ function notionLibraryStub() {
   };
 }
 
-function buildFlow() {
+/**
+ * @param options.supersedeFails simulates the proactive retirement write
+ * failing when the scene changes — the state the fail-closed confirmation gate
+ * exists for. Everything else in the flow stays real.
+ * @param options.storyboardVersionUnreadable simulates the storyboard service
+ * being unable to answer, which must refuse rather than assume "unchanged".
+ */
+function buildFlow(options?: { supersedeFails?: boolean; storyboardVersionUnreadable?: boolean }) {
   const draftStore = mem<LineVideoDraft>();
   const jobStore = mem<LineVideoJob>();
   const activeJobLockStore = mem<LineVideoActiveJobLock>();
@@ -227,6 +236,31 @@ function buildFlow() {
         cfg: falCfg,
         now: () => NOW,
       }),
+    // The real LINE-owned retirement, reached the way the storyboard reaches
+    // it. `supersedeFails` makes the store write throw instead of stubbing the
+    // whole call away, so the failure is the one production would have.
+    supersedeStoryboardDrafts: async (request: {
+      accountId: string;
+      conversationId: string;
+      ownerSenderId: string;
+      storyboardId: string;
+    }) => {
+      if (options?.supersedeFails) {
+        throw new Error("draft store unavailable");
+      }
+      return await supersedeLineVideoDraftsForStoryboard({
+        store: draftStore as never,
+        accountId: request.accountId,
+        conversationKey:
+          buildLineVideoConversationKey({
+            accountId: request.accountId,
+            conversationId: request.conversationId,
+          }) ?? "",
+        ownerSenderId: request.ownerSenderId,
+        storyboardId: request.storyboardId,
+        now: () => NOW,
+      });
+    },
   };
 
   const storyboardRouter = new CloudbathStoryboardLineRouter({
@@ -261,6 +295,19 @@ function buildFlow() {
         await draftScopes.lookup(ugcDraftScopeKey(draftId)),
       consumeUgcDraftScope: async (draftId: string) =>
         await draftScopes.consume(ugcDraftScopeKey(draftId)),
+      // The real Cloudbath-side read, over the real seam: the gate proves a
+      // code's frozen version against the storyboard's own version chain.
+      readStoryboardVersionNumber: async (request: {
+        accountId: string;
+        conversationId: string;
+        ownerSenderId: string;
+        storyboardId: string;
+      }) => {
+        if (options?.storyboardVersionUnreadable) {
+          throw new Error("storyboard store unavailable");
+        }
+        return await storyboardRouter.readStoryboardVersionNumber(request);
+      },
     } as never,
     createNotionLibrary: () => notionLibraryStub() as never,
     scheduleBackgroundWork: (run) => void background.push(run),
@@ -558,5 +605,92 @@ describe("unauthorized LINE video operations fail closed", () => {
 
     expect(ignored).toBeUndefined();
     expect(generateVideoMock).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * The incident this guards against: the owner revises a scene AFTER a paid
+ * code exists, and the proactive retirement of that code fails.
+ *
+ * The retirement is a write, and writes fail. What must never depend on it is
+ * whether the old code can still submit — so these drive the real routers and
+ * the real confirmation gate, with the retirement write throwing, and assert
+ * that the code for the superseded version reaches no provider at all.
+ */
+describe("a revised scene retires its code even when the retirement write fails", () => {
+  it("refuses the old code, submits nothing, and keeps the revised storyboard", async () => {
+    const flow = buildFlow({ supersedeFails: true });
+    const { code } = await driveToDraft(flow, "1");
+    expect(await flow.draftStore.lookup(code)).toMatchObject({
+      durationSeconds: 15,
+      storyboardVersionNumber: 1,
+    });
+
+    // The scene changes. The retirement throws, so the old code is left
+    // exactly as it was: pending, unexpired, owner-bound, and confirmable.
+    const revised = await flow.say("เอาเป็น 30 วิ");
+    expect(revised?.text).toContain("Storyboard v2");
+    expect(revised?.text).toContain("30");
+    expect(await flow.draftStore.lookup(code)).toMatchObject({ status: "pending" });
+
+    const refused = await flow.confirm(code);
+
+    // The one thing that matters: no paid request, by any route.
+    expect(generateVideoMock).not.toHaveBeenCalled();
+    expect(flow.background).toHaveLength(0);
+    expect(await flow.jobStore.entries()).toEqual([]);
+    // A specific answer the owner can act on, not a silent drop or a retry.
+    expect(refused?.handled).toBe(true);
+    expect(refused?.text).toContain("storyboard นี้ถูกแก้ไขแล้ว");
+    expect(refused?.text).toContain("เวอร์ชัน 2");
+    expect(refused?.text).toContain("สร้างวิดีโอ");
+    // Refusing is not consuming: nothing was spent to reject a stale code.
+    expect(await flow.draftStore.lookup(code)).toMatchObject({ status: "pending" });
+  });
+
+  it("still refuses when the storyboard's current version cannot be read", async () => {
+    const flow = buildFlow({ supersedeFails: true, storyboardVersionUnreadable: true });
+    const { code } = await driveToDraft(flow, "1");
+
+    const refused = await flow.confirm(code);
+
+    expect(generateVideoMock).not.toHaveBeenCalled();
+    expect(flow.background).toHaveLength(0);
+    expect(refused?.text).toContain("ตรวจสอบเวอร์ชันล่าสุดของ storyboard ไม่ได้");
+    expect(await flow.draftStore.lookup(code)).toMatchObject({ status: "pending" });
+  });
+
+  it("the revised scene still reaches a new code, and only that code can submit", async () => {
+    const flow = buildFlow();
+    const { code: oldCode } = await driveToDraft(flow, "1");
+
+    // The retirement works here, so the owner is told the old code is dead.
+    const revised = await flow.say("เอาเป็น 30 วิ");
+    expect(revised?.text).toContain("Storyboard v2");
+    expect(await flow.draftStore.lookup(oldCode)).toMatchObject({ status: "superseded" });
+
+    // Re-confirming re-derives a compatible model for the NEW length and
+    // quotes it: 30 seconds is past H3's ceiling, so the price changes with it.
+    const confirmed = await flow.say("ยืนยัน Storyboard");
+    expect(confirmed?.text).toContain("ใช้ Default Model หรือเปลี่ยน Model?");
+    const drafted = await flow.say("ใช้ Default");
+    const newCode = /ยืนยัน VIDEO (\d{4})/u.exec(drafted?.text ?? "")?.[1];
+    expect(newCode).toMatch(/^\d{4}$/u);
+    expect(newCode).not.toBe(oldCode);
+    expect(await flow.draftStore.lookup(newCode!)).toMatchObject({
+      providerRoute: { provider: "fal", modelId: SEEDANCE_25 },
+      durationSeconds: 30,
+      storyboardVersionNumber: 2,
+    });
+
+    // The old code stays dead, and the new one is the only thing that submits.
+    const stale = await flow.confirm(oldCode);
+    expect(stale?.text).toContain("draft นี้ถูกแทนที่แล้ว");
+    expect(generateVideoMock).not.toHaveBeenCalled();
+
+    const started = await flow.confirm(newCode!);
+    expect(started?.text).toContain("เริ่มสร้างวิดีโอแล้ว");
+    await flow.background[0]?.();
+    expect(generateVideoMock).toHaveBeenCalledTimes(1);
   });
 });

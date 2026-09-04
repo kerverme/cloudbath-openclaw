@@ -537,6 +537,10 @@ export default definePluginEntry({
               (await tryGetCloudbathWorkspacePolicyRuntime()?.storyboardLineRouter?.requoteActiveDraft(
                 request,
               )) ?? { kind: "no_active_storyboard" },
+            readStoryboardVersionNumber: async (request) =>
+              await tryGetCloudbathWorkspacePolicyRuntime()?.storyboardLineRouter?.readStoryboardVersionNumber(
+                request,
+              ),
           });
         };
 

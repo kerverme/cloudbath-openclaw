@@ -153,13 +153,19 @@ async function withUnpaidFinalDraft(options: { advanceVersion?: boolean } = {}) 
   const paid = paidRuntime();
   const built = planner();
   const semantic = semanticStub();
-  const logs: Array<{ event: string; fields?: Record<string, unknown> }> = [];
+  const logs: Array<{ level: "info" | "warn"; event: string; fields?: Record<string, unknown> }> =
+    [];
   const h = harness({
     paidDraftRuntime: paid,
     planner: built,
     semanticResolver: semantic,
     modelSelection: mem<StoryboardModelSelectionState>(),
-    logger: { warn: (event, fields) => void logs.push({ event, ...(fields ? { fields } : {}) }) },
+    logger: {
+      info: (event, fields) =>
+        void logs.push({ level: "info", event, ...(fields ? { fields } : {}) }),
+      warn: (event, fields) =>
+        void logs.push({ level: "warn", event, ...(fields ? { fields } : {}) }),
+    },
   });
   await h.dispatch(SCENE);
   await h.dispatch("8 วิ");
@@ -286,6 +292,9 @@ describe("observability the incident lacked", () => {
     await h.dispatch(ASK_15);
 
     const routed = logs.find((entry) => entry.event === "storyboard_contextual_route_handled");
+    // Routed AND answered is ordinary operation. Only the empty-reply case —
+    // the shape of the incident itself — is worth waking anyone for.
+    expect(routed?.level).toBe("info");
     expect(routed?.fields).toMatchObject({
       routeKind: "revise_active_storyboard",
       handled: true,

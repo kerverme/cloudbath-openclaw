@@ -219,6 +219,12 @@ function createWorkspaceRuntime(params: {
     async requoteActiveStoryboardDraft() {
       throw new Error("confirmation gate must never re-quote a storyboard draft");
     },
+    // These drafts carry no storyboard, so the gate never asks. Throwing keeps
+    // that true: a call would mean a non-storyboard code had been put through
+    // the storyboard-currency proof.
+    async readStoryboardVersionNumber() {
+      throw new Error("confirmation gate must not read a version for a non-storyboard draft");
+    },
   };
 }
 

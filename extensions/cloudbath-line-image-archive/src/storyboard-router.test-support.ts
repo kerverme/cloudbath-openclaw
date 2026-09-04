@@ -74,7 +74,7 @@ const lock = (code: string, pageId: string): UgcCharacterLock =>
     frozenAt: "2026-08-30T00:00:00.000Z",
   });
 
-export type LoggerWarn = (event: string, fields?: Record<string, unknown>) => void;
+export type StoryboardLogFn = (event: string, fields?: Record<string, unknown>) => void;
 
 function mem<T>(): AsyncKeyedStore<T> {
   const m = new Map<string, T>();
@@ -130,7 +130,7 @@ type DispatchOutcome = {
 export function harness(
   options: {
     resolver?: StoryboardProjectResolver;
-    logger?: { warn: LoggerWarn };
+    logger?: { info?: StoryboardLogFn; warn: StoryboardLogFn };
     /** Makes the storyboard dedupe write fail, without touching creation. */
     failDedupeWrite?: boolean;
     /**

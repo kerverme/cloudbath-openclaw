@@ -172,6 +172,66 @@ function revalidateFalDraft(
 }
 
 /**
+ * Whether a payable code still quotes the storyboard version that exists now.
+ *
+ * A closed shape rather than a boolean: "the scene was revised" and "currency
+ * could not be established" are different things to tell the owner, and both
+ * have to stop the submission.
+ */
+type StoryboardCurrency =
+  | Readonly<{ kind: "current" }>
+  | Readonly<{ kind: "revised"; versionNumber: number }>
+  | Readonly<{ kind: "unprovable" }>;
+
+/**
+ * Proves a storyboard-backed draft against the storyboard's own version chain.
+ *
+ * This is the authoritative stale-content guard, and it is deliberately NOT the
+ * `superseded` tombstone: that tombstone is written proactively when a scene
+ * changes, and a proactive write can fail. Currency is therefore established
+ * here, on the confirmation turn, before anything paid is reached — so an old
+ * code for a revised scene is refused even when nothing ever retired it.
+ *
+ * Everything that is not a positive match refuses, including a draft minted
+ * before the version was frozen and a storyboard service that cannot answer.
+ * Submitting on an unproven quote is the outcome this exists to prevent.
+ */
+async function verifyStoryboardCurrency(params: {
+  draft: LineVideoDraft;
+  runtime: LineVideoWorkspaceRuntime | null | undefined;
+  accountId: string;
+  conversationId: string;
+  ownerSenderId: string;
+}): Promise<StoryboardCurrency> {
+  const storyboardId = params.draft.storyboardId;
+  if (!storyboardId) {
+    // Not a storyboard draft. The image-to-video tool freezes its own inputs
+    // and has no version chain to drift from.
+    return { kind: "current" };
+  }
+  const runtime = params.runtime;
+  if (!runtime?.readStoryboardVersionNumber) {
+    return { kind: "unprovable" };
+  }
+  const current = await runtime
+    .readStoryboardVersionNumber({
+      accountId: params.accountId,
+      conversationId: params.conversationId,
+      ownerSenderId: params.ownerSenderId,
+      storyboardId,
+    })
+    // A storyboard service that cannot answer has proven nothing. Both a
+    // rejection and a throw land here as "not proven", never as "unchanged".
+    .catch(() => undefined);
+  if (current === undefined) {
+    return { kind: "unprovable" };
+  }
+  return current === params.draft.storyboardVersionNumber
+    ? { kind: "current" }
+    : { kind: "revised", versionNumber: current };
+}
+
+/**
  * Default fal credential check.
  *
  * Goes through core's provider auth exactly as the fal provider itself does,
@@ -286,6 +346,29 @@ export function createLineVideoConfirmationGate(params: {
       };
     }
 
+    // Currency before cost, auth or consume: a code that no longer describes
+    // the owner's scene must be refused before the paid path is entered at all.
+    const workspaceRuntime = params.workspaceRuntime ?? tryGetLineVideoWorkspaceRuntime();
+    const currency = await verifyStoryboardCurrency({
+      draft,
+      runtime: workspaceRuntime,
+      accountId,
+      conversationId,
+      ownerSenderId: senderId,
+    });
+    if (currency.kind === "revised") {
+      return {
+        handled: true,
+        text: `storyboard นี้ถูกแก้ไขแล้ว (ตอนนี้เป็นเวอร์ชัน ${currency.versionNumber}) รหัส VIDEO นี้เป็นของเวอร์ชันก่อนหน้าและใช้ไม่ได้แล้ว\nพิมพ์ "สร้างวิดีโอ" เพื่อรับรหัสใหม่ของเวอร์ชันล่าสุด`,
+      };
+    }
+    if (currency.kind === "unprovable") {
+      return {
+        handled: true,
+        text: 'ตรวจสอบเวอร์ชันล่าสุดของ storyboard ไม่ได้ จึงยกเลิกการยืนยันเพื่อความปลอดภัย\nพิมพ์ "สร้างวิดีโอ" เพื่อสร้าง draft ใหม่',
+      };
+    }
+
     const cfg = getRuntimeConfig();
     const configuredCapabilities = resolveCloudbathUgcCapabilities(cfg);
     const workspacePoliciesConfigured = hasCloudbathLineGroupWorkspacePolicies(cfg);
@@ -297,7 +380,6 @@ export function createLineVideoConfirmationGate(params: {
     if (!videoLibraryTarget) {
       return { handled: true, text: "ยังไม่ได้ตั้งค่า AI Video Library" };
     }
-    const workspaceRuntime = params.workspaceRuntime ?? tryGetLineVideoWorkspaceRuntime();
     if (workspacePoliciesConfigured && !workspaceRuntime) {
       return { handled: true, text: "Workspace policy service is unavailable." };
     }

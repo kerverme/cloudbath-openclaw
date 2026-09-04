@@ -343,6 +343,7 @@ export async function prepareLineStoryboardVideoDraft(
     referenceImageCount,
     estimatedCostUsd: price.amountUsd,
     storyboardId: request.storyboardId,
+    storyboardVersionNumber: request.storyboardVersionNumber,
     ...(request.deliveryTo ? { deliveryTo: request.deliveryTo } : {}),
     ...(deps.now ? { now: deps.now } : {}),
     ...(deps.randomDraftCode ? { randomDraftCode: deps.randomDraftCode } : {}),

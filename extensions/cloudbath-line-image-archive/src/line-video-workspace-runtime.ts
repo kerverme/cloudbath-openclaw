@@ -26,6 +26,21 @@ export type CloudbathLineVideoWorkspaceRuntime = {
     ownerSenderId: string;
     overrides?: StoryboardRequoteOverrides;
   }): Promise<StoryboardRequoteResult>;
+  /**
+   * This storyboard's current version number, owner-scoped, for the LINE
+   * confirmation gate.
+   *
+   * The gate refuses a payable code whose frozen version is not this one, so
+   * undefined must mean "not proven" — no such storyboard, not this owner's, or
+   * unreadable — and never "unchanged". Read-only: it mints nothing, retires
+   * nothing, and touches no draft.
+   */
+  readStoryboardVersionNumber(params: {
+    accountId: string;
+    conversationId: string;
+    ownerSenderId: string;
+    storyboardId: string;
+  }): Promise<number | undefined>;
 };
 
 const runtimeStore = createPluginRuntimeStore<CloudbathLineVideoWorkspaceRuntime>({
@@ -51,6 +66,12 @@ export function installCloudbathLineVideoWorkspaceRuntime(
       ownerSenderId: string;
       overrides?: StoryboardRequoteOverrides;
     }) => Promise<StoryboardRequoteResult>;
+    readStoryboardVersionNumber?: (params: {
+      accountId: string;
+      conversationId: string;
+      ownerSenderId: string;
+      storyboardId: string;
+    }) => Promise<number | undefined>;
   },
 ): void {
   runtimeStore.setRuntime({
@@ -62,6 +83,12 @@ export function installCloudbathLineVideoWorkspaceRuntime(
     },
     async consumeUgcDraftScope(draftId) {
       return await params.ugcScopeStore?.consume(ugcDraftScopeKey(draftId));
+    },
+    async readStoryboardVersionNumber(request) {
+      // Absent, a build without the storyboard flow cannot establish any
+      // version. The gate reads that as unproven and refuses, which is the
+      // right answer: nothing here can vouch for a storyboard-backed code.
+      return await params.readStoryboardVersionNumber?.(request);
     },
     async requoteActiveStoryboardDraft(request) {
       // Absent, a build without the storyboard flow simply has nothing to
