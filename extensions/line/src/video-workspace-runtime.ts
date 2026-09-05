@@ -33,6 +33,19 @@ export type LineVideoWorkspaceRuntime = {
    * has to mean "not proven" — no such storyboard, not this owner's, or the
    * service could not answer — because the gate turns it into a refusal.
    */
+  /**
+   * Resolves a storyboard's opaque first-frame handle to a local media path.
+   *
+   * The media belongs to the storyboard plugin, so only it can turn a handle
+   * into bytes. Undefined means the selection cannot be honoured, and the paid
+   * side refuses rather than quoting image mode it cannot deliver.
+   */
+  resolveStoryboardSourceImage(params: {
+    accountId: string;
+    conversationId: string;
+    ownerSenderId: string;
+    mediaId: string;
+  }): Promise<string | undefined>;
   readStoryboardVersionNumber(params: {
     accountId: string;
     conversationId: string;

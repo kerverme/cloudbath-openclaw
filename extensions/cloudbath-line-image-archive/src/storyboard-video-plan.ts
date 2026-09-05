@@ -405,6 +405,20 @@ async function requestPaidDraft(
       spokenDialogue: storyboardHasSpeech(version.document),
       storyboardId: version.storyboardId,
       storyboardVersionNumber: version.versionNumber,
+      // Carried as the handle the storyboard froze. The paid side resolves it
+      // and refuses the draft if it cannot, so `inputMode` and the provider's
+      // actual inputs are decided by one fact rather than two.
+      ...(version.document.sourceImage
+        ? {
+            // The HANDLE only. When the owner picked it is this side's record of
+            // the conversation, not something the paid side may act on, and the
+            // declared seam shape is the whole contract.
+            sourceImage: {
+              kind: "owner_selected" as const,
+              mediaId: version.document.sourceImage.mediaId,
+            },
+          }
+        : {}),
       // Canonical identity only. A scene name travels with its reference
       // asset instead, so a display name can never stand in for a code here.
       characterLocks: version.characterLocks.map((lock) =>

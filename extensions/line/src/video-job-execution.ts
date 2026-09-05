@@ -172,7 +172,14 @@ async function runProviderGeneration(params: {
   const referenceProvenance =
     references.length > 0
       ? scopeReferences.map((reference) => provenanceForUgcReferenceKind(reference.kind))
-      : inputImages.map(() => "inbound_source_image" as const);
+      : // A storyboard-backed draft's image is the first frame the owner froze
+        // into that scene; a legacy draft's is whatever they attached to the
+        // request. Same file field, genuinely different provenance.
+        inputImages.map(() =>
+          params.draft.storyboardId
+            ? ("first_frame_image" as const)
+            : ("inbound_source_image" as const),
+        );
   log.info("LINE video reference provenance", {
     correlationId: params.jobId,
     jobId: params.jobId,

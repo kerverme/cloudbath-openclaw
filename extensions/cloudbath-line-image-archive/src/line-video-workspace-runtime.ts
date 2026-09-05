@@ -35,6 +35,13 @@ export type CloudbathLineVideoWorkspaceRuntime = {
    * unreadable — and never "unchanged". Read-only: it mints nothing, retires
    * nothing, and touches no draft.
    */
+  /** Resolves a frozen first-frame handle to a local path for the paid side. */
+  resolveStoryboardSourceImage(params: {
+    accountId: string;
+    conversationId: string;
+    ownerSenderId: string;
+    mediaId: string;
+  }): Promise<string | undefined>;
   readStoryboardVersionNumber(params: {
     accountId: string;
     conversationId: string;
@@ -66,6 +73,12 @@ export function installCloudbathLineVideoWorkspaceRuntime(
       ownerSenderId: string;
       overrides?: StoryboardRequoteOverrides;
     }) => Promise<StoryboardRequoteResult>;
+    resolveStoryboardSourceImage?: (params: {
+      accountId: string;
+      conversationId: string;
+      ownerSenderId: string;
+      mediaId: string;
+    }) => Promise<string | undefined>;
     readStoryboardVersionNumber?: (params: {
       accountId: string;
       conversationId: string;
@@ -83,6 +96,11 @@ export function installCloudbathLineVideoWorkspaceRuntime(
     },
     async consumeUgcDraftScope(draftId) {
       return await params.ugcScopeStore?.consume(ugcDraftScopeKey(draftId));
+    },
+    async resolveStoryboardSourceImage(request) {
+      // Absent, no first frame can be honoured — which the paid side turns into
+      // a refusal rather than a text-only submission under an image quote.
+      return await params.resolveStoryboardSourceImage?.(request);
     },
     async readStoryboardVersionNumber(request) {
       // Absent, a build without the storyboard flow cannot establish any

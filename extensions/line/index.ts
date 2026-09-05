@@ -363,6 +363,14 @@ export default defineBundledChannelEntry({
           // Account-scoped, so the budget, fal rates and capability
           // declarations are the ones configured for THIS account.
           cfg: resolveLineAccount({ cfg, accountId: request.accountId }).config,
+          // The first frame lives in the storyboard plugin's media store, so
+          // only it can turn the frozen handle into bytes. Undefined refuses
+          // the draft rather than quoting image mode it cannot deliver.
+          resolveSourceImagePath: async (params) => {
+            const { tryGetLineVideoWorkspaceRuntime } =
+              await import("./src/video-workspace-runtime.js");
+            return await tryGetLineVideoWorkspaceRuntime()?.resolveStoryboardSourceImage(params);
+          },
         });
       },
     });

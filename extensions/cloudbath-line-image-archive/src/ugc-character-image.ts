@@ -362,29 +362,42 @@ export class UgcCharacterImageWorkflow {
     }
   }
 
+  /**
+   * Remembers the image its SENDER just put in this conversation.
+   *
+   * Two questions, deliberately separated. Capture is keyed by the sender we can
+   * attribute from the inbound envelope, because that is what makes "the image I
+   * sent" provable later — for a bound group that sender is already required to
+   * be the bound owner, so the key is unchanged there. Whether this workflow
+   * CLAIMS the turn is still the UGC question: an unbound conversation must fall
+   * through to archiving exactly as before, so it captures and returns false.
+   */
   async rememberImage(job: InboundImageJob): Promise<boolean> {
     const binding = await this.registry.lookup(job.accountId, job.groupId);
-    if (binding?.policyId !== "UGC") {
-      return false;
+    const senderId = job.userId?.trim();
+    const accountId = job.accountId?.trim();
+    const ugcOwned = binding?.policyId === "UGC";
+    if (!senderId || !accountId) {
+      return ugcOwned;
     }
-    if (!job.userId?.trim() || binding.boundByOwnerId !== job.userId.trim()) {
+    if (ugcOwned && binding.boundByOwnerId !== senderId) {
       return true;
     }
-    const scopeKey = latestImageKey(binding.accountId, binding.groupId, binding.boundByOwnerId);
+    const scopeKey = latestImageKey(accountId, job.groupId, senderId);
     let captured: CapturedCharacterMedia;
     try {
       captured = await this.pendingMedia.capture(job.mediaPath, scopeKey);
     } catch (error) {
       this.logger.warn("ugc_character_image_rejected", { reason: this.reasonFor(error) });
-      return true;
+      return ugcOwned;
     }
     let previous: LatestCharacterImage | undefined;
     let accepted = false;
     const next: LatestCharacterImage = {
       version: 2,
-      accountId: binding.accountId,
-      lineGroupId: binding.groupId,
-      ownerSenderId: binding.boundByOwnerId,
+      accountId,
+      lineGroupId: job.groupId,
+      ownerSenderId: senderId,
       durableMediaKey: captured.durableMediaKey,
       contentLength: captured.contentLength,
       sha256: captured.sha256,
@@ -413,14 +426,14 @@ export class UgcCharacterImageWorkflow {
         await this.pendingMedia.delete(captured.durableMediaKey).catch(() => undefined);
       }
       this.logger.warn("ugc_character_image_rejected", { reason: this.reasonFor(error) });
-      return true;
+      return ugcOwned;
     }
     if (!accepted) {
       const activeKeys = await this.activeDurableMediaKeys().catch(() => new Set<string>());
       if (!activeKeys.has(captured.durableMediaKey)) {
         await this.pendingMedia.delete(captured.durableMediaKey).catch(() => undefined);
       }
-      return true;
+      return ugcOwned;
     }
     this.logger.info("ugc_character_image_remembered");
     try {
@@ -435,7 +448,63 @@ export class UgcCharacterImageWorkflow {
         reason: "STATE_REGISTER_FAILED",
       });
     }
-    return true;
+    return ugcOwned;
+  }
+
+  /**
+   * The verified local path of a first frame this owner already selected.
+   *
+   * Re-reads through the same integrity check every other consumer uses — size
+   * and digest must still match the record — so a path only comes back for
+   * bytes that are provably the ones the owner sent. The handle is scoped to
+   * the trusted triple, so one owner's selection can never resolve another's.
+   */
+  async resolveSelectedSourceImagePath(
+    claim: Readonly<{ accountId: string; lineGroupId: string; ownerSenderId: string }>,
+    mediaId: string,
+  ): Promise<string | undefined> {
+    const latest = await this.readLatestInboundImage(claim);
+    if (!latest || latest.durableMediaKey !== mediaId) {
+      return undefined;
+    }
+    try {
+      const media = await this.pendingMedia.read({
+        durableMediaKey: latest.durableMediaKey,
+        scopeKey: latestImageKey(claim.accountId, claim.lineGroupId, claim.ownerSenderId),
+        expectedSize: latest.contentLength,
+        expectedSha256: latest.sha256,
+      });
+      return media.filePath;
+    } catch {
+      this.logger.warn("storyboard_source_image_unresolvable", { reason: "MEDIA_UNREADABLE" });
+      return undefined;
+    }
+  }
+
+  /**
+   * The image this owner explicitly put in this conversation, for the
+   * storyboard's first-frame choice.
+   *
+   * Read-only, and NOT a "most recent image anywhere" lookup: the key is the
+   * trusted triple, so it can only ever return something this same owner sent
+   * in this same conversation. Freshness is the caller's to judge — the record
+   * carries when it arrived, and the storyboard flow refuses a stale one rather
+   * than adopting an image the owner may no longer have in mind.
+   */
+  async readLatestInboundImage(
+    claim: Readonly<{ accountId: string; lineGroupId: string; ownerSenderId: string }>,
+  ): Promise<LatestCharacterImage | undefined> {
+    const record = await this.latestImages.lookup(
+      latestImageKey(claim.accountId, claim.lineGroupId, claim.ownerSenderId),
+    );
+    // Fail closed on every element of the triple: a row written for one owner
+    // must never answer another's selection.
+    return record &&
+      record.accountId === claim.accountId &&
+      record.lineGroupId === claim.lineGroupId &&
+      record.ownerSenderId === claim.ownerSenderId
+      ? record
+      : undefined;
   }
 
   /** Owner-scoped binding for this turn, or null when the flow must not act. */

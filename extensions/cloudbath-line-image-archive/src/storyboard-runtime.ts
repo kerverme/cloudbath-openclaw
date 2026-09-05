@@ -35,6 +35,7 @@ import {
 } from "./storyboard-store.js";
 import type {
   ActiveStoryboardContext,
+  StoryboardAccessClaim,
   StoryboardFinalVideoDraft,
   StoryboardHead,
   StoryboardVersion,
@@ -105,6 +106,14 @@ export function openStoryboardConversationStores(state: StoryboardStateApi): Rea
   };
 }
 
+/**
+ * How recently an inbound image still counts as "the image I just sent".
+ *
+ * Long enough to describe a scene after sending a photo, short enough that
+ * yesterday's picture can never quietly become today's first frame.
+ */
+export const SOURCE_IMAGE_SELECTION_WINDOW_MS = 30 * 60 * 1_000;
+
 export function createCloudbathStoryboardLineRouter(deps: {
   state: StoryboardStateApi;
   resolver: StoryboardProjectResolver;
@@ -123,6 +132,16 @@ export function createCloudbathStoryboardLineRouter(deps: {
   visuals?: StoryboardVisualService;
   publicAssetBaseUrl?: string;
   sendVisualImage?: StoryboardLineRouterDeps["sendVisualImage"];
+  /**
+   * Proves the owner explicitly put an image in THIS conversation.
+   *
+   * Read from the durable inbound-image record the character workflow already
+   * captures, keyed by the same trusted triple — never a scan for the newest
+   * image anywhere. Absent, the storyboard flow asks instead of guessing.
+   */
+  readLatestInboundImage?: (
+    claim: StoryboardAccessClaim,
+  ) => Promise<Readonly<{ durableMediaKey: string; sourceReceivedAt: string }> | undefined>;
 }): CloudbathStoryboardLineRouter {
   const now = deps.now ?? Date.now;
   return new CloudbathStoryboardLineRouter({
@@ -171,5 +190,23 @@ export function createCloudbathStoryboardLineRouter(deps: {
     ...(deps.sendVisualImage ? { sendVisualImage: deps.sendVisualImage } : {}),
     ...(deps.draftScopes ? { draftScopes: deps.draftScopes } : {}),
     ...(deps.ugcCapabilities ? { ugcCapabilities: deps.ugcCapabilities } : {}),
+    ...(deps.readLatestInboundImage
+      ? {
+          resolveSelectedSourceImage: async (claim: StoryboardAccessClaim) => {
+            const record = await deps.readLatestInboundImage?.(claim).catch(() => undefined);
+            if (!record) {
+              return { kind: "none" as const };
+            }
+            // Bounded on purpose. "Use the image I sent" means the one they just
+            // sent; an image from hours ago is a different intention, and
+            // adopting it silently is the wrong-content failure this branch
+            // exists to avoid. A stale record asks again instead.
+            const age = now() - Date.parse(record.sourceReceivedAt);
+            return Number.isFinite(age) && age >= 0 && age <= SOURCE_IMAGE_SELECTION_WINDOW_MS
+              ? { kind: "selected" as const, mediaId: record.durableMediaKey }
+              : { kind: "none" as const };
+          },
+        }
+      : {}),
   });
 }
