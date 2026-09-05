@@ -174,12 +174,12 @@ export type PrepareLineStoryboardVideoDraftDeps = Readonly<{
    * one's: the handle crosses the seam, the bytes never do. Absent, an
    * image-mode request has no way to carry its image and is refused.
    */
-  resolveSourceImagePath?: (params: {
+  resolveSourceImage?: (params: {
     accountId: string;
     conversationId: string;
     ownerSenderId: string;
     mediaId: string;
-  }) => Promise<string | undefined>;
+  }) => Promise<Readonly<{ path: string; mimeType: string }> | undefined>;
   /**
    * Proves fal credentials exist BEFORE a payable code is minted.
    *
@@ -359,9 +359,9 @@ export async function prepareLineStoryboardVideoDraft(
   // frame cannot be resolved would submit a text-only request against an image
   // quote, so the mode and the actual provider inputs are reconciled here or
   // nothing is minted at all.
-  const sourceImagePath = request.sourceImage
+  const resolvedSourceImage = request.sourceImage
     ? await deps
-        .resolveSourceImagePath?.({
+        .resolveSourceImage?.({
           accountId: request.accountId,
           conversationId: request.conversationId,
           ownerSenderId: request.ownerSenderId,
@@ -369,7 +369,7 @@ export async function prepareLineStoryboardVideoDraft(
         })
         .catch(() => undefined)
     : undefined;
-  if (request.sourceImage && !sourceImagePath) {
+  if (request.sourceImage && !resolvedSourceImage) {
     return { kind: "rejected", reason: "source_image_unavailable" };
   }
 
@@ -390,7 +390,7 @@ export async function prepareLineStoryboardVideoDraft(
     estimatedCostUsd: price.amountUsd,
     storyboardId: request.storyboardId,
     storyboardVersionNumber: request.storyboardVersionNumber,
-    ...(sourceImagePath ? { sourceImagePath } : {}),
+    ...(resolvedSourceImage ? { sourceImagePath: resolvedSourceImage.path } : {}),
     ...(request.deliveryTo ? { deliveryTo: request.deliveryTo } : {}),
     ...(deps.now ? { now: deps.now } : {}),
     ...(deps.randomDraftCode ? { randomDraftCode: deps.randomDraftCode } : {}),

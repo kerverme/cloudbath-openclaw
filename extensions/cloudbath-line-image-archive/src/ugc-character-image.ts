@@ -17,6 +17,13 @@ import {
 
 const LATEST_IMAGE_TTL_MS = 24 * 60 * 60 * 1_000;
 /**
+ * Two images this close together are both plausibly "the one I want".
+ *
+ * Matches the storyboard flow's own selection window: inside it either could be
+ * the one the owner means, so the flow asks rather than choosing.
+ */
+const SOURCE_IMAGE_AMBIGUITY_WINDOW_MS = 30 * 60 * 1_000;
+/**
  * How long a name given to the latest image stays usable for a bare follow-up.
  *
  * Short on purpose: the follow-up is meant to be the next thing the owner
@@ -104,6 +111,15 @@ export type LatestCharacterImage = Readonly<{
    */
   pendingCharacterName?: string;
   pendingCharacterNamedAt?: string;
+  /**
+   * When the image this one REPLACED arrived, if that one was itself recent.
+   *
+   * The store keeps one row per owner, so without this a second image would
+   * silently become "the" selection and the first would vanish — a most-recent-
+   * wins rule by omission. Recorded so the storyboard flow can tell that two
+   * candidates existed and ask which, instead of choosing.
+   */
+  displacedRecentAt?: string;
 }>;
 
 type CharacterCommand = Readonly<{
@@ -298,6 +314,20 @@ export class UgcCharacterImageWorkflow {
     pendingMedia?: UgcCharacterPendingMediaStore,
     /** Notified after a successful save so name caches can drop stale lists. */
     private readonly onCharacterSaved?: () => void,
+    /**
+     * Whether this sender already has storyboard work open in this conversation.
+     *
+     * The narrowing for an UNBOUND conversation, where nothing proves who the
+     * owner is: `message_received` carries no `senderIsOwner` and there is no
+     * owner registry outside a UGC binding, so identity cannot be established
+     * here without inventing it. Need can, though — this state only exists
+     * because a dispatch turn already proved `senderIsOwner`, so capturing only
+     * for senders who have it keeps the stored set to images that some
+     * storyboard could actually use.
+     */
+    private readonly hasStoryboardWorkInProgress?: (
+      claim: Readonly<{ accountId: string; lineGroupId: string; ownerSenderId: string }>,
+    ) => Promise<boolean>,
   ) {
     this.pendingMedia =
       pendingMedia ?? new UgcCharacterPendingMediaStore(this.stateDir, this.imageMaxBytes);
@@ -383,6 +413,19 @@ export class UgcCharacterImageWorkflow {
     if (ugcOwned && binding.boundByOwnerId !== senderId) {
       return true;
     }
+    // Unbound: capture only for a sender with storyboard work already open.
+    // Everyone else's images are stored by the archive path as before and never
+    // enter this pending-media directory at all.
+    if (
+      !ugcOwned &&
+      !(await this.hasStoryboardWorkInProgress?.({
+        accountId,
+        lineGroupId: job.groupId,
+        ownerSenderId: senderId,
+      }).catch(() => false))
+    ) {
+      return false;
+    }
     const scopeKey = latestImageKey(accountId, job.groupId, senderId);
     let captured: CapturedCharacterMedia;
     try {
@@ -416,7 +459,16 @@ export class UgcCharacterImageWorkflow {
             return undefined;
           }
           accepted = true;
-          return next;
+          // Two candidates inside the selection window mean the owner has to
+          // say which; the flag is what lets the storyboard flow ask instead of
+          // quietly taking whichever arrived last.
+          const displacedRecently =
+            current &&
+            Date.parse(next.sourceReceivedAt) - Date.parse(current.sourceReceivedAt) <=
+              SOURCE_IMAGE_AMBIGUITY_WINDOW_MS;
+          return displacedRecently
+            ? { ...next, displacedRecentAt: current.sourceReceivedAt }
+            : next;
         },
         { ttlMs: LATEST_IMAGE_TTL_MS },
       );
@@ -459,10 +511,10 @@ export class UgcCharacterImageWorkflow {
    * bytes that are provably the ones the owner sent. The handle is scoped to
    * the trusted triple, so one owner's selection can never resolve another's.
    */
-  async resolveSelectedSourceImagePath(
+  async resolveSelectedSourceImage(
     claim: Readonly<{ accountId: string; lineGroupId: string; ownerSenderId: string }>,
     mediaId: string,
-  ): Promise<string | undefined> {
+  ): Promise<Readonly<{ path: string; mimeType: string }> | undefined> {
     const latest = await this.readLatestInboundImage(claim);
     if (!latest || latest.durableMediaKey !== mediaId) {
       return undefined;
@@ -474,7 +526,16 @@ export class UgcCharacterImageWorkflow {
         expectedSize: latest.contentLength,
         expectedSha256: latest.sha256,
       });
-      return media.filePath;
+      // The type comes from the bytes the store already sniffed and validated,
+      // never from a filename and never assumed: relabelling a PNG as JPEG
+      // would hand a provider a file whose declared type is a lie. An extension
+      // outside the supported set throws, and this fails closed with it.
+      return media.filePath
+        ? Object.freeze({
+            path: media.filePath,
+            mimeType: contentTypeForExtension(media.extension),
+          })
+        : undefined;
     } catch {
       this.logger.warn("storyboard_source_image_unresolvable", { reason: "MEDIA_UNREADABLE" });
       return undefined;

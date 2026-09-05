@@ -161,9 +161,17 @@ function visualService() {
   return { artifacts, calls, generate, service };
 }
 
-function unbound(options: { selection?: "selected" | "none"; rejectSourceImage?: boolean } = {}) {
+function unbound(
+  options: {
+    selection?: "selected" | "none" | "ambiguous";
+    rejectSourceImage?: boolean;
+    /** Answers `selected` only once the flow has asked which image to use. */
+    resolvesAfterAsk?: boolean;
+  } = {},
+) {
   const paid = paidRuntime(options.rejectSourceImage ? { rejectSourceImage: true } : {});
   const visuals = visualService();
+  const askedAtSeen: (string | undefined)[] = [];
   const h = harness({
     binding: null,
     paidDraftRuntime: paid,
@@ -172,12 +180,24 @@ function unbound(options: { selection?: "selected" | "none"; rejectSourceImage?:
     visuals: visuals.service,
     publicAssetBaseUrl: "https://assets.example",
     sendVisualImage: async () => {},
-    resolveSelectedSourceImage: async () =>
-      options.selection === "none"
-        ? { kind: "none" as const }
-        : { kind: "selected" as const, mediaId: MEDIA_ID },
+    resolveSelectedSourceImage: async (_claim, askedAt) => {
+      askedAtSeen.push(askedAt);
+      if (options.resolvesAfterAsk) {
+        // Stands for the production rule: an image that arrived after the
+        // question IS the answer, whatever it displaced.
+        return askedAt
+          ? { kind: "selected" as const, mediaId: MEDIA_ID }
+          : { kind: "ambiguous" as const };
+      }
+      if (options.selection === "none") {
+        return { kind: "none" as const };
+      }
+      return options.selection === "ambiguous"
+        ? { kind: "ambiguous" as const }
+        : { kind: "selected" as const, mediaId: MEDIA_ID };
+    },
   });
-  return { h, paid, ...visuals };
+  return { h, paid, askedAtSeen, ...visuals };
 }
 
 /** Drives an unbound owner from the request to a built storyboard. */
@@ -344,5 +364,36 @@ describe("a contact sheet is never a video source", () => {
     expect(request.referenceAssets).toEqual([]);
     expect(request.sourceImage).toBeUndefined();
     expect(JSON.stringify(request)).not.toContain("contact");
+  });
+});
+
+describe("two candidate images are a question, not a guess", () => {
+  it("asks which one rather than taking the newer", async () => {
+    const g = unbound({ selection: "ambiguous" });
+    await g.h.dispatch(ASK_VIDEO);
+
+    const asked = await g.h.dispatch(PICK_SOURCE_IMAGE);
+
+    expect(asked.text).toContain("ยังไม่แน่ใจว่าจะใช้ภาพไหน");
+    // Nothing was frozen from a selection the flow could not prove.
+    await expect(g.h.latest()).rejects.toThrow();
+  });
+
+  it("accepts the image the owner sends after being asked", async () => {
+    // The anchor is what makes a re-send unambiguous: without it every replay
+    // would displace a recent image again and the owner could never proceed.
+    const g = unbound({ resolvesAfterAsk: true });
+    await g.h.dispatch(ASK_VIDEO);
+    expect((await g.h.dispatch(PICK_SOURCE_IMAGE)).text).toContain("ยังไม่แน่ใจว่าจะใช้ภาพไหน");
+
+    const retried = await g.h.dispatch(PICK_SOURCE_IMAGE);
+
+    expect(retried.text).toBe(DIRECTOR_QUESTION.duration);
+    // First call had no anchor, the second carried the recorded question time.
+    expect(g.askedAtSeen[0]).toBeUndefined();
+    expect(g.askedAtSeen[1]).toEqual(expect.any(String));
+    await g.h.dispatch("8 วิ");
+    await g.h.dispatch("ไม่มี");
+    expect((await g.h.latest()).document.sourceImage).toMatchObject({ mediaId: MEDIA_ID });
   });
 });

@@ -63,6 +63,13 @@ export type StoryboardDirectorSession = Readonly<{
    */
   media?: DirectorMedia;
   mediaRequired?: true;
+  /**
+   * When this flow last asked WHICH image to use.
+   *
+   * An image that arrives after the question answers it, which is how a
+   * re-send resolves an ambiguity that two earlier images created.
+   */
+  sourceImageAskedAt?: string;
   durationSeconds?: number;
   aspectRatio?: string;
   resolution?: string;

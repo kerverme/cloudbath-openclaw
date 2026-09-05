@@ -41,7 +41,7 @@ export type CloudbathLineVideoWorkspaceRuntime = {
     conversationId: string;
     ownerSenderId: string;
     mediaId: string;
-  }): Promise<string | undefined>;
+  }): Promise<Readonly<{ path: string; mimeType: string }> | undefined>;
   readStoryboardVersionNumber(params: {
     accountId: string;
     conversationId: string;
@@ -78,7 +78,7 @@ export function installCloudbathLineVideoWorkspaceRuntime(
       conversationId: string;
       ownerSenderId: string;
       mediaId: string;
-    }) => Promise<string | undefined>;
+    }) => Promise<Readonly<{ path: string; mimeType: string }> | undefined>;
     readStoryboardVersionNumber?: (params: {
       accountId: string;
       conversationId: string;

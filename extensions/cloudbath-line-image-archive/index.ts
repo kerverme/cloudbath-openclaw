@@ -319,8 +319,8 @@ export default definePluginEntry({
             version: StoryboardVersion,
             mediaId: string,
           ): Promise<{ buffer: Buffer; mimeType: string } | undefined> => {
-            const filePath =
-              await tryGetCloudbathWorkspacePolicyRuntime()?.ugcCharacterWorkflow?.resolveSelectedSourceImagePath(
+            const resolved =
+              await tryGetCloudbathWorkspacePolicyRuntime()?.ugcCharacterWorkflow?.resolveSelectedSourceImage(
                 {
                   accountId: version.accountId,
                   lineGroupId: version.lineGroupId,
@@ -328,11 +328,12 @@ export default definePluginEntry({
                 },
                 mediaId,
               );
-            if (!filePath) {
+            if (!resolved) {
               throw new Error("Selected storyboard source image is unavailable");
             }
-            const bytes = await readFile(filePath);
-            return { buffer: bytes, mimeType: "image/jpeg" };
+            // The type the store proved from the bytes, never assumed: a PNG
+            // handed over as JPEG declares a type the file does not have.
+            return { buffer: await readFile(resolved.path), mimeType: resolved.mimeType };
           };
           const storyboardVisuals = config.publicAssetBaseUrl
             ? new StoryboardVisualService({
@@ -455,6 +456,10 @@ export default definePluginEntry({
             Date.now,
             { endpoint: config.r2.endpoint, bucketName: config.r2.bucketName },
           );
+          // Opened once and shared: the router and the inbound-capture
+          // narrowing must read the SAME rows, or "is storyboard work open?"
+          // would be answerable two ways.
+          const storyboardConversationStores = openStoryboardConversationStores(api.runtime.state);
           ugcCharacterWorkflow = new UgcCharacterImageWorkflow(
             workspaceRegistry,
             latestCharacterImages,
@@ -478,6 +483,18 @@ export default definePluginEntry({
             // its name memo is stale, and the owner names the new character in
             // their very next message.
             () => storyboardResolver.invalidateCharacterNames(),
+            // The unbound-capture narrowing. Both rows exist only because a
+            // dispatch turn already proved `senderIsOwner`, so this is the
+            // closest thing to an owner predicate available at an inbound image
+            // — and it is a NEED predicate, not an identity claim.
+            async (claim) => {
+              const key = `${claim.accountId}:${claim.lineGroupId}:${claim.ownerSenderId}`;
+              const [active, director] = await Promise.all([
+                storyboardConversationStores.active.lookup(`storyboard-active:${key}`),
+                storyboardConversationStores.director.lookup(`storyboard-director:${key}`),
+              ]);
+              return Boolean(active) || Boolean(director && !director.closed);
+            },
           );
           // Storyboard is the DEFAULT natural-language video flow and needs no
           // engine, bucket or public URL, so it is wired before the previs block
@@ -541,7 +558,7 @@ export default definePluginEntry({
           // a build without the LINE plugin simply has no job to report on.
           conversationRouter = createCloudbathConversationRouter({
             state: api.runtime.state,
-            ...openStoryboardConversationStores(api.runtime.state),
+            ...storyboardConversationStores,
             registry: {
               lookup: async (accountId, groupId) =>
                 await workspaceRegistry?.lookup(accountId, groupId),
@@ -723,7 +740,7 @@ export default definePluginEntry({
               )) ?? { kind: "no_active_storyboard" },
             resolveStoryboardSourceImage: async (request) => {
               const groupId = request.conversationId.replace(/^line:group:/u, "");
-              return await tryGetCloudbathWorkspacePolicyRuntime()?.ugcCharacterWorkflow?.resolveSelectedSourceImagePath(
+              return await tryGetCloudbathWorkspacePolicyRuntime()?.ugcCharacterWorkflow?.resolveSelectedSourceImage(
                 {
                   accountId: request.accountId,
                   lineGroupId: groupId,

@@ -366,7 +366,7 @@ export default defineBundledChannelEntry({
           // The first frame lives in the storyboard plugin's media store, so
           // only it can turn the frozen handle into bytes. Undefined refuses
           // the draft rather than quoting image mode it cannot deliver.
-          resolveSourceImagePath: async (params) => {
+          resolveSourceImage: async (params) => {
             const { tryGetLineVideoWorkspaceRuntime } =
               await import("./src/video-workspace-runtime.js");
             return await tryGetLineVideoWorkspaceRuntime()?.resolveStoryboardSourceImage(params);

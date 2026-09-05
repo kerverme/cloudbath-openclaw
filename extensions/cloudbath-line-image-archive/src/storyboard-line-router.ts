@@ -243,8 +243,14 @@ export type StoryboardLineRouterDeps = Readonly<{
    */
   resolveSelectedSourceImage?: (
     claim: StoryboardAccessClaim,
+    /** Only an image that arrived AFTER this counts; set once the flow asked. */
+    askedAt?: string,
   ) => Promise<
-    Readonly<{ kind: "selected"; mediaId: string }> | Readonly<{ kind: "none" }> | undefined
+    | Readonly<{ kind: "selected"; mediaId: string }>
+    /** Several images could be the one meant; the owner has to say which. */
+    | Readonly<{ kind: "ambiguous" }>
+    | Readonly<{ kind: "none" }>
+    | undefined
   >;
   publicAssetBaseUrl?: string;
   sendVisualImage?: (params: {
@@ -924,8 +930,19 @@ export class CloudbathStoryboardLineRouter {
     // Asking for "the image" without one on record is the ambiguity this flow
     // must not resolve by guessing. One short question, and the slot stays open.
     if (answer.kind === "media_ambiguous") {
-      const selected = await this.deps.resolveSelectedSourceImage?.(claim);
+      const selected = await this.deps.resolveSelectedSourceImage?.(
+        claim,
+        session.sourceImageAskedAt,
+      );
       if (selected?.kind !== "selected") {
+        // Record WHEN the flow asked, so the image the owner sends next is
+        // unambiguous by construction: it arrived after the question. Without
+        // this anchor a re-send would keep displacing a recent image and the
+        // owner could never get past the question.
+        await this.deps.director?.register(storyboardDirectorKey(claim), {
+          ...session,
+          sourceImageAskedAt: new Date(this.deps.now()).toISOString(),
+        });
         return REPLY.sourceImageAmbiguous;
       }
       return await this.advanceDirector(claim, session, {

@@ -139,9 +139,15 @@ export function createCloudbathStoryboardLineRouter(deps: {
    * captures, keyed by the same trusted triple — never a scan for the newest
    * image anywhere. Absent, the storyboard flow asks instead of guessing.
    */
-  readLatestInboundImage?: (
-    claim: StoryboardAccessClaim,
-  ) => Promise<Readonly<{ durableMediaKey: string; sourceReceivedAt: string }> | undefined>;
+  readLatestInboundImage?: (claim: StoryboardAccessClaim) => Promise<
+    | Readonly<{
+        durableMediaKey: string;
+        sourceReceivedAt: string;
+        /** Set when this image displaced another recent one. */
+        displacedRecentAt?: string;
+      }>
+    | undefined
+  >;
 }): CloudbathStoryboardLineRouter {
   const now = deps.now ?? Date.now;
   return new CloudbathStoryboardLineRouter({
@@ -192,16 +198,26 @@ export function createCloudbathStoryboardLineRouter(deps: {
     ...(deps.ugcCapabilities ? { ugcCapabilities: deps.ugcCapabilities } : {}),
     ...(deps.readLatestInboundImage
       ? {
-          resolveSelectedSourceImage: async (claim: StoryboardAccessClaim) => {
+          resolveSelectedSourceImage: async (claim: StoryboardAccessClaim, askedAt?: string) => {
             const record = await deps.readLatestInboundImage?.(claim).catch(() => undefined);
             if (!record) {
               return { kind: "none" as const };
+            }
+            const receivedAt = Date.parse(record.sourceReceivedAt);
+            // An image that arrived AFTER the flow asked which one to use IS
+            // the answer, whatever it displaced: the question is what makes it
+            // unambiguous. Otherwise a row that displaced another recent image
+            // means two candidates existed, and picking the newer would be the
+            // most-recent-wins rule this flow refuses to have.
+            const answersTheQuestion = askedAt ? receivedAt > Date.parse(askedAt) : false;
+            if (record.displacedRecentAt && !answersTheQuestion) {
+              return { kind: "ambiguous" as const };
             }
             // Bounded on purpose. "Use the image I sent" means the one they just
             // sent; an image from hours ago is a different intention, and
             // adopting it silently is the wrong-content failure this branch
             // exists to avoid. A stale record asks again instead.
-            const age = now() - Date.parse(record.sourceReceivedAt);
+            const age = now() - receivedAt;
             return Number.isFinite(age) && age >= 0 && age <= SOURCE_IMAGE_SELECTION_WINDOW_MS
               ? { kind: "selected" as const, mediaId: record.durableMediaKey }
               : { kind: "none" as const };
