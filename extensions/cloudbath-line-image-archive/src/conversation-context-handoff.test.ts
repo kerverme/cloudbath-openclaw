@@ -184,7 +184,7 @@ describe("A: a deictic request that carries a change", () => {
     const after = await h.latest();
     expect(after.versionNumber).toBe(before.versionNumber + 1);
     expect(after.storyboardId).toBe(before.storyboardId);
-    expect(after.projectInstanceId).toBe(before.projectInstanceId);
+    expect(after.project?.projectInstanceId).toBe(before.project?.projectInstanceId);
     expect(after.document.cast.map((member) => member.characterId)).toEqual(
       before.document.cast.map((member) => member.characterId),
     );

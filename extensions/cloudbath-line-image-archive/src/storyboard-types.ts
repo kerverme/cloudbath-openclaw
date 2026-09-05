@@ -104,6 +104,70 @@ export type StoryboardDocument = Readonly<{
   audio: StoryboardAudioMode;
   cast: readonly StoryboardCastMember[];
   beats: readonly StoryboardBeat[];
+  /**
+   * The image the owner explicitly chose as this scene's first frame.
+   *
+   * Frozen into the storyboard because it is the authoritative input the
+   * provider mode is derived from. Never inferred from whatever image happened
+   * to arrive recently: an unrelated attachment silently becoming a video's
+   * first frame is a wrong-content failure, so the director asks instead.
+   */
+  sourceImage?: StoryboardSourceImage;
+}>;
+
+/**
+ * An owner-selected first-frame image, by reference.
+ *
+ * A locator the owning store can resolve, never bytes and never a signed URL:
+ * this record is read back by logging and by the paid handoff, and neither may
+ * carry an asset location.
+ */
+export type StoryboardInputMode =
+  | "text_to_video"
+  | "image_to_video"
+  | "reference_to_video"
+  | "storyboard_shot_to_video";
+
+/**
+ * The provider input mode a frozen storyboard implies.
+ *
+ * ONE derivation, from the storyboard's own authoritative inputs, so the mode
+ * a draft displays, the mode it is quoted against and the mode it submits
+ * cannot drift apart. Frozen Character identities outrank a chosen first frame:
+ * a scene cast from the Library is a reference render whatever else it carries.
+ */
+export function resolveStoryboardInputMode(
+  version: Pick<StoryboardVersion, "characterLocks" | "document">,
+): StoryboardInputMode {
+  if (version.characterLocks.some((lock) => lock.identityReferences.length > 0)) {
+    return "reference_to_video";
+  }
+  return version.document.sourceImage ? "image_to_video" : "text_to_video";
+}
+
+export type StoryboardSourceImage = Readonly<{
+  kind: "owner_selected";
+  /** Opaque handle the media store resolves. Never a URL. */
+  mediaId: string;
+  selectedAt: string;
+}>;
+
+/**
+ * The UGC project a storyboard is filed under, when it has one.
+ *
+ * All four ids or none: they name one real Notion project and scene, and a
+ * storyboard that has some of them would be a project nothing downstream could
+ * resolve. Absent means STANDALONE work — an owner planning a video in a
+ * conversation with no workspace still gets a real storyboard with a real
+ * version chain, and inventing page ids for it would make a fabricated project
+ * indistinguishable from a real one everywhere that reads these.
+ */
+export type StoryboardProjectLink = Readonly<{
+  projectInstanceId: string;
+  projectPageId: string;
+  /** Real UGC scene label, e.g. "SCENE-1". */
+  sceneId: string;
+  scenePageId: string;
 }>;
 
 /** Immutable durable record for one storyboard version. */
@@ -114,14 +178,8 @@ export type StoryboardVersion = Readonly<{
   versionNumber: number;
   /** The version this one was derived from, absent for v1. */
   parentVersionNumber?: number;
-  /** Real UGC project instance this storyboard belongs to. */
-  projectInstanceId: string;
-  /** Real UGC_PROJECTS page id. */
-  projectPageId: string;
-  /** Real UGC scene label, e.g. "SCENE-1". */
-  sceneId: string;
-  /** Real UGC_SHOTS page id for that scene. */
-  scenePageId: string;
+  /** Absent for standalone work. See `StoryboardProjectLink`. */
+  project?: StoryboardProjectLink;
   accountId: string;
   lineGroupId: string;
   ownerSenderId: string;
@@ -135,7 +193,8 @@ export type StoryboardVersion = Readonly<{
 export type StoryboardHead = Readonly<{
   version: 1;
   storyboardId: string;
-  projectInstanceId: string;
+  /** Absent for standalone work. */
+  projectInstanceId?: string;
   accountId: string;
   lineGroupId: string;
   ownerSenderId: string;
@@ -154,7 +213,8 @@ export type StoryboardAccessClaim = Readonly<{
 export type ActiveStoryboardContext = Readonly<{
   version: 1;
   storyboardId: string;
-  projectInstanceId: string;
+  /** Absent for standalone work. */
+  projectInstanceId?: string;
   accountId: string;
   lineGroupId: string;
   ownerSenderId: string;
@@ -254,10 +314,8 @@ export type StoryboardFinalVideoDraft = Readonly<{
   draftId: string;
   storyboardId: string;
   storyboardVersionNumber: number;
-  projectInstanceId: string;
-  projectPageId: string;
-  sceneId: string;
-  scenePageId: string;
+  /** Absent for standalone work. See `StoryboardProjectLink`. */
+  project?: StoryboardProjectLink;
   accountId: string;
   lineGroupId: string;
   ownerSenderId: string;
@@ -277,7 +335,7 @@ export type StoryboardFinalVideoDraft = Readonly<{
   resolution: string;
   model: StoryboardVideoModelSelection;
   estimatedCost: StoryboardCostEstimate;
-  inputMode: "text_to_video" | "image_to_video" | "reference_to_video" | "storyboard_shot_to_video";
+  inputMode: StoryboardInputMode;
   renderStrategy: "quick_video" | "best_quality_shot_by_shot";
   plan: StoryboardVideoPlan;
   confirmation: StoryboardDraftConfirmation;

@@ -382,10 +382,12 @@ describe("K. version storage keeps every version", () => {
     const created = await store.createStoryboard({
       document: compile(),
       claim: CLAIM,
-      projectInstanceId: "proj-1",
-      projectPageId: "page-project-1",
-      sceneId: "SCENE-1",
-      scenePageId: "page-scene-1",
+      project: {
+        projectInstanceId: "proj-1",
+        projectPageId: "page-project-1",
+        sceneId: "SCENE-1",
+        scenePageId: "page-scene-1",
+      },
       characterLocks: LOCKS,
     });
     const storyboardId = created.head.storyboardId;
@@ -416,10 +418,12 @@ describe("K. version storage keeps every version", () => {
     const created = await store.createStoryboard({
       document: compile(),
       claim: CLAIM,
-      projectInstanceId: "proj-1",
-      projectPageId: "page-project-1",
-      sceneId: "SCENE-1",
-      scenePageId: "page-scene-1",
+      project: {
+        projectInstanceId: "proj-1",
+        projectPageId: "page-project-1",
+        sceneId: "SCENE-1",
+        scenePageId: "page-scene-1",
+      },
       characterLocks: LOCKS,
     });
     const storyboardId = created.head.storyboardId;
@@ -444,10 +448,12 @@ describe("K. version storage keeps every version", () => {
     const created = await store.createStoryboard({
       document: compile(),
       claim: CLAIM,
-      projectInstanceId: "proj-1",
-      projectPageId: "page-project-1",
-      sceneId: "SCENE-1",
-      scenePageId: "page-scene-1",
+      project: {
+        projectInstanceId: "proj-1",
+        projectPageId: "page-project-1",
+        sceneId: "SCENE-1",
+        scenePageId: "page-scene-1",
+      },
       characterLocks: LOCKS,
     });
     await expect(
@@ -465,10 +471,12 @@ describe("provider-neutral video plan", () => {
     const created = await store.createStoryboard({
       document: compile(),
       claim: CLAIM,
-      projectInstanceId: "proj-1",
-      projectPageId: "page-project-1",
-      sceneId: "SCENE-1",
-      scenePageId: "page-scene-1",
+      project: {
+        projectInstanceId: "proj-1",
+        projectPageId: "page-project-1",
+        sceneId: "SCENE-1",
+        scenePageId: "page-scene-1",
+      },
       characterLocks: LOCKS,
     });
     const plan = compileStoryboardVideoPlan(created.version);

@@ -53,6 +53,12 @@ const PNG_BYTES = Buffer.concat([
   Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
   Buffer.from("cloudbath-character"),
 ]);
+/** JFIF magic plus a body, so the store sniffs a real JPEG rather than a name. */
+const JPEG_BYTES = Buffer.concat([
+  Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00]),
+  Buffer.from("cloudbath-first-frame"),
+  Buffer.from([0xff, 0xd9]),
+]);
 const CAPABILITIES = {
   PRODUCT_LIBRARY: { databaseId: "1".repeat(32), dataSourceId: "2".repeat(32) },
   CHARACTER_LIBRARY: { databaseId: "3".repeat(32), dataSourceId: "4".repeat(32) },
@@ -925,5 +931,141 @@ describe("UGC latest-image character workflow", () => {
     expect(otherGroup?.text).not.toContain("Twong99");
     expect(otherSender).toEqual({ handled: true });
     expect(notion.saveCharacterAsset).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * The first frame a storyboard freezes is resolved back through this workflow,
+ * and its content type comes from the bytes the store already validated.
+ *
+ * Labelling every image `image/jpeg` was a real defect: a PNG handed to an
+ * image provider under a JPEG content type declares a type the file does not
+ * have. Nothing here reaches a provider — only the store and the workflow run.
+ */
+describe("resolving a frozen first frame", () => {
+  let stateDir: string;
+
+  beforeEach(async () => {
+    stateDir = await fsp.realpath(await fsp.mkdtemp(path.join(os.tmpdir(), "ugc-source-image-")));
+    vi.stubEnv("OPENCLAW_STATE_DIR", stateDir);
+  });
+
+  afterEach(async () => {
+    vi.unstubAllEnvs();
+    await fsp.rm(stateDir, { recursive: true, force: true });
+  });
+
+  const CLAIM = { accountId: "primary", lineGroupId: "C-ugc", ownerSenderId: "U-owner" };
+
+  function sourceHarness() {
+    const registry = {
+      lookup: vi.fn(async (_accountId: string | undefined, groupId: string) => ({
+        accountId: "primary",
+        groupId,
+        policyId: "UGC" as const,
+        boundByOwnerId: "U-owner",
+        boundAt: "2026-08-26T00:00:00.000Z",
+      })),
+    };
+    const latestImages = memoryStore<LatestCharacterImage>();
+    const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const workflow = new UgcCharacterImageWorkflow(
+      registry as never,
+      latestImages as never,
+      { ensureObject: vi.fn(async () => ({ kind: "uploaded" as const })) } as never,
+      {} as never,
+      CAPABILITIES as never,
+      stateDir,
+      10 * 1024 * 1024,
+      {
+        endpoint: "https://r2.example",
+        bucketName: "bucket",
+        accessKeyId: "key",
+        secretAccessKey: "secret",
+      },
+      logger as never,
+      undefined,
+      () => Date.UTC(2026, 8, 5),
+    );
+    return { workflow, latestImages };
+  }
+
+  /** Puts one image through the real inbound capture path. */
+  async function capture(
+    h: ReturnType<typeof sourceHarness>,
+    bytes: Buffer,
+    contentType: string,
+    filename: string,
+    receivedAt = "2026-09-05T00:00:00.000Z",
+  ): Promise<string> {
+    const media = await saveMediaBuffer(bytes, contentType, "inbound", 10 * 1024 * 1024, filename);
+    await h.workflow.rememberImage({
+      accountId: "primary",
+      groupId: "C-ugc",
+      lineTarget: "line:group:C-ugc",
+      messageId: `m-${receivedAt}`,
+      userId: "U-owner",
+      mediaPath: media.path,
+      mimeType: contentType,
+      receivedAt,
+    });
+    const stored = await h.latestImages.lookup(
+      [...(await h.latestImages.entries())][0]?.key ?? "missing",
+    );
+    return stored!.durableMediaKey;
+  }
+
+  it("reports a PNG as image/png", async () => {
+    const h = sourceHarness();
+    const mediaId = await capture(h, PNG_BYTES, "image/png", "frame.png");
+
+    const resolved = await h.workflow.resolveSelectedSourceImage(CLAIM, mediaId);
+
+    expect(resolved?.mimeType).toBe("image/png");
+    expect(resolved?.path).toContain(stateDir);
+  });
+
+  it("reports a JPEG as image/jpeg", async () => {
+    const h = sourceHarness();
+    const mediaId = await capture(h, JPEG_BYTES, "image/jpeg", "frame.jpg");
+
+    const resolved = await h.workflow.resolveSelectedSourceImage(CLAIM, mediaId);
+
+    expect(resolved?.mimeType).toBe("image/jpeg");
+  });
+
+  it("refuses a handle that is not this owner's selection", async () => {
+    const h = sourceHarness();
+    await capture(h, PNG_BYTES, "image/png", "frame.png");
+
+    expect(await h.workflow.resolveSelectedSourceImage(CLAIM, "some-other-handle")).toBeUndefined();
+    expect(
+      await h.workflow.resolveSelectedSourceImage(
+        { ...CLAIM, ownerSenderId: "U-someone-else" },
+        "any",
+      ),
+    ).toBeUndefined();
+  });
+
+  it("marks a second recent image as having displaced the first", async () => {
+    // Two candidates inside the window. The store keeps one row, so without
+    // this flag the newer one would silently become "the" selection.
+    const h = sourceHarness();
+    await capture(h, PNG_BYTES, "image/png", "frame.png", "2026-09-05T00:00:00.000Z");
+    await capture(h, JPEG_BYTES, "image/jpeg", "second.jpg", "2026-09-05T00:05:00.000Z");
+
+    const [{ value }] = await h.latestImages.entries();
+
+    expect(value.displacedRecentAt).toBe("2026-09-05T00:00:00.000Z");
+  });
+
+  it("does not mark an image that replaced only a long-stale one", async () => {
+    const h = sourceHarness();
+    await capture(h, PNG_BYTES, "image/png", "frame.png", "2026-09-05T00:00:00.000Z");
+    await capture(h, JPEG_BYTES, "image/jpeg", "second.jpg", "2026-09-05T09:00:00.000Z");
+
+    const [{ value }] = await h.latestImages.entries();
+
+    expect(value.displacedRecentAt).toBeUndefined();
   });
 });

@@ -128,14 +128,34 @@ function request(
   };
 }
 
-function harness(options: { cfg?: ReturnType<typeof fullyConfigured>; falAuth?: boolean } = {}) {
+function harness(
+  options: {
+    cfg?: ReturnType<typeof fullyConfigured>;
+    falAuth?: boolean;
+    /** What the storyboard plugin's media store answers for a frozen handle. */
+    sourceImage?: Readonly<{ path: string; mimeType: string }> | "unresolvable";
+  } = {},
+) {
   const draftStore = memoryDraftStore();
+  const resolveCalls: { mediaId: string; ownerSenderId: string }[] = [];
   return {
     draftStore,
+    resolveCalls,
     deps: {
       draftStore,
       resolveFalAuth: async () => options.falAuth ?? true,
       cfg: options.cfg ?? fullyConfigured(),
+      ...(options.sourceImage
+        ? {
+            resolveSourceImage: async (params: { mediaId: string; ownerSenderId: string }) => {
+              resolveCalls.push({
+                mediaId: params.mediaId,
+                ownerSenderId: params.ownerSenderId,
+              });
+              return options.sourceImage === "unresolvable" ? undefined : options.sourceImage;
+            },
+          }
+        : {}),
     },
   };
 }
@@ -451,5 +471,79 @@ describe("the draft lives in LINE's own store", () => {
     }
     expect(mine.supersededDraftIds).toBeUndefined();
     expect(await h.draftStore.lookup(other.draftId)).toMatchObject({ status: "pending" });
+  });
+});
+
+/**
+ * A storyboard can freeze an owner-selected first frame, and the mode it quotes
+ * follows from that. This module is where the two are reconciled: the handle is
+ * resolved through the storyboard plugin's media store, or nothing is minted.
+ *
+ * Asserted against the real allocator rather than a Cloudbath-side stub, because
+ * the refusal has to happen BEFORE `createLineVideoDraft` — a code minted for a
+ * quote whose image will not be there at submission is the failure this guards.
+ */
+describe("an owner-selected first frame is resolved or refused", () => {
+  const imageRequest = () =>
+    request({
+      inputMode: "image_to_video",
+      sourceImage: { kind: "owner_selected", mediaId: "durable-media-key-abc123" },
+      characterLocks: [],
+      referenceAssets: [],
+      audio: "off",
+      durationSeconds: 5,
+    });
+
+  it("freezes exactly the path the media store resolved", async () => {
+    const h = harness({
+      sourceImage: { path: "/state/pending/scope/abc.png", mimeType: "image/png" },
+    });
+
+    const result = await prepareLineStoryboardVideoDraft(imageRequest(), h.deps);
+
+    expect(result).toMatchObject({ kind: "created" });
+    if (result.kind !== "created") {
+      return;
+    }
+    const stored = await h.draftStore.lookup(result.draftId);
+    expect(stored?.sourceImagePath).toBe("/state/pending/scope/abc.png");
+    // Resolved for the OWNER who froze it, by the handle the storyboard carries.
+    expect(h.resolveCalls).toEqual([{ mediaId: "durable-media-key-abc123", ownerSenderId: OWNER }]);
+  });
+
+  it("mints nothing at all when the handle will not resolve", async () => {
+    const h = harness({ sourceImage: "unresolvable" });
+
+    const result = await prepareLineStoryboardVideoDraft(imageRequest(), h.deps);
+
+    expect(result).toEqual({ kind: "rejected", reason: "source_image_unavailable" });
+    // No draft, and therefore no VIDEO code: the refusal is upstream of the
+    // allocator, not a cleanup after it.
+    expect(await h.draftStore.entries()).toEqual([]);
+  });
+
+  it("refuses just as firmly when no resolver is wired at all", async () => {
+    // A build with no storyboard media seam cannot honour a first frame either,
+    // and must not quietly fall back to submitting the prompt alone.
+    const h = harness();
+
+    const result = await prepareLineStoryboardVideoDraft(imageRequest(), h.deps);
+
+    expect(result).toEqual({ kind: "rejected", reason: "source_image_unavailable" });
+    expect(await h.draftStore.entries()).toEqual([]);
+  });
+
+  it("never asks the media store when the storyboard froze no image", async () => {
+    const h = harness({
+      sourceImage: { path: "/state/pending/scope/abc.png", mimeType: "image/png" },
+    });
+
+    const result = await prepareLineStoryboardVideoDraft(request(), h.deps);
+
+    expect(result).toMatchObject({ kind: "created" });
+    expect(h.resolveCalls).toEqual([]);
+    if (result.kind === "created") {
+      expect((await h.draftStore.lookup(result.draftId))?.sourceImagePath).toBeUndefined();
+    }
   });
 });

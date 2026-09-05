@@ -1,5 +1,9 @@
 import { createHash, randomBytes } from "node:crypto";
-import type { StoryboardAccessClaim, StoryboardVersion } from "./storyboard-types.js";
+import type {
+  StoryboardAccessClaim,
+  StoryboardSourceImage,
+  StoryboardVersion,
+} from "./storyboard-types.js";
 import type { AsyncKeyedStore, UgcReferenceAsset } from "./types.js";
 
 export const CLOUDBATH_STORYBOARD_VISUAL_NAMESPACE = "cloudbath-storyboard-visual-v1";
@@ -19,6 +23,8 @@ export type StoryboardVisualArtifact = Readonly<{
   conversationId: string;
   sourceCharacterIds: readonly string[];
   sourceReferenceAssetIds: readonly string[];
+  /** The owner-selected first frame this shot was rendered from, if any. */
+  sourceImageMediaId?: string;
   originalObjectKey: string;
   previewObjectKey: string;
   mimeType: "image/jpeg" | "image/png";
@@ -74,7 +80,17 @@ export type StoryboardVisualServiceDeps = Readonly<{
   generate(params: {
     version: StoryboardVersion;
     shotIndex: number;
+    /** Frozen Character Library identities, in cast order. */
     identityReferences: readonly UgcReferenceAsset[];
+    /**
+     * The owner's chosen first frame, when this scene is built from one.
+     *
+     * Kept separate from `identityReferences` on purpose: a first frame says
+     * what the shot LOOKS like, an identity says WHO is in it. Folding one into
+     * the other would make an ordinary photo behave like a frozen Character
+     * lock, and no consumer could tell them apart afterwards.
+     */
+    sourceImage?: StoryboardSourceImage;
   }): Promise<GeneratedStoryboardShot>;
   normalize(params: {
     bytes: Uint8Array;
@@ -103,6 +119,46 @@ export type StoryboardVisualServiceDeps = Readonly<{
     warn(event: string, fields?: Record<string, unknown>): void;
   };
 }>;
+
+/**
+ * Whether a stored row is a real per-shot artifact this version can be judged on.
+ *
+ * Purpose is load-bearing, not decoration. A contact sheet is a DERIVED review
+ * preview of shots that already exist, and a generic image the assistant
+ * happened to attach is neither — treating either as a shot would let a
+ * storyboard look ready with no authoritative visual behind it, which is the
+ * exact separation this predicate closes. Scope is re-checked here too, so a
+ * row written for one owner's storyboard can never satisfy another's.
+ */
+function isAuthoritativeShotArtifact(
+  artifact: StoryboardVisualArtifact | undefined,
+): artifact is StoryboardVisualArtifact {
+  return (
+    artifact?.generationPurpose === "storyboard-shot" &&
+    artifact.status === "completed" &&
+    Number.isInteger(artifact.shotIndex) &&
+    artifact.shotIndex >= 1
+  );
+}
+
+/**
+ * A contact sheet as this flow is allowed to use it: a review preview DERIVED
+ * from artifacts that already exist, listed newest-shot-last.
+ *
+ * Returned only for a `ready` status on purpose. A sheet built from a partial
+ * set would show the owner a complete-looking storyboard whose shots are not
+ * all there, and this flow has exactly one definition of complete.
+ */
+export function deriveContactSheetPreview(
+  status: StoryboardVisualStatus,
+): Readonly<{ kind: "derived_preview"; shotArtifactIds: readonly string[] }> | undefined {
+  return status.kind === "ready"
+    ? Object.freeze({
+        kind: "derived_preview" as const,
+        shotArtifactIds: Object.freeze(status.artifacts.map((artifact) => artifact.artifactId)),
+      })
+    : undefined;
+}
 
 function requireAccess(version: StoryboardVersion, claim: StoryboardAccessClaim): void {
   if (
@@ -146,7 +202,7 @@ export class StoryboardVisualService {
           ),
         ),
       )
-    ).filter((artifact): artifact is StoryboardVisualArtifact => Boolean(artifact));
+    ).filter(isAuthoritativeShotArtifact);
     if (artifacts.length === 0) {
       return params.version.versionNumber > 1
         ? { kind: "regeneration_required" }
@@ -219,7 +275,13 @@ export class StoryboardVisualService {
   private async generateOne(version: StoryboardVersion, shotIndex: number): Promise<void> {
     const beat = version.document.beats[shotIndex - 1]!;
     const identityReferences = version.characterLocks.flatMap((lock) => lock.identityReferences);
-    const generated = await this.deps.generate({ version, shotIndex, identityReferences });
+    const sourceImage = version.document.sourceImage;
+    const generated = await this.deps.generate({
+      version,
+      shotIndex,
+      identityReferences,
+      ...(sourceImage ? { sourceImage } : {}),
+    });
     const original = await this.deps.normalize({
       bytes: generated.bytes,
       mimeType: generated.mimeType,
@@ -284,6 +346,9 @@ export class StoryboardVisualService {
       sourceReferenceAssetIds: Object.freeze(
         identityReferences.map((reference) => reference.locator),
       ),
+      // Recorded distinctly from the identity locators above, so a later reader
+      // can still tell a first frame from a Character reference.
+      ...(sourceImage ? { sourceImageMediaId: sourceImage.mediaId } : {}),
       originalObjectKey,
       previewObjectKey,
       mimeType: original.mimeType,

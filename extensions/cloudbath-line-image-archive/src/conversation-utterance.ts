@@ -55,6 +55,35 @@ const DEIXIS_PREVIOUS =
 /** A bare number: the one unambiguous way to pick from a numbered menu. */
 const BARE_ORDINAL = /^(\d{1,2})$/u;
 
+/**
+ * Asking to SEE the work rendered, rather than to read it.
+ *
+ * A class, not a feature list: an image noun plus any request verb. "ทำภาพ
+ * แต่ละช็อต", "เอาภาพมาดูก่อน" and "show me the pictures" are one way of
+ * speaking, and the arbiter — not this module — decides which work it is about.
+ */
+const IMAGE_NOUN = /ภาพ|รูป|\bimages?\b|\bpictures?\b|\bvisuals?\b|\bshots?\b/iu;
+const REQUEST_VERB =
+  /ทำ|สร้าง|ขอ|เอา|วาด|ดู|โชว์|อยาก|ต้องการ|\b(?:make|create|generate|draw|show|see|render|want|need|would\s+like)\b/iu;
+
+/**
+ * "Carry on with what we are already doing."
+ *
+ * Carries no object of its own, which is exactly why it needs the conversation
+ * context to mean anything — and why it must never be read as consent to spend.
+ */
+/**
+ * Asking for a video to be made, without yet saying enough to make one.
+ *
+ * The class exists so the storyboard flow can CLAIM such a turn: an owner video
+ * request is storyboard-first work in every conversation, and letting it fall
+ * through is how it reached a single-shot legacy draft instead.
+ */
+const VIDEO_NOUN = /วิดีโอ|วีดีโอ|คลิป|หนัง|\bvideos?\b|\bclips?\b|\bmovies?\b/iu;
+
+const CONTINUATION =
+  /ทำต่อ|ต่อเลย|ไปต่อ|เอาต่อ|ต่อได้เลย|\b(?:continue|carry\s+on|go\s+on|keep\s+going|next\s+step)\b/iu;
+
 export type ConversationPolarity = "affirm" | "negate";
 export type ConversationDeixis = "same" | "previous";
 
@@ -70,6 +99,12 @@ export type ConversationUtterance = Readonly<{
   ordinal?: number;
   deixis?: ConversationDeixis;
   progressInquiry: boolean;
+  /** Asking to see the current work as images. */
+  visualRequest: boolean;
+  /** Asking to proceed with the current work, naming nothing. */
+  continuation: boolean;
+  /** Asking for a video to be made. */
+  videoRequest: boolean;
 }>;
 
 export function classifyConversationUtterance(content: string): ConversationUtterance | undefined {
@@ -94,11 +129,17 @@ export function classifyConversationUtterance(content: string): ConversationUtte
     : DEIXIS_PREVIOUS.test(text)
       ? "previous"
       : undefined;
+  // A negation is never a request to render or to proceed: "ไม่เอาภาพ" asks for
+  // the opposite of both, and reading it either way would act against the owner.
+  const affirmative = polarity !== "negate" && !progressInquiry;
   return Object.freeze({
     text,
     ...(polarity ? { polarity } : {}),
     ...(ordinalMatch ? { ordinal: Number(ordinalMatch) } : {}),
     ...(deixis ? { deixis } : {}),
     progressInquiry,
+    visualRequest: affirmative && IMAGE_NOUN.test(text) && REQUEST_VERB.test(text),
+    continuation: affirmative && CONTINUATION.test(text),
+    videoRequest: affirmative && VIDEO_NOUN.test(text) && REQUEST_VERB.test(text),
   });
 }

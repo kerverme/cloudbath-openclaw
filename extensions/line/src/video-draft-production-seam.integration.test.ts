@@ -94,7 +94,8 @@ vi.mock("./accounts.js", () => ({
 
 const lineEntry = (await import("../index.js")).default;
 const { createLineVideoConfirmationGate } = await import("./video-confirmation.js");
-const { LINE_VIDEO_DRAFT_TOOL_NAME } = await import("./video-draft-tool.js");
+const { LINE_LEGACY_VIDEO_DRAFT_MARKER, LINE_VIDEO_DRAFT_TOOL_NAME } =
+  await import("./video-draft-tool.js");
 const { LINE_VIDEO_DRAFT_NAMESPACE } = await import("./video-draft-store.js");
 const { LINE_VIDEO_ACTIVE_JOB_NAMESPACE, LINE_VIDEO_JOB_NAMESPACE } =
   await import("./video-job-store.js");
@@ -205,6 +206,9 @@ describe(`LINE production outbound seam for '${PRODUCTION_REQUEST}'`, () => {
     });
     registry.plugins.push(record);
     const toolFactories = new Map<string, OpenClawPluginToolFactory>();
+    // One hook name can carry several registrations. They are composed into a
+    // single handler, in registration order, so this test drives the hook the
+    // way the host does instead of silently keeping only the last one.
     const hookHandlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
     lineEntry.register(
       createTestPluginApi({
@@ -223,9 +227,13 @@ describe(`LINE production outbound seam for '${PRODUCTION_REQUEST}'`, () => {
           }
         },
         on(hookName, handler, options) {
+          const existing = hookHandlers.get(hookName);
+          const added = handler as unknown as (event: unknown, ctx: unknown) => unknown;
           hookHandlers.set(
             hookName,
-            handler as unknown as (event: unknown, ctx: unknown) => unknown,
+            existing
+              ? async (event, ctx) => (await existing(event, ctx)) ?? (await added(event, ctx))
+              : added,
           );
           addTestHook({
             registry,
@@ -271,6 +279,15 @@ describe(`LINE production outbound seam for '${PRODUCTION_REQUEST}'`, () => {
           plugin: linePlugin,
         },
       ]),
+    );
+
+    // Storyboard-first owns natural video intent now, so the legacy draft tool
+    // exists only for a turn the owner marked explicitly. This suite is the
+    // legacy path's own outbound seam, so it opens the turn the same way a
+    // real explicitly-legacy request would.
+    await getRequiredHookHandler(hookHandlers, "before_dispatch")(
+      { channel: "line", content: `${LINE_LEGACY_VIDEO_DRAFT_MARKER} ${PRODUCTION_REQUEST}` },
+      { channelId: "line", accountId: "acct-1", conversationId: GROUP_ID, sessionKey: SESSION_KEY },
     );
 
     const factory = toolFactories.get(LINE_VIDEO_DRAFT_TOOL_NAME);
@@ -410,6 +427,18 @@ describe(`LINE production outbound seam for '${PRODUCTION_REQUEST}'`, () => {
       // use reply_payload_sending and never enter the durable message tool.
       const replySessionKey = `${SESSION_KEY}:provider-native`;
       const replyGroupId = `${GROUP_ID}-provider-native`;
+      // A second turn, so it needs its own explicit legacy marker: the gate is
+      // per turn precisely so one marked request cannot open the legacy path
+      // for everything that follows in the conversation.
+      await getRequiredHookHandler(hookHandlers, "before_dispatch")(
+        { channel: "line", content: `${LINE_LEGACY_VIDEO_DRAFT_MARKER} ${PRODUCTION_REQUEST}` },
+        {
+          channelId: "line",
+          accountId: "acct-1",
+          conversationId: replyGroupId,
+          sessionKey: replySessionKey,
+        },
+      );
       const replyToolMaterialized = factory!({
         config: cfg,
         agentId: "main",

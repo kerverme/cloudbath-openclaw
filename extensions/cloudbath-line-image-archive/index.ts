@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import type { OpenClawPluginApi, PluginLogger } from "openclaw/plugin-sdk/plugin-entry";
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
@@ -64,6 +65,7 @@ import {
   createCloudbathStoryboardLineRouter,
   openStoryboardConversationStores,
 } from "./src/storyboard-runtime.js";
+import type { StoryboardVersion } from "./src/storyboard-types.js";
 import {
   createStoryboardVisualRouteHandler,
   type StoryboardVisualRouteRuntime,
@@ -306,13 +308,40 @@ export default definePluginEntry({
               maxEntries: 40_000,
               overflowPolicy: "reject-new",
             });
+          /**
+           * Reads a frozen first frame back as bytes, through the same
+           * integrity check every other consumer uses.
+           *
+           * Scoped to the version's own owner triple, so a handle can only ever
+           * resolve media that owner put in that conversation.
+           */
+          const runtimeSourceImageBytes = async (
+            version: StoryboardVersion,
+            mediaId: string,
+          ): Promise<{ buffer: Buffer; mimeType: string } | undefined> => {
+            const resolved =
+              await tryGetCloudbathWorkspacePolicyRuntime()?.ugcCharacterWorkflow?.resolveSelectedSourceImage(
+                {
+                  accountId: version.accountId,
+                  lineGroupId: version.lineGroupId,
+                  ownerSenderId: version.ownerSenderId,
+                },
+                mediaId,
+              );
+            if (!resolved) {
+              throw new Error("Selected storyboard source image is unavailable");
+            }
+            // The type the store proved from the bytes, never assumed: a PNG
+            // handed over as JPEG declares a type the file does not have.
+            return { buffer: await readFile(resolved.path), mimeType: resolved.mimeType };
+          };
           const storyboardVisuals = config.publicAssetBaseUrl
             ? new StoryboardVisualService({
                 artifacts: storyboardVisualArtifacts,
                 now: Date.now,
                 logger,
-                generate: async ({ version, shotIndex, identityReferences }) => {
-                  const inputImages = await Promise.all(
+                generate: async ({ version, shotIndex, identityReferences, sourceImage }) => {
+                  const identityImages = await Promise.all(
                     identityReferences.map(async (reference) => {
                       if (reference.source !== "r2") {
                         throw new Error("Visual storyboard identity reference must be an R2 asset");
@@ -326,6 +355,16 @@ export default definePluginEntry({
                       return { buffer: Buffer.from(media.bytes), mimeType: media.contentType };
                     }),
                   );
+                  // The owner's chosen first frame, read from the storyboard
+                  // plugin's own media store. It is a separate input from the
+                  // identity references above and never joins characterLocks:
+                  // it says what the shot looks like, not who is in it. An
+                  // unreadable selection fails the render rather than quietly
+                  // producing a shot that ignores the image the owner chose.
+                  const firstFrame = sourceImage
+                    ? await runtimeSourceImageBytes(version, sourceImage.mediaId)
+                    : undefined;
+                  const inputImages = firstFrame ? [firstFrame, ...identityImages] : identityImages;
                   const beat = version.document.beats[shotIndex - 1]!;
                   const generated = await api.runtime.imageGeneration.generate({
                     cfg: api.runtime.config.current() as OpenClawConfig,
@@ -334,6 +373,9 @@ export default definePluginEntry({
                       `Environment: ${beat.environmentNote ?? version.document.environment}.`,
                       `Framing: ${beat.framing}. Camera: ${beat.camera}. Action: ${beat.action}.`,
                       "Preserve the identity and outfit of every ordered reference image exactly.",
+                      ...(firstFrame
+                        ? ["The first reference image is this scene's opening frame; match it."]
+                        : []),
                     ].join(" "),
                     inputImages,
                     aspectRatio: version.document.aspectRatio,
@@ -414,6 +456,10 @@ export default definePluginEntry({
             Date.now,
             { endpoint: config.r2.endpoint, bucketName: config.r2.bucketName },
           );
+          // Opened once and shared: the router and the inbound-capture
+          // narrowing must read the SAME rows, or "is storyboard work open?"
+          // would be answerable two ways.
+          const storyboardConversationStores = openStoryboardConversationStores(api.runtime.state);
           ugcCharacterWorkflow = new UgcCharacterImageWorkflow(
             workspaceRegistry,
             latestCharacterImages,
@@ -437,6 +483,18 @@ export default definePluginEntry({
             // its name memo is stale, and the owner names the new character in
             // their very next message.
             () => storyboardResolver.invalidateCharacterNames(),
+            // The unbound-capture narrowing. Both rows exist only because a
+            // dispatch turn already proved `senderIsOwner`, so this is the
+            // closest thing to an owner predicate available at an inbound image
+            // — and it is a NEED predicate, not an identity claim.
+            async (claim) => {
+              const key = `${claim.accountId}:${claim.lineGroupId}:${claim.ownerSenderId}`;
+              const [active, director] = await Promise.all([
+                storyboardConversationStores.active.lookup(`storyboard-active:${key}`),
+                storyboardConversationStores.director.lookup(`storyboard-director:${key}`),
+              ]);
+              return Boolean(active) || Boolean(director && !director.closed);
+            },
           );
           // Storyboard is the DEFAULT natural-language video flow and needs no
           // engine, bucket or public URL, so it is wired before the previs block
@@ -464,6 +522,14 @@ export default definePluginEntry({
             // so there is one scope contract rather than two.
             ...(ugcDraftScopes ? { draftScopes: ugcDraftScopes } : {}),
             ugcCapabilities: workspaceConfig.ugc.capabilities,
+            // The image the owner put in THIS conversation, from the durable
+            // record the character workflow already captures for the same
+            // trusted triple. One authoritative media store, read here rather
+            // than a second one grown beside it.
+            readLatestInboundImage: async (claim) =>
+              await tryGetCloudbathWorkspacePolicyRuntime()?.ugcCharacterWorkflow?.readLatestInboundImage(
+                claim,
+              ),
             ...(storyboardVisuals && config.publicAssetBaseUrl
               ? {
                   visuals: storyboardVisuals,
@@ -492,7 +558,7 @@ export default definePluginEntry({
           // a build without the LINE plugin simply has no job to report on.
           conversationRouter = createCloudbathConversationRouter({
             state: api.runtime.state,
-            ...openStoryboardConversationStores(api.runtime.state),
+            ...storyboardConversationStores,
             registry: {
               lookup: async (accountId, groupId) =>
                 await workspaceRegistry?.lookup(accountId, groupId),
@@ -672,6 +738,17 @@ export default definePluginEntry({
               (await tryGetCloudbathWorkspacePolicyRuntime()?.storyboardLineRouter?.requoteActiveDraft(
                 request,
               )) ?? { kind: "no_active_storyboard" },
+            resolveStoryboardSourceImage: async (request) => {
+              const groupId = request.conversationId.replace(/^line:group:/u, "");
+              return await tryGetCloudbathWorkspacePolicyRuntime()?.ugcCharacterWorkflow?.resolveSelectedSourceImage(
+                {
+                  accountId: request.accountId,
+                  lineGroupId: groupId,
+                  ownerSenderId: request.ownerSenderId,
+                },
+                request.mediaId,
+              );
+            },
             readStoryboardVersionNumber: async (request) =>
               await tryGetCloudbathWorkspacePolicyRuntime()?.storyboardLineRouter?.readStoryboardVersionNumber(
                 request,

@@ -22,7 +22,7 @@ import type {
   StoryboardPaidDraftRuntime,
   StoryboardVideoJobSnapshot,
 } from "./storyboard-paid-draft-runtime.js";
-import { harness } from "./storyboard-router.test-support.js";
+import { harness, OWNER_SENDER_ID } from "./storyboard-router.test-support.js";
 import type { AsyncKeyedStore } from "./types.js";
 
 /** A natural video request that pins nothing down, so the director opens. */
@@ -418,7 +418,11 @@ describe("what arbitration refuses to take", () => {
     expect(answered.conversation).toEqual({ kind: "pass" });
   });
 
-  it("is unreachable in a conversation the workspace policy does not bind", async () => {
+  it("still arbitrates for the owner in a conversation with no workspace binding", async () => {
+    // An unbound group is the owner's conversation too. The workspace policy
+    // scopes Character Library and project identity; it does not decide whether
+    // the owner gets the product's conversation layer at all, and gating on it
+    // is what sent an unbound group's video request to the legacy draft tool.
     const h = harness({
       paidDraftRuntime: stubPaidRuntime(runningJob()),
       binding: null,
@@ -426,8 +430,30 @@ describe("what arbitration refuses to take", () => {
 
     const asked = await h.dispatch("เสร็จยัง");
 
+    expect(asked.conversation).toMatchObject({ kind: "answer" });
+  });
+
+  it("is unreachable in a conversation bound to a different owner", async () => {
+    // A bound UGC space belongs to whoever bound it. Someone else asking here
+    // is not an owner of this work, so arbitration declines outright.
+    const h = harness({
+      paidDraftRuntime: stubPaidRuntime(runningJob()),
+      binding: { policyId: "UGC", boundByOwnerId: "U-someone-else" },
+    });
+
+    const asked = await h.dispatch("เสร็จยัง");
+
     expect(asked.conversation).toEqual({ kind: "pass" });
     expect(asked.source).not.toBe("conversation");
+  });
+
+  it("is unreachable where the group policy is explicitly not UGC", async () => {
+    const h = harness({
+      paidDraftRuntime: stubPaidRuntime(runningJob()),
+      binding: { policyId: "KEEP_WATCHING", boundByOwnerId: OWNER_SENDER_ID },
+    });
+
+    expect((await h.dispatch("เสร็จยัง")).conversation).toEqual({ kind: "pass" });
   });
 });
 
