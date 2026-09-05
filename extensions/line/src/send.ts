@@ -39,13 +39,17 @@ interface LineSendOpts {
   mediaUrl?: string;
   mediaKind?: "image" | "video" | "audio";
   previewImageUrl?: string;
+  mediaAlreadyPersistent?: boolean;
   durationMs?: number;
   trackingId?: string;
   replyToken?: string;
 }
 
 type LineClientOpts = Pick<LineSendOpts, "cfg" | "channelAccessToken" | "accountId">;
-type LinePushOpts = Pick<LineSendOpts, "cfg" | "channelAccessToken" | "accountId" | "verbose">;
+type LinePushOpts = Pick<
+  LineSendOpts,
+  "cfg" | "channelAccessToken" | "accountId" | "verbose" | "mediaAlreadyPersistent"
+>;
 
 interface LinePushBehavior {
   errorContext?: string;
@@ -221,7 +225,22 @@ async function pushLineMessages(
     throw new Error("Message must be non-empty for LINE sends");
   }
 
-  const stagedMessages = await stageLineOutboundMessageImages(messages);
+  if (opts.mediaAlreadyPersistent) {
+    for (const message of messages) {
+      if (message.type !== "image") {
+        continue;
+      }
+      for (const value of [message.originalContentUrl, message.previewImageUrl]) {
+        const url = new URL(value);
+        if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash) {
+          throw new Error("Persistent LINE image URLs must be query-free HTTPS URLs");
+        }
+      }
+    }
+  }
+  const stagedMessages = opts.mediaAlreadyPersistent
+    ? messages
+    : await stageLineOutboundMessageImages(messages);
   const { account, client, chatId } = createLinePushContext(to, opts);
   const pushRequest = client.pushMessage({
     to: chatId,

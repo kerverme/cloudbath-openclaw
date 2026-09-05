@@ -87,8 +87,20 @@ export type LineStoryboardVideoDraftRequest = Readonly<{
   spokenDialogue: boolean;
   storyboardId: string;
   storyboardVersionNumber: number;
+  /**
+   * The owner-selected first frame, as the storyboard's own opaque handle.
+   *
+   * Resolved HERE, through the storyboard plugin's media store, so the draft
+   * freezes a real local path before a code is minted. An unresolvable handle
+   * refuses the draft: a request that claims image mode must carry the image,
+   * and submitting text-only under an image quote is exactly the mismatch this
+   * refusal exists to prevent.
+   */
+  sourceImage?: Readonly<{ kind: "owner_selected"; mediaId: string }>;
   characterLocks: readonly LineStoryboardCharacterLock[];
   referenceAssets: readonly LineStoryboardReferenceAsset[];
+  inputMode: "text_to_video" | "image_to_video" | "reference_to_video" | "storyboard_shot_to_video";
+  renderStrategy: "quick_video" | "best_quality_shot_by_shot";
   /**
    * Endpoint the owner picked. Absent means "use the capability-aware default".
    *
@@ -114,6 +126,8 @@ export type LineStoryboardVideoDraftRejection =
       incompatibilities: readonly FalIncompatibility[];
     }
   | { kind: "rejected"; reason: "no_compatible_model" }
+  /** The frozen first frame could not be resolved; image mode cannot be honoured. */
+  | { kind: "rejected"; reason: "source_image_unavailable" }
   | { kind: "rejected"; reason: "unknown_cost"; model: string }
   | {
       kind: "rejected";
@@ -154,6 +168,19 @@ export type LineStoryboardVideoDraftResult =
 export type PrepareLineStoryboardVideoDraftDeps = Readonly<{
   draftStore: LineVideoDraftStore;
   /**
+   * Resolves the storyboard's opaque first-frame handle to a local path.
+   *
+   * Injected because the media it names is the storyboard plugin's, not this
+   * one's: the handle crosses the seam, the bytes never do. Absent, an
+   * image-mode request has no way to carry its image and is refused.
+   */
+  resolveSourceImage?: (params: {
+    accountId: string;
+    conversationId: string;
+    ownerSenderId: string;
+    mediaId: string;
+  }) => Promise<Readonly<{ path: string; mimeType: string }> | undefined>;
+  /**
    * Proves fal credentials exist BEFORE a payable code is minted.
    *
    * A code the owner cannot actually spend is worse than a refusal: it looks
@@ -186,6 +213,7 @@ export function deriveFalRequirements(
     spokenDialogue: request.spokenDialogue,
     identityReferenceCount: request.referenceAssets.filter((asset) => asset.kind === "identity")
       .length,
+    inputMode: request.inputMode,
   });
 }
 
@@ -327,6 +355,24 @@ export async function prepareLineStoryboardVideoDraft(
   });
   const audio = requirements.audio !== "off";
 
+  // Fail closed BEFORE a code exists. A draft quoted as image mode whose first
+  // frame cannot be resolved would submit a text-only request against an image
+  // quote, so the mode and the actual provider inputs are reconciled here or
+  // nothing is minted at all.
+  const resolvedSourceImage = request.sourceImage
+    ? await deps
+        .resolveSourceImage?.({
+          accountId: request.accountId,
+          conversationId: request.conversationId,
+          ownerSenderId: request.ownerSenderId,
+          mediaId: request.sourceImage.mediaId,
+        })
+        .catch(() => undefined)
+    : undefined;
+  if (request.sourceImage && !resolvedSourceImage) {
+    return { kind: "rejected", reason: "source_image_unavailable" };
+  }
+
   // The one collision-safe allocator, against LINE's own draft store.
   const draft = await createLineVideoDraft({
     store: deps.draftStore,
@@ -344,6 +390,7 @@ export async function prepareLineStoryboardVideoDraft(
     estimatedCostUsd: price.amountUsd,
     storyboardId: request.storyboardId,
     storyboardVersionNumber: request.storyboardVersionNumber,
+    ...(resolvedSourceImage ? { sourceImagePath: resolvedSourceImage.path } : {}),
     ...(request.deliveryTo ? { deliveryTo: request.deliveryTo } : {}),
     ...(deps.now ? { now: deps.now } : {}),
     ...(deps.randomDraftCode ? { randomDraftCode: deps.randomDraftCode } : {}),

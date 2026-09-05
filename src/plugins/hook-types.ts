@@ -102,6 +102,7 @@ export type PluginHookName =
   | "message_sent"
   | "before_tool_call"
   | "after_tool_call"
+  | "media_generation_completed"
   | "tool_result_persist"
   | "before_message_write"
   | "session_start"
@@ -151,6 +152,7 @@ export const PLUGIN_HOOK_NAMES = [
   "message_sent",
   "before_tool_call",
   "after_tool_call",
+  "media_generation_completed",
   "tool_result_persist",
   "before_message_write",
   "session_start",
@@ -704,6 +706,18 @@ export type PluginHookAfterToolCallEvent = {
   durationMs?: number;
 };
 
+/** Authoritative successful output from synchronous or detached media generation. */
+export type PluginHookMediaGenerationCompletedEvent = {
+  taskId?: string;
+  runId?: string;
+  requesterSessionKey: string;
+  mediaType: "image" | "video" | "audio";
+  provider: string;
+  model: string;
+  completedAt: string;
+  artifacts: readonly Readonly<{ path: string; mimeType: string; name?: string }>[];
+};
+
 export type PluginHookToolResultPersistContext = {
   agentId?: string;
   sessionKey?: string;
@@ -1237,6 +1251,10 @@ export type PluginHookHandlerMap = {
   ) => Promise<PluginHookBeforeToolCallResult | void> | PluginHookBeforeToolCallResult | void;
   after_tool_call: (
     event: PluginHookAfterToolCallEvent,
+    ctx: PluginHookToolContext,
+  ) => Promise<void> | void;
+  media_generation_completed: (
+    event: PluginHookMediaGenerationCompletedEvent,
     ctx: PluginHookToolContext,
   ) => Promise<void> | void;
   tool_result_persist: (

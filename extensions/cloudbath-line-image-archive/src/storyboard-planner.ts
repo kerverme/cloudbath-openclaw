@@ -19,6 +19,7 @@ type PlannerBeat = Readonly<{
   kind: StoryboardBeatKind;
   framing: string;
   action: string;
+  caption?: string;
   camera: string;
   characterNames: readonly string[];
 }>;
@@ -74,6 +75,9 @@ function readCreate(value: unknown): PlannerCreateResult | undefined {
       kind: beat.kind as StoryboardBeatKind,
       framing: beat.framing.trim(),
       action: beat.action.trim(),
+      ...(typeof beat.caption === "string" && beat.caption.trim()
+        ? { caption: beat.caption.trim().slice(0, 80) }
+        : {}),
       camera: beat.camera.trim(),
       characterNames: beat.characterNames,
       ...(startSeconds === undefined ? {} : { startSeconds }),
@@ -117,10 +121,20 @@ function compilePlannedBeats(params: {
   plan: PlannerCreateResult;
   cast: readonly StoryboardCastMember[];
   durationSeconds: number;
+  minimumShotCount: number;
 }): PlannedStoryboard {
+  const planned = [...params.plan.beats];
+  for (let index = planned.length; index < params.minimumShotCount; index += 1) {
+    const source = planned[index % params.plan.beats.length]!;
+    planned.push({
+      ...source,
+      framing: index % 2 === 0 ? "Close-up" : source.framing,
+      camera: index % 2 === 0 ? "Cut to detail" : source.camera,
+    });
+  }
   const castByName = new Map(params.cast.map((member) => [member.displayName, member]));
-  const windows = allocateWindows(params.plan.beats, params.durationSeconds);
-  const beats = params.plan.beats.map((beat, index) => {
+  const windows = allocateWindows(planned, params.durationSeconds);
+  const beats = planned.map((beat, index) => {
     const members = beat.characterNames.map((name) => castByName.get(name));
     if (members.some((member) => !member)) {
       throw new Error("Storyboard planner named a character outside the canonical cast");
@@ -131,6 +145,7 @@ function compilePlannedBeats(params: {
       kind: beat.kind,
       framing: beat.framing,
       action: beat.action,
+      caption: beat.caption ?? beat.action.slice(0, 80),
       camera: beat.camera,
       characterIds: Object.freeze(members.map((member) => member!.characterId)),
     });
@@ -199,12 +214,19 @@ export class StoryboardLlmPlanner {
     cast: readonly StoryboardCastMember[];
   }): Promise<PlannedStoryboard> {
     const names = params.cast.map((member) => member.displayName);
+    const requestedShots = /(?:^|\s)(\d{1,2})\s*(?:ช็อต|shots?)(?:\s|$)/iu.exec(params.request)?.[1];
+    const explicitRanges = params.request.match(/\d{1,3}\s*(?:-|–|—|ถึง|to)\s*\d{1,3}/giu);
+    const minimumShotCount = Math.min(
+      params.durationSeconds,
+      Math.max(1, requestedShots ? Number(requestedShots) : (explicitRanges?.length ?? 0) || 6),
+    );
     return await this.request({
       purpose: "cloudbath-storyboard-create",
       prompt: [
         `Plan a ${params.durationSeconds}-second storyboard from the user's request.`,
         `Allowed characterNames: ${JSON.stringify(names)}.`,
-        'Return {"beats":[{"startSeconds":number,"endSeconds":number,"kind":"establishing|locomotion|transition|dialogue|action","framing":string,"action":string,"camera":string,"characterNames":string[]}]}',
+        `Return at least ${minimumShotCount} beats unless the user explicitly requested fewer.`,
+        'Return {"beats":[{"startSeconds":number,"endSeconds":number,"kind":"establishing|locomotion|transition|dialogue|action","framing":string,"action":string,"caption":string,"camera":string,"characterNames":string[]}]}',
         "Timings are guidance; keep the beats ordered. Do not add generic establishing filler unless it supports the requested events.",
         `USER_REQUEST: ${params.request}`,
       ].join("\n"),
@@ -218,6 +240,7 @@ export class StoryboardLlmPlanner {
             plan,
             cast: params.cast,
             durationSeconds: params.durationSeconds,
+            minimumShotCount,
           });
         } catch {
           return undefined;

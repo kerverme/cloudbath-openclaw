@@ -16,6 +16,7 @@ import {
   type StoryboardPaidDraftResult,
   type StoryboardPaidDraftRuntime,
 } from "./storyboard-paid-draft-runtime.js";
+import { resolveStoryboardInputMode } from "./storyboard-types.js";
 import type {
   StoryboardCostEstimate,
   StoryboardDraftConfirmation,
@@ -338,10 +339,7 @@ export async function prepareStoryboardFinalVideoDraftWithOutcome(
     draftId,
     storyboardId: version.storyboardId,
     storyboardVersionNumber: version.versionNumber,
-    projectInstanceId: version.projectInstanceId,
-    projectPageId: version.projectPageId,
-    sceneId: version.sceneId,
-    scenePageId: version.scenePageId,
+    ...(version.project ? { project: version.project } : {}),
     accountId: version.accountId,
     lineGroupId: version.lineGroupId,
     ownerSenderId: version.ownerSenderId,
@@ -351,6 +349,8 @@ export async function prepareStoryboardFinalVideoDraftWithOutcome(
     resolution,
     model,
     estimatedCost,
+    inputMode: resolveStoryboardInputMode(version),
+    renderStrategy: "quick_video",
     plan,
     // Never minted here. A `ready` code is always the one the LINE plugin
     // allocated in its own store; this side has no 4-digit allocator at all,
@@ -405,12 +405,28 @@ async function requestPaidDraft(
       spokenDialogue: storyboardHasSpeech(version.document),
       storyboardId: version.storyboardId,
       storyboardVersionNumber: version.versionNumber,
+      // Carried as the handle the storyboard froze. The paid side resolves it
+      // and refuses the draft if it cannot, so `inputMode` and the provider's
+      // actual inputs are decided by one fact rather than two.
+      ...(version.document.sourceImage
+        ? {
+            // The HANDLE only. When the owner picked it is this side's record of
+            // the conversation, not something the paid side may act on, and the
+            // declared seam shape is the whole contract.
+            sourceImage: {
+              kind: "owner_selected" as const,
+              mediaId: version.document.sourceImage.mediaId,
+            },
+          }
+        : {}),
       // Canonical identity only. A scene name travels with its reference
       // asset instead, so a display name can never stand in for a code here.
       characterLocks: version.characterLocks.map((lock) =>
         Object.freeze({ code: lock.code, pageId: lock.pageId }),
       ),
       referenceAssets: paidReferenceAssets(version),
+      inputMode: resolveStoryboardInputMode(version),
+      renderStrategy: "quick_video",
       ...(params.requestedModelId ? { requestedModelId: params.requestedModelId } : {}),
     });
   } catch {

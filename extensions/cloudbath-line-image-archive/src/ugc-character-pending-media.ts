@@ -36,6 +36,12 @@ export type CapturedCharacterMedia = Readonly<{
   contentLength: number;
   sha256: string;
   extension: string;
+  /**
+   * Where the verified bytes live, for a consumer that hands a PATH onward
+   * rather than the bytes themselves. Present only on a read, which is the only
+   * operation that has proven the file matches its recorded size and digest.
+   */
+  filePath?: string;
 }>;
 
 function failure(reason: UgcCharacterMediaFailureReason): never {
@@ -317,6 +323,7 @@ export class UgcCharacterPendingMediaStore {
       contentLength: bytes.byteLength,
       sha256,
       extension,
+      filePath,
     };
   }
 

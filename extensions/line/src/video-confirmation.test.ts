@@ -222,6 +222,12 @@ function createWorkspaceRuntime(params: {
     // These drafts carry no storyboard, so the gate never asks. Throwing keeps
     // that true: a call would mean a non-storyboard code had been put through
     // the storyboard-currency proof.
+    // Confirmation never resolves a first frame: the draft froze its local path
+    // at allocation, long before this gate runs. A call here would mean the paid
+    // path had grown a second, later place to decide what image it submits.
+    async resolveStoryboardSourceImage() {
+      throw new Error("confirmation gate must not resolve a storyboard source image");
+    },
     async readStoryboardVersionNumber() {
       throw new Error("confirmation gate must not read a version for a non-storyboard draft");
     },

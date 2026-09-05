@@ -27,6 +27,18 @@ export const CLOUDBATH_STORYBOARD_DIRECTOR_NAMESPACE = "cloudbath-storyboard-dir
  */
 export const CLOUDBATH_STORYBOARD_DIRECTOR_TTL_MS = 30 * 60 * 1_000;
 
+/**
+ * What this scene is built FROM, as the owner chose it.
+ *
+ * A closed answer, not an inference: the provider input mode follows directly
+ * from it, and picking up whatever image arrived recently would silently make
+ * an unrelated attachment somebody's first frame.
+ */
+export type DirectorMedia =
+  | Readonly<{ kind: "none" }>
+  | Readonly<{ kind: "source_image"; mediaId: string }>
+  | Readonly<{ kind: "character_library" }>;
+
 /** Whether the scene carries spoken dialogue, and what is said. */
 export type DirectorDialogue =
   | Readonly<{ wanted: false }>
@@ -45,6 +57,19 @@ export type StoryboardDirectorSession = Readonly<{
   scenePrompt: string;
   characterNames: readonly string[];
   environment: string;
+  /**
+   * Asked only for a request that named no cast: one that already names a
+   * Character has answered this by naming it.
+   */
+  media?: DirectorMedia;
+  mediaRequired?: true;
+  /**
+   * When this flow last asked WHICH image to use.
+   *
+   * An image that arrives after the question answers it, which is how a
+   * re-send resolves an ambiguity that two earlier images created.
+   */
+  sourceImageAskedAt?: string;
   durationSeconds?: number;
   aspectRatio?: string;
   resolution?: string;
@@ -61,7 +86,7 @@ export type StoryboardDirectorSession = Readonly<{
 }>;
 
 /** The slot the owner is being asked about, or undefined once none is left. */
-export type DirectorSlot = "duration" | "dialogue" | "dialogue_text";
+export type DirectorSlot = "media" | "duration" | "dialogue" | "dialogue_text";
 
 export function storyboardDirectorKey(claim: StoryboardAccessClaim): string {
   return `storyboard-director:${claim.accountId}:${claim.lineGroupId}:${claim.ownerSenderId}`;
@@ -74,6 +99,10 @@ export function storyboardDirectorKey(claim: StoryboardAccessClaim): string {
  * so a silent scene never gets a third question.
  */
 export function nextDirectorSlot(session: StoryboardDirectorSession): DirectorSlot | undefined {
+  // Asked first, because it decides what the scene IS before how long it runs.
+  if (session.mediaRequired && !session.media) {
+    return "media";
+  }
   if (session.durationSeconds === undefined) {
     return "duration";
   }
@@ -93,6 +122,12 @@ export function nextDirectorSlot(session: StoryboardDirectorSession): DirectorSl
 export const STORYBOARD_DURATION_CHOICES: readonly number[] = Object.freeze([15, 30]);
 
 export const DIRECTOR_QUESTION: Readonly<Record<DirectorSlot, string>> = Object.freeze({
+  media: [
+    "จะทำวิดีโอจากอะไรดี?",
+    "1. ข้อความอย่างเดียว (บรรยายฉากได้เลย)",
+    "2. ใช้ภาพที่ส่งมาเป็นเฟรมแรก",
+    "3. ใช้ตัวละครจาก Character Library",
+  ].join("\n"),
   duration: [
     "ต้องการความยาวเท่าไร?",
     ...STORYBOARD_DURATION_CHOICES.map((seconds, index) => `${index + 1}. ${seconds} วินาที`),
@@ -117,6 +152,28 @@ const CANCEL = /^(?:ยกเลิก|ไม่เอาแล้ว|พอแ�
  */
 const BARE_SECONDS = /^(\d{1,3})$/u;
 
+/**
+ * The three media answers, by ordinal or by what the owner called them.
+ *
+ * "ใช้ภาพ" with no image on record is AMBIGUOUS, not a guess: the router asks
+ * one short clarification rather than adopting whichever attachment is nearest.
+ */
+const MEDIA_TEXT_ONLY = /^1\b|ข้อความ|ไม่มีภาพ|ไม่ใช้ภาพ|\b(?:text[\s-]?only|no\s+image)\b/iu;
+const MEDIA_SOURCE_IMAGE = /^2\b|ภาพ|รูป|เฟรมแรก|\b(?:image|photo|first\s+frame)\b/iu;
+const MEDIA_CHARACTER = /^3\b|ตัวละคร|character\s*library|\bcharacter\b/iu;
+
+function readMediaAnswer(text: string): DirectorAnswer | undefined {
+  // Character first: "ใช้ตัวละคร" would otherwise never be reached, and
+  // text-only before image so "ไม่ใช้ภาพ" is not read as asking for one.
+  if (MEDIA_CHARACTER.test(text)) {
+    return { kind: "media", media: { kind: "character_library" } };
+  }
+  if (MEDIA_TEXT_ONLY.test(text)) {
+    return { kind: "media", media: { kind: "none" } };
+  }
+  return MEDIA_SOURCE_IMAGE.test(text) ? { kind: "media_ambiguous" } : undefined;
+}
+
 /** Resolves a bare number against the offered menu, else as literal seconds. */
 function readDurationChoice(value: number): number {
   return value >= 1 && value <= STORYBOARD_DURATION_CHOICES.length
@@ -126,6 +183,9 @@ function readDurationChoice(value: number): number {
 
 export type DirectorAnswer =
   | Readonly<{ kind: "cancel" }>
+  | Readonly<{ kind: "media"; media: DirectorMedia }>
+  /** The owner asked for an image without saying which one. */
+  | Readonly<{ kind: "media_ambiguous" }>
   | Readonly<{ kind: "duration"; durationSeconds: number }>
   | Readonly<{ kind: "duration_too_long"; durationSeconds: number }>
   | Readonly<{ kind: "dialogue"; wanted: boolean }>
@@ -148,6 +208,9 @@ export function parseDirectorAnswer(params: {
   }
   if (CANCEL.test(text)) {
     return { kind: "cancel" };
+  }
+  if (params.slot === "media") {
+    return readMediaAnswer(text);
   }
   if (params.slot === "duration") {
     const bare = text.match(BARE_SECONDS)?.[1];
@@ -179,9 +242,12 @@ export function parseDirectorAnswer(params: {
 /** Applies one answer, returning the session to store next. */
 export function applyDirectorAnswer(
   session: StoryboardDirectorSession,
-  answer: Extract<DirectorAnswer, { kind: "duration" | "dialogue" | "dialogue_text" }>,
+  answer: Extract<DirectorAnswer, { kind: "media" | "duration" | "dialogue" | "dialogue_text" }>,
   updatedAt: string,
 ): StoryboardDirectorSession {
+  if (answer.kind === "media") {
+    return Object.freeze({ ...session, media: answer.media, updatedAt });
+  }
   if (answer.kind === "duration") {
     return Object.freeze({ ...session, durationSeconds: answer.durationSeconds, updatedAt });
   }
@@ -210,6 +276,8 @@ export function openDirectorSession(params: {
   durationSeconds?: number;
   aspectRatio?: string;
   resolution?: string;
+  /** Set for a request that named no cast; see the `media` slot. */
+  mediaRequired?: true;
   updatedAt: string;
 }): StoryboardDirectorSession {
   return Object.freeze({
@@ -223,6 +291,7 @@ export function openDirectorSession(params: {
     ...(params.durationSeconds === undefined ? {} : { durationSeconds: params.durationSeconds }),
     ...(params.aspectRatio === undefined ? {} : { aspectRatio: params.aspectRatio }),
     ...(params.resolution === undefined ? {} : { resolution: params.resolution }),
+    ...(params.mediaRequired ? { mediaRequired: true as const } : {}),
     updatedAt: params.updatedAt,
   });
 }

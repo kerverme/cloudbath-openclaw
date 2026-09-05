@@ -40,6 +40,17 @@ export type StoryboardPaidDraftRequest = Readonly<{
   storyboardId: string;
   storyboardVersionNumber: number;
   characterLocks: readonly Readonly<{ code: string; pageId: string }>[];
+  /**
+   * The first frame the owner chose, as an OPAQUE handle.
+   *
+   * A handle rather than a URL because this crosses a plugin boundary and is
+   * persisted on both sides: a signed URL would expire, and storing one would
+   * put an asset locator into durable storyboard state. The owning plugin
+   * resolves it, so the mode a draft claims and the bytes a provider receives
+   * cannot disagree — and a handle that will not resolve fails the draft closed
+   * rather than silently submitting a text-only request as image mode.
+   */
+  sourceImage?: Readonly<{ kind: "owner_selected"; mediaId: string }>;
   referenceAssets: readonly Readonly<{
     kind: "identity" | "product" | "style";
     source: "r2" | "https";
@@ -48,6 +59,8 @@ export type StoryboardPaidDraftRequest = Readonly<{
     characterCode?: string;
     displayName?: string;
   }>[];
+  inputMode: "text_to_video" | "image_to_video" | "reference_to_video" | "storyboard_shot_to_video";
+  renderStrategy: "quick_video" | "best_quality_shot_by_shot";
   /** Endpoint the owner chose. Absent means the capability-aware default. */
   requestedModelId?: string;
 }>;
@@ -90,6 +103,7 @@ export type StoryboardVideoRequirements = Readonly<{
   audio: "off" | "ambient" | "full";
   spokenDialogue: boolean;
   identityReferenceCount: number;
+  inputMode: StoryboardPaidDraftRequest["inputMode"];
 }>;
 
 export type StoryboardRuntimeModelOption = Readonly<{

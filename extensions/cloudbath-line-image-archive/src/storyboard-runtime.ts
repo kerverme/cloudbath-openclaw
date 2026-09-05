@@ -20,6 +20,7 @@ import {
 import {
   CloudbathStoryboardLineRouter,
   type StoryboardProjectResolver,
+  type StoryboardLineRouterDeps,
 } from "./storyboard-line-router.js";
 import type { StoryboardLlmPlanner } from "./storyboard-planner.js";
 import {
@@ -34,10 +35,12 @@ import {
 } from "./storyboard-store.js";
 import type {
   ActiveStoryboardContext,
+  StoryboardAccessClaim,
   StoryboardFinalVideoDraft,
   StoryboardHead,
   StoryboardVersion,
 } from "./storyboard-types.js";
+import type { StoryboardVisualService } from "./storyboard-visual.js";
 import type {
   AsyncKeyedStore,
   FrozenUgcVideoScope,
@@ -103,6 +106,14 @@ export function openStoryboardConversationStores(state: StoryboardStateApi): Rea
   };
 }
 
+/**
+ * How recently an inbound image still counts as "the image I just sent".
+ *
+ * Long enough to describe a scene after sending a photo, short enough that
+ * yesterday's picture can never quietly become today's first frame.
+ */
+export const SOURCE_IMAGE_SELECTION_WINDOW_MS = 30 * 60 * 1_000;
+
 export function createCloudbathStoryboardLineRouter(deps: {
   state: StoryboardStateApi;
   resolver: StoryboardProjectResolver;
@@ -118,6 +129,25 @@ export function createCloudbathStoryboardLineRouter(deps: {
   draftScopes?: AsyncKeyedStore<FrozenUgcVideoScope>;
   ugcCapabilities?: Readonly<Record<UgcCapabilityId, NotionTarget>>;
   planner?: StoryboardLlmPlanner;
+  visuals?: StoryboardVisualService;
+  publicAssetBaseUrl?: string;
+  sendVisualImage?: StoryboardLineRouterDeps["sendVisualImage"];
+  /**
+   * Proves the owner explicitly put an image in THIS conversation.
+   *
+   * Read from the durable inbound-image record the character workflow already
+   * captures, keyed by the same trusted triple — never a scan for the newest
+   * image anywhere. Absent, the storyboard flow asks instead of guessing.
+   */
+  readLatestInboundImage?: (claim: StoryboardAccessClaim) => Promise<
+    | Readonly<{
+        durableMediaKey: string;
+        sourceReceivedAt: string;
+        /** Set when this image displaced another recent one. */
+        displacedRecentAt?: string;
+      }>
+    | undefined
+  >;
 }): CloudbathStoryboardLineRouter {
   const now = deps.now ?? Date.now;
   return new CloudbathStoryboardLineRouter({
@@ -161,7 +191,38 @@ export function createCloudbathStoryboardLineRouter(deps: {
     now,
     logger: deps.logger,
     ...(deps.planner ? { planner: deps.planner } : {}),
+    ...(deps.visuals ? { visuals: deps.visuals } : {}),
+    ...(deps.publicAssetBaseUrl ? { publicAssetBaseUrl: deps.publicAssetBaseUrl } : {}),
+    ...(deps.sendVisualImage ? { sendVisualImage: deps.sendVisualImage } : {}),
     ...(deps.draftScopes ? { draftScopes: deps.draftScopes } : {}),
     ...(deps.ugcCapabilities ? { ugcCapabilities: deps.ugcCapabilities } : {}),
+    ...(deps.readLatestInboundImage
+      ? {
+          resolveSelectedSourceImage: async (claim: StoryboardAccessClaim, askedAt?: string) => {
+            const record = await deps.readLatestInboundImage?.(claim).catch(() => undefined);
+            if (!record) {
+              return { kind: "none" as const };
+            }
+            const receivedAt = Date.parse(record.sourceReceivedAt);
+            // An image that arrived AFTER the flow asked which one to use IS
+            // the answer, whatever it displaced: the question is what makes it
+            // unambiguous. Otherwise a row that displaced another recent image
+            // means two candidates existed, and picking the newer would be the
+            // most-recent-wins rule this flow refuses to have.
+            const answersTheQuestion = askedAt ? receivedAt > Date.parse(askedAt) : false;
+            if (record.displacedRecentAt && !answersTheQuestion) {
+              return { kind: "ambiguous" as const };
+            }
+            // Bounded on purpose. "Use the image I sent" means the one they just
+            // sent; an image from hours ago is a different intention, and
+            // adopting it silently is the wrong-content failure this branch
+            // exists to avoid. A stale record asks again instead.
+            const age = now() - receivedAt;
+            return Number.isFinite(age) && age >= 0 && age <= SOURCE_IMAGE_SELECTION_WINDOW_MS
+              ? { kind: "selected" as const, mediaId: record.durableMediaKey }
+              : { kind: "none" as const };
+          },
+        }
+      : {}),
   });
 }

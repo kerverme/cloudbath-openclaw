@@ -12,8 +12,14 @@
  * Draft performs no provider call and consumes no `VIDEO ####` code.
  */
 
+import { classifyConversationUtterance } from "./conversation-utterance.js";
 import type { PrevisProjectResolver } from "./previs-line-router.js";
 import { parseStoryboardAudioIntent } from "./storyboard-audio.js";
+import {
+  resolveStoryboardAuthorization,
+  STORYBOARD_PROJECT_CAPABILITY_REPLY,
+  type StoryboardAuthorization,
+} from "./storyboard-authorization.js";
 import { compileStoryboardDocument } from "./storyboard-compiler.js";
 import {
   isStoryboardConfirmation,
@@ -57,6 +63,7 @@ import {
   STORYBOARD_DEFAULT_DURATION_SECONDS,
   STORYBOARD_DEFAULT_RESOLUTION,
   STORYBOARD_MAX_DURATION_SECONDS,
+  readStoryboardEnvironment,
 } from "./storyboard-request.js";
 import {
   requoteActiveStoryboardDraft,
@@ -79,12 +86,19 @@ import {
   type StoryboardCastMember,
   type StoryboardFinalVideoDraft,
   type StoryboardResolution,
+  type StoryboardSourceImage,
   type StoryboardVersion,
+  resolveStoryboardInputMode,
 } from "./storyboard-types.js";
 import {
   prepareStoryboardFinalVideoDraft,
   type PrepareFinalVideoDraftParams,
 } from "./storyboard-video-plan.js";
+import {
+  deriveContactSheetPreview,
+  storyboardVisualUrl,
+  type StoryboardVisualService,
+} from "./storyboard-visual.js";
 import type {
   AsyncKeyedStore,
   FrozenUgcVideoScope,
@@ -114,13 +128,47 @@ export type StoryboardDispatchEvent = {
  * state. Nothing here is free-form, so nothing here can name a new action.
  */
 export type StoryboardContextualRoute =
-  | Readonly<{ kind: "revise_active_storyboard"; request: string }>
+  | Readonly<{
+      kind: "revise_active_storyboard";
+      request: string;
+      referent: ResolvedStoryboardReferent;
+    }>
+  /** Render the resolved storyboard as authoritative per-shot artifacts. */
+  | Readonly<{
+      kind: "generate_storyboard_visuals";
+      referent: ResolvedStoryboardReferent;
+    }>
+  /**
+   * "Carry on toward the video" for the resolved storyboard.
+   *
+   * Deliberately not a synonym for confirming: it advances to whatever step is
+   * actually missing, which before visuals exist is rendering them, never a
+   * paid draft.
+   */
+  | Readonly<{
+      kind: "continue_toward_video";
+      referent: ResolvedStoryboardReferent;
+    }>
   | Readonly<{
       kind: "new_scene_request";
       request: string;
       characterNames: readonly string[];
       environment: string;
     }>;
+
+export type ResolvedStoryboardReferent = Readonly<{
+  workId: string;
+  workKind: "storyboard";
+  storyboardId: string;
+  storyboardVersionNumber: number;
+  /** Absent for standalone work; `workId` then names the storyboard itself. */
+  projectInstanceId?: string;
+  accountId: string;
+  conversationId: string;
+  ownerSenderId: string;
+  status: "open";
+  resolvedFrom: "conversation_context";
+}>;
 
 export type StoryboardDispatchContext = {
   messageId?: string;
@@ -184,6 +232,33 @@ export type StoryboardLineRouterDeps = Readonly<{
    * storyboard still renders but confirming it is not offered.
    */
   modelSelection?: StoryboardModelSelectionStore;
+  visuals?: StoryboardVisualService;
+  /**
+   * The image the owner has EXPLICITLY put forward as this scene's first frame.
+   *
+   * Injected rather than read from a media store here, because "which image did
+   * they mean" is the owning flow's judgement. It must answer `none` when it
+   * cannot prove an explicit selection: an unrelated recent attachment silently
+   * becoming a first frame is the failure this seam exists to prevent.
+   */
+  resolveSelectedSourceImage?: (
+    claim: StoryboardAccessClaim,
+    /** Only an image that arrived AFTER this counts; set once the flow asked. */
+    askedAt?: string,
+  ) => Promise<
+    | Readonly<{ kind: "selected"; mediaId: string }>
+    /** Several images could be the one meant; the owner has to say which. */
+    | Readonly<{ kind: "ambiguous" }>
+    | Readonly<{ kind: "none" }>
+    | undefined
+  >;
+  publicAssetBaseUrl?: string;
+  sendVisualImage?: (params: {
+    to: string;
+    originalContentUrl: string;
+    previewImageUrl: string;
+    accountId: string;
+  }) => Promise<void>;
   /**
    * Warning is required; `info` is optional so a narrow test double stays
    * valid. Routed-and-answered is ordinary operation and logs at info — only
@@ -214,6 +289,7 @@ function storyboardVideoRequirements(version: StoryboardVersion): StoryboardVide
       (total, lock) => total + lock.identityReferences.length,
       0,
     ),
+    inputMode: resolveStoryboardInputMode(version),
   });
 }
 
@@ -226,6 +302,9 @@ const REPLY = {
   directorUnavailable: "ยังไม่สามารถรับคำขอแบบสนทนาได้ กรุณาระบุความยาว เช่น 10 วิ",
   noCompatibleModel:
     "ยังไม่มีโมเดลที่รองรับ Storyboard นี้ได้ (ความยาว/เสียง/ตัวละครอ้างอิง) กรุณาปรับ Storyboard",
+  /** One short clarification; never a guess at which image was meant. */
+  sourceImageAmbiguous:
+    "ยังไม่แน่ใจว่าจะใช้ภาพไหนเป็นเฟรมแรก\nกรุณาส่งภาพที่ต้องการมาอีกครั้ง หรือตอบ 1 เพื่อทำจากข้อความอย่างเดียว",
 } as const;
 
 /**
@@ -360,6 +439,48 @@ export class CloudbathStoryboardLineRouter {
 
   constructor(private readonly deps: StoryboardLineRouterDeps) {}
 
+  /** Resolves a context candidate through the authoritative owner-scoped store. */
+  async resolveStoryboardReferent(params: {
+    storyboardId: string;
+    claim: StoryboardAccessClaim;
+  }): Promise<ResolvedStoryboardReferent | undefined> {
+    const version = await this.deps.store
+      .readLatest({ storyboardId: params.storyboardId, claim: params.claim })
+      .catch(() => undefined);
+    return version
+      ? Object.freeze({
+          // Standalone work is identified by the storyboard itself: there is
+          // no project to name it by, and the version chain is what a revision
+          // has to be proven against either way.
+          workId: version.project?.projectInstanceId ?? version.storyboardId,
+          workKind: "storyboard" as const,
+          storyboardId: version.storyboardId,
+          storyboardVersionNumber: version.versionNumber,
+          ...(version.project ? { projectInstanceId: version.project.projectInstanceId } : {}),
+          accountId: version.accountId,
+          conversationId: version.lineGroupId,
+          ownerSenderId: version.ownerSenderId,
+          status: "open" as const,
+          resolvedFrom: "conversation_context" as const,
+        })
+      : undefined;
+  }
+
+  /** Classifies revision shape only; referent identity is resolved separately. */
+  async isStoryboardRevisionCandidate(params: {
+    request: string;
+    claim: StoryboardAccessClaim;
+  }): Promise<boolean> {
+    const knownCharacterNames = await this.deps.resolver
+      .listCharacterNames(params.claim)
+      .catch(() => [] as readonly string[]);
+    const intent = parseStoryboardIntent({
+      content: params.request,
+      knownCharacterNames,
+    });
+    return Boolean(intent && revisesActiveStoryboard(intent));
+  }
+
   /**
    * Handles a storyboard intent, or returns undefined to leave the turn alone.
    *
@@ -377,8 +498,8 @@ export class CloudbathStoryboardLineRouter {
     if (!claim) {
       return undefined;
     }
-    const binding = await this.deps.registry.lookup(claim.accountId, claim.lineGroupId);
-    if (binding?.policyId !== "UGC" || binding.boundByOwnerId !== claim.ownerSenderId) {
+    const authorization = await this.authorize(claim);
+    if (authorization.kind === "denied") {
       return undefined;
     }
 
@@ -405,6 +526,23 @@ export class CloudbathStoryboardLineRouter {
         return { handled: true, text: answered };
       }
     }
+    // Asking to see the work as images, or to carry on with it, is a WAY OF
+    // SPEAKING rather than a phrase: the class comes from the shared utterance
+    // classifier, and the referent is this owner's active storyboard. The
+    // conversation layer routes the same two classes when it resolves them
+    // first; this path is what answers when no semantic resolver is wired.
+    const utterance = classifyConversationUtterance(event.content ?? "");
+    if (utterance?.visualRequest || utterance?.continuation) {
+      const active = await this.readActive(claim);
+      if (active) {
+        return {
+          handled: true,
+          text: utterance.visualRequest
+            ? await this.generateVisualStoryboard(claim, active)
+            : await this.continueTowardVideo(claim, active),
+        };
+      }
+    }
     if (isStoryboardConfirmation(event.content ?? "")) {
       const confirmed = await this.confirmStoryboard(claim);
       return confirmed ? { handled: true, text: confirmed } : undefined;
@@ -414,13 +552,41 @@ export class CloudbathStoryboardLineRouter {
       .listCharacterNames(claim)
       .catch(() => [] as readonly string[]);
     const intent = parseStoryboardIntent({ content: event.content ?? "", knownCharacterNames });
+    const active = await this.readActive(claim);
+    // An owner asking for a video is storyboard-first work, always. The parser
+    // opens a storyboard only when the request already names a cast, and every
+    // other reading below needs an active one — so a video request that fits
+    // neither used to fall through, and a single-shot legacy draft answered it.
+    const opensStoryboard =
+      intent?.kind === "create" ||
+      intent?.kind === "director_open" ||
+      intent?.kind === "source_storyboard";
+    if (!opensStoryboard && utterance?.videoRequest) {
+      if (!active) {
+        // Nothing about the workspace yet: the missing thing is what the scene
+        // is made OF, and only the Character branch of that answer needs a
+        // project. Asking for UGC here would refuse text-only work that never
+        // needed it.
+        return { handled: true, text: await this.openStandaloneDirector(event, claim) };
+      }
+      // With a scene already open, only a turn the parser has NO reading for is
+      // a continuation. Everything it does recognise — "สร้างวิดีโอ" prepares
+      // the Final Video Draft — keeps its own shipped path.
+      if (!intent) {
+        return { handled: true, text: await this.continueTowardVideo(claim, active) };
+      }
+    }
     if (!intent) {
       return undefined;
     }
     // An edit, revision or draft request without an active storyboard is not
     // ours: it must fall through so the existing previs routing keeps working.
-    const active = await this.readActive(claim);
-    if (intent.kind !== "create" && intent.kind !== "director_open" && !active) {
+    if (
+      intent.kind !== "create" &&
+      intent.kind !== "director_open" &&
+      intent.kind !== "source_storyboard" &&
+      !active
+    ) {
       return undefined;
     }
     // While a storyboard is active a bare natural request is ambiguous between
@@ -475,6 +641,88 @@ export class CloudbathStoryboardLineRouter {
     }
   }
 
+  private async generateVisualStoryboard(
+    claim: StoryboardAccessClaim,
+    active: ActiveStoryboardContext,
+  ): Promise<string> {
+    if (!this.deps.visuals || !this.deps.publicAssetBaseUrl || !this.deps.sendVisualImage) {
+      return "ยังไม่พร้อมสร้าง Visual Storyboard ในระบบนี้";
+    }
+    const version = await this.deps.store.readLatest({ storyboardId: active.storyboardId, claim });
+    if (!version) {
+      return REPLY.missingVersion;
+    }
+    const status = await this.deps.visuals.generate({ version, claim });
+    if (status.kind !== "ready" && status.kind !== "partial") {
+      return "สร้าง Visual Storyboard ไม่สำเร็จ กรุณาลองอีกครั้ง";
+    }
+    // Rendering is a visible interaction with this exact work. Refresh the
+    // canonical pointer before delivery so later conversation observes it as current.
+    await this.touchActive(active);
+    const preview = deriveContactSheetPreview(status);
+    const deliveredArtifacts = preview ? [preview] : status.artifacts;
+    for (const artifact of deliveredArtifacts) {
+      await this.deps.sendVisualImage({
+        to: claim.lineGroupId,
+        accountId: claim.accountId,
+        originalContentUrl: storyboardVisualUrl({
+          publicAssetBaseUrl: this.deps.publicAssetBaseUrl,
+          artifactId: artifact.artifactId,
+          variant: "original",
+        }),
+        previewImageUrl: storyboardVisualUrl({
+          publicAssetBaseUrl: this.deps.publicAssetBaseUrl,
+          artifactId: artifact.artifactId,
+          variant: "preview",
+        }),
+      });
+      this.deps.logger?.info?.("storyboard_visual_sent_to_line", {
+        storyboardId: version.storyboardId,
+        storyboardVersion: version.versionNumber,
+        ...(artifact.generationPurpose === "storyboard-shot"
+          ? { shotIndex: artifact.shotIndex }
+          : { panelCount: artifact.panels.length }),
+        artifactId: artifact.artifactId,
+      });
+    }
+    // The review sheet is DERIVED, and only from a complete set: it summarises
+    // shots that already exist rather than standing in for them. When it cannot
+    // be derived the storyboard is not ready, and the reply says which shots
+    // are missing instead of claiming a version the owner cannot confirm.
+    return preview
+      ? `Visual Storyboard v${version.versionNumber} พร้อมแล้ว (${preview.panels.length} ช็อต)\nยืนยัน Storyboard หรือบอกจุดที่ต้องการแก้`
+      : `Visual Storyboard v${version.versionNumber} สำเร็จบางส่วน ลองทำภาพช็อต ${status.failedShotIndexes.join(", ")} ใหม่`;
+  }
+
+  /**
+   * Advances the storyboard by whatever step is actually missing.
+   *
+   * "ทำต่อ" names nothing, so it must never be read as consent to the NEXT
+   * thing in the happy path — least of all a paid one. Missing visuals are
+   * rendered; a complete storyboard is handed to the existing content
+   * confirmation, which is free and still requires the owner's own word before
+   * a model is chosen. No branch here reaches a quote or a code.
+   */
+  private async continueTowardVideo(
+    claim: StoryboardAccessClaim,
+    active: ActiveStoryboardContext,
+  ): Promise<string> {
+    const version = await this.deps.store
+      .readLatest({ storyboardId: active.storyboardId, claim })
+      .catch(() => undefined);
+    if (!version) {
+      return REPLY.missingVersion;
+    }
+    const visuals = this.deps.visuals
+      ? await this.deps.visuals.status({ version, claim })
+      : undefined;
+    if (visuals && visuals.kind !== "ready") {
+      return await this.generateVisualStoryboard(claim, active);
+    }
+    await this.touchActive(active);
+    return `Storyboard v${version.versionNumber} พร้อมภาพครบแล้ว\nพิมพ์ “ยืนยัน Storyboard” เพื่อไปเลือก Model ต่อ`;
+  }
+
   /**
    * Runs one intent and retires the paid state if it moved the scene.
    *
@@ -521,6 +769,9 @@ export class CloudbathStoryboardLineRouter {
     if (intent.kind === "director_open") {
       return await this.openDirector(intent, claim);
     }
+    if (intent.kind === "source_storyboard") {
+      return await this.openSourceStoryboardDirector(intent.scenePrompt, claim);
+    }
     if (intent.kind === "revision") {
       return await this.revise(intent.revision, claim, active!);
     }
@@ -530,7 +781,19 @@ export class CloudbathStoryboardLineRouter {
   private async create(
     intent: Extract<StoryboardIntent, { kind: "create" }>,
     claim: StoryboardAccessClaim,
+    /** The first frame the owner chose, when the director collected one. */
+    sourceImage?: StoryboardSourceImage,
   ): Promise<string> {
+    // Casting from the Character Library is the ONE thing that genuinely needs
+    // the UGC workspace: it freezes real identities into a real Notion project.
+    // A scene that names nobody needs none of that, so it plans standalone
+    // rather than being refused at the door.
+    const authorization = await this.authorize(claim);
+    const projectCapable = authorization.kind === "owner_scoped" && authorization.projectCapable;
+    const namesCast = intent.characterNames.length > 0 || intent.unknownNames.length > 0;
+    if (!projectCapable && namesCast) {
+      return STORYBOARD_PROJECT_CAPABILITY_REPLY;
+    }
     // A named-but-unknown character fails closed: dropping it silently would
     // recast the scene without the owner realising.
     if (intent.unknownNames[0]) {
@@ -540,21 +803,25 @@ export class CloudbathStoryboardLineRouter {
       return durationTooLongReply(intent.durationSeconds!);
     }
     try {
-      const resolved = await this.deps.resolver.resolveProject({
-        claim,
-        characterNames: intent.characterNames,
-        scenePrompt: intent.scenePrompt,
-        // A cast that ADDS someone the active project never froze is new work,
-        // whatever phrasing named it, and the storyboard flow has no other way
-        // to open a project. The workflow owns that judgement: it opens a new
-        // project only when the request names someone new, and a strict subset
-        // still fails loudly on the cast-lock guard. Gating this on
-        // `explicitCasting` meant only "ใช้ X กับ Y" phrasing qualified, so
-        // "เอา F99 ทำวิดีโอ ..." tried to CONTINUE a project frozen to another
-        // cast and died on that guard instead of starting F99's own project.
-        startNewProjectOnCastChange: true,
-      });
-      const cast = buildCast(resolved.characterLocks, resolved.displayNames);
+      const resolved = !projectCapable
+        ? undefined
+        : await this.deps.resolver.resolveProject({
+            claim,
+            characterNames: intent.characterNames,
+            scenePrompt: intent.scenePrompt,
+            // A cast that ADDS someone the active project never froze is new work,
+            // whatever phrasing named it, and the storyboard flow has no other way
+            // to open a project. The workflow owns that judgement: it opens a new
+            // project only when the request names someone new, and a strict subset
+            // still fails loudly on the cast-lock guard. Gating this on
+            // `explicitCasting` meant only "ใช้ X กับ Y" phrasing qualified, so
+            // "เอา F99 ทำวิดีโอ ..." tried to CONTINUE a project frozen to another
+            // cast and died on that guard instead of starting F99's own project.
+            startNewProjectOnCastChange: true,
+          });
+      // No project, no frozen locks: a standalone scene is described in the
+      // owner's own words and carries no Character identity at all.
+      const cast = resolved ? buildCast(resolved.characterLocks, resolved.displayNames) : [];
       const durationSeconds = intent.durationSeconds ?? STORYBOARD_DEFAULT_DURATION_SECONDS;
       const planned = this.deps.planner
         ? await this.deps.planner.planCreate({
@@ -577,20 +844,27 @@ export class CloudbathStoryboardLineRouter {
           parseStoryboardAudioIntent(intent.scenePrompt),
         ),
         ...(planned ? { plannedBeats: planned.beats } : {}),
+        ...(sourceImage ? { sourceImage } : {}),
       });
       const created = await this.deps.store.createStoryboard({
         document,
         claim,
-        projectInstanceId: resolved.projectInstanceId,
-        projectPageId: resolved.projectPageId,
-        sceneId: resolved.sceneId,
-        scenePageId: resolved.scenePageId,
-        characterLocks: resolved.characterLocks,
+        ...(resolved
+          ? {
+              project: {
+                projectInstanceId: resolved.projectInstanceId,
+                projectPageId: resolved.projectPageId,
+                sceneId: resolved.sceneId,
+                scenePageId: resolved.scenePageId,
+              },
+            }
+          : {}),
+        characterLocks: resolved?.characterLocks ?? [],
       });
       await this.deps.active.register(activeStoryboardKey(claim), {
         version: 1,
         storyboardId: created.head.storyboardId,
-        projectInstanceId: resolved.projectInstanceId,
+        ...(resolved ? { projectInstanceId: resolved.projectInstanceId } : {}),
         accountId: claim.accountId,
         lineGroupId: claim.lineGroupId,
         ownerSenderId: claim.ownerSenderId,
@@ -605,6 +879,31 @@ export class CloudbathStoryboardLineRouter {
     }
   }
 
+  /** Starts storyboard work from the one recent image this owner can prove. */
+  private async openSourceStoryboardDirector(
+    scenePrompt: string,
+    claim: StoryboardAccessClaim,
+  ): Promise<string> {
+    if (!this.deps.director) {
+      return REPLY.directorUnavailable;
+    }
+    const selected = await this.deps.resolveSelectedSourceImage?.(claim);
+    if (selected?.kind !== "selected") {
+      return REPLY.sourceImageAmbiguous;
+    }
+    const session = openDirectorSession({
+      claim,
+      scenePrompt,
+      characterNames: [],
+      environment: "",
+      updatedAt: new Date(this.deps.now()).toISOString(),
+    });
+    return await this.advanceDirector(claim, session, {
+      kind: "media",
+      media: { kind: "source_image", mediaId: selected.mediaId },
+    });
+  }
+
   /** Opens a session and asks the first missing question. Writes no Notion work. */
   private async openDirector(
     intent: Extract<StoryboardIntent, { kind: "director_open" }>,
@@ -612,6 +911,15 @@ export class CloudbathStoryboardLineRouter {
   ): Promise<string> {
     if (intent.unknownNames[0]) {
       return unknownCharacterReply(intent.unknownNames[0]);
+    }
+    // Naming a Character IS the request for project-backed identity, so the
+    // capability is reported here rather than after two more questions the
+    // owner would answer for a scene that could never be frozen.
+    if (intent.characterNames.length > 0) {
+      const authorization = await this.authorize(claim);
+      if (authorization.kind !== "owner_scoped" || !authorization.projectCapable) {
+        return STORYBOARD_PROJECT_CAPABILITY_REPLY;
+      }
     }
     const store = this.deps.director;
     if (!store) {
@@ -658,6 +966,74 @@ export class CloudbathStoryboardLineRouter {
     if (answer.kind === "duration_too_long") {
       return durationTooLongAnswerReply(answer.durationSeconds);
     }
+    // Asking for "the image" without one on record is the ambiguity this flow
+    // must not resolve by guessing. One short question, and the slot stays open.
+    if (answer.kind === "media_ambiguous") {
+      const selected = await this.deps.resolveSelectedSourceImage?.(
+        claim,
+        session.sourceImageAskedAt,
+      );
+      if (selected?.kind !== "selected") {
+        // Record WHEN the flow asked, so the image the owner sends next is
+        // unambiguous by construction: it arrived after the question. Without
+        // this anchor a re-send would keep displacing a recent image and the
+        // owner could never get past the question.
+        await this.deps.director?.register(storyboardDirectorKey(claim), {
+          ...session,
+          sourceImageAskedAt: new Date(this.deps.now()).toISOString(),
+        });
+        return REPLY.sourceImageAmbiguous;
+      }
+      return await this.advanceDirector(claim, session, {
+        kind: "media",
+        media: { kind: "source_image", mediaId: selected.mediaId },
+      });
+    }
+    // The Character Library is the one branch that needs the project space.
+    if (answer.kind === "media" && answer.media.kind === "character_library") {
+      const authorization = await this.authorize(claim);
+      if (authorization.kind !== "owner_scoped" || !authorization.projectCapable) {
+        return STORYBOARD_PROJECT_CAPABILITY_REPLY;
+      }
+    }
+    return await this.advanceDirector(claim, session, answer);
+  }
+
+  /**
+   * Opens a director for a video request that named no cast.
+   *
+   * The session carries the owner's own words as the scene prompt and asks what
+   * the scene is built from first, because that answer — text, a chosen first
+   * frame, or a Character — decides both the provider input mode and whether a
+   * project is needed at all.
+   */
+  private async openStandaloneDirector(
+    event: StoryboardDispatchEvent,
+    claim: StoryboardAccessClaim,
+  ): Promise<string> {
+    const store = this.deps.director;
+    if (!store) {
+      return REPLY.directorUnavailable;
+    }
+    const scenePrompt = (event.content ?? "").trim();
+    const session = openDirectorSession({
+      claim,
+      scenePrompt,
+      characterNames: [],
+      environment: readStoryboardEnvironment(scenePrompt),
+      updatedAt: new Date(this.deps.now()).toISOString(),
+      mediaRequired: true,
+    });
+    await store.register(storyboardDirectorKey(claim), session);
+    return DIRECTOR_QUESTION.media;
+  }
+
+  /** Writes one answered slot and asks the next question, or completes. */
+  private async advanceDirector(
+    claim: StoryboardAccessClaim,
+    session: StoryboardDirectorSession,
+    answer: Parameters<typeof applyDirectorAnswer>[1],
+  ): Promise<string> {
     const updated = applyDirectorAnswer(session, answer, new Date(this.deps.now()).toISOString());
     const next = nextDirectorSlot(updated);
     if (!next) {
@@ -695,6 +1071,13 @@ export class CloudbathStoryboardLineRouter {
         ...(session.resolution === undefined ? {} : { resolution: session.resolution }),
       },
       claim,
+      session.media?.kind === "source_image"
+        ? Object.freeze({
+            kind: "owner_selected" as const,
+            mediaId: session.media.mediaId,
+            selectedAt: session.updatedAt,
+          })
+        : undefined,
     );
   }
 
@@ -739,11 +1122,18 @@ export class CloudbathStoryboardLineRouter {
       return durationTooLongReply(revision.durationSeconds);
     }
     try {
+      const previous = await this.deps.store.readLatest({
+        storyboardId: active.storyboardId,
+        claim,
+      });
       const version = await this.deps.store.appendRevision({
         storyboardId: active.storyboardId,
         claim,
         revision,
       });
+      if (previous && this.deps.visuals) {
+        await this.deps.visuals.inheritUnchangedShots({ previous, next: version, claim });
+      }
       await this.touchActive(active);
       const storyboard = formatStoryboardForLine({
         versionNumber: version.versionNumber,
@@ -1094,6 +1484,12 @@ export class CloudbathStoryboardLineRouter {
     if (!latest) {
       return REPLY.missingVersion;
     }
+    if (this.deps.visuals) {
+      const visuals = await this.deps.visuals.status({ version: latest, claim });
+      if (visuals.kind !== "ready") {
+        return "Storyboard เวอร์ชันนี้ยังไม่มีภาพครบ กรุณาสร้าง Visual Storyboard ก่อนยืนยัน";
+      }
+    }
     const offer = await this.videoRuntime()?.offerDefaultVideoModel?.(
       claim.accountId,
       storyboardVideoRequirements(latest),
@@ -1340,6 +1736,20 @@ export class CloudbathStoryboardLineRouter {
     }
   }
 
+  /**
+   * Ownership first, project capability second.
+   *
+   * Storyboard-first is the owner's default video flow in every conversation
+   * they own; the UGC workspace only decides whether Character Library casting
+   * and project freezing are reachable, which is asked at those steps instead.
+   */
+  private async authorize(claim: StoryboardAccessClaim): Promise<StoryboardAuthorization> {
+    return await resolveStoryboardAuthorization({
+      claim,
+      lookup: (accountId, groupId) => this.deps.registry.lookup(accountId, groupId),
+    });
+  }
+
   private trustedClaim(
     event: StoryboardDispatchEvent,
     context: StoryboardDispatchContext,
@@ -1399,18 +1809,73 @@ export class CloudbathStoryboardLineRouter {
     if (!claim) {
       return undefined;
     }
-    const binding = await this.deps.registry.lookup(claim.accountId, claim.lineGroupId);
-    if (binding?.policyId !== "UGC" || binding.boundByOwnerId !== claim.ownerSenderId) {
+    if ((await this.authorize(claim)).kind === "denied") {
       return undefined;
     }
-    const active = await this.readActive(claim);
-    if (route.kind === "revise_active_storyboard") {
-      // The referent is the storyboard this owner is on. If it aged out between
-      // resolution and here, there is nothing to revise and the turn is left
-      // alone rather than being applied to whatever comes next.
-      if (!active) {
+    if (route.kind === "generate_storyboard_visuals" || route.kind === "continue_toward_video") {
+      const active = await this.readActive(claim);
+      // The referent the conversation layer resolved must still be the work
+      // this owner is on. A mismatch means the scene moved between resolution
+      // and here, and rendering the other one is exactly the wrong-referent
+      // failure the resolved referent exists to prevent.
+      if (!active || active.storyboardId !== route.referent.storyboardId) {
         return undefined;
       }
+      return {
+        handled: true,
+        text:
+          route.kind === "generate_storyboard_visuals"
+            ? await this.generateVisualStoryboard(claim, active)
+            : await this.continueTowardVideo(claim, active),
+      };
+    }
+    if (route.kind === "revise_active_storyboard") {
+      const { referent } = route;
+      const identityMatches =
+        referent.accountId === claim.accountId &&
+        referent.conversationId === claim.lineGroupId &&
+        referent.ownerSenderId === claim.ownerSenderId;
+      const before = identityMatches
+        ? await this.deps.store
+            .readVersion({
+              storyboardId: referent.storyboardId,
+              versionNumber: referent.storyboardVersionNumber,
+              claim,
+            })
+            .catch(() => undefined)
+        : undefined;
+      const latest = before
+        ? await this.deps.store
+            .readLatest({ storyboardId: referent.storyboardId, claim })
+            .catch(() => undefined)
+        : undefined;
+      if (
+        !before ||
+        !latest ||
+        latest.versionNumber !== referent.storyboardVersionNumber ||
+        latest.project?.projectInstanceId !== referent.projectInstanceId
+      ) {
+        this.deps.logger?.warn("contextual_revision_referent_unprovable", {
+          routeKind: route.kind,
+          resolvedWorkKind: referent.workKind,
+          storyboardId: referent.storyboardId,
+          storyboardVersionNumber: referent.storyboardVersionNumber,
+          resolutionSource: referent.resolvedFrom,
+          currentWorkStatus: referent.status,
+          referentProven: false,
+          clarificationReason: identityMatches ? "referent_stale_or_missing" : "scope_mismatch",
+        });
+        return { handled: true, text: "ไม่พบงานล่าสุดที่กำลังคุยอยู่ กรุณาระบุ Storyboard ที่ต้องการแก้" };
+      }
+      const active: ActiveStoryboardContext = Object.freeze({
+        version: 1,
+        storyboardId: referent.storyboardId,
+        ...(referent.projectInstanceId ? { projectInstanceId: referent.projectInstanceId } : {}),
+        accountId: referent.accountId,
+        lineGroupId: referent.conversationId,
+        ownerSenderId: referent.ownerSenderId,
+        updatedAt: new Date(this.deps.now()).toISOString(),
+      });
       // A document-level change — a new length, a new environment, sound on or
       // off — is read by the SAME parser the plainly-worded path uses, and
       // applied by the same handler. Going straight to the beat planner meant
@@ -1419,9 +1884,6 @@ export class CloudbathStoryboardLineRouter {
       const knownCharacterNames = await this.deps.resolver
         .listCharacterNames(claim)
         .catch(() => [] as readonly string[]);
-      const before = await this.deps.store
-        .readLatest({ storyboardId: active.storyboardId, claim })
-        .catch(() => undefined);
       // The marker-gated parser first, for every shape it already knows. Then a
       // named length: the general parser demands a replacement marker
       // ("ขอ 15 วิแทน") to tell a revision from a fresh request, and a
@@ -1431,7 +1893,7 @@ export class CloudbathStoryboardLineRouter {
       const named = readRevisionDuration(route.request);
       const revision =
         parseStoryboardRevision({ content: route.request, knownCharacterNames }) ??
-        (named !== undefined && named !== before?.document.durationSeconds
+        (named !== undefined && named !== before.document.durationSeconds
           ? ({ kind: "duration", durationSeconds: named } as const)
           : undefined);
       const text = revision
@@ -1441,7 +1903,7 @@ export class CloudbathStoryboardLineRouter {
         claim,
         active,
         conversationId: context.conversationId,
-        beforeVersionNumber: before?.versionNumber,
+        beforeVersionNumber: before.versionNumber,
       });
       this.logContextualRoute(route, text, after);
       return { handled: true, text };

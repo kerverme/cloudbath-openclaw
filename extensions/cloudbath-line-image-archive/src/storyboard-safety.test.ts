@@ -460,7 +460,8 @@ describe("security and billing invariants", () => {
     for (const name of files) {
       const source = await readFile(`${dir}/${name}`, "utf8");
       expect(source, name).not.toMatch(/generateVideo|video-generation|openrouter|runway/iu);
-      expect(source, name).not.toMatch(/https?:\/\//u);
+      // SVG's standard namespace is document syntax, not a provider endpoint.
+      expect(source.replaceAll("http://www.w3.org/2000/svg", ""), name).not.toMatch(/https?:\/\//u);
       // "Seedance" may appear only as a display name, never as an api model id.
       expect(source, name).not.toMatch(/bytedance\/|seedance-\d|seedance_\d/iu);
     }

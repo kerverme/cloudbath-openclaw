@@ -33,6 +33,7 @@ function beatBlock(document: StoryboardDocument): string[] {
       `${beat.startSeconds}–${beat.endSeconds} วิ`,
       heading,
       beat.action,
+      ...(beat.caption && beat.caption !== beat.action ? [`คำบรรยาย: ${beat.caption}`] : []),
       // SPEECH and SOUND are labelled apart. One shared "เสียง:" line is what
       // made "มีเสียง" and "มีบทพูด" read identically to the owner.
       ...(beat.dialogue ? [`พูด: ${beat.dialogue}`] : []),
@@ -113,6 +114,8 @@ export function formatFinalVideoDraftForLine(draft: StoryboardFinalVideoDraft): 
   return [
     "🎬 Final Video Draft",
     `Storyboard v${draft.storyboardVersionNumber}`,
+    `Strategy: ${draft.renderStrategy === "quick_video" ? "Quick Video" : "Best Quality / Shot-by-Shot"}`,
+    `Input mode: ${draft.inputMode.replaceAll("_", "-")}`,
     `ความยาว: ${draft.durationSeconds} วิ · ${draft.aspectRatio} · ${draft.resolution}`,
     `โมเดล: ${formatModel(draft.model)}`,
     formatCost(draft.estimatedCost),

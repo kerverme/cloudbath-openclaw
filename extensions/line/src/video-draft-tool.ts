@@ -174,6 +174,57 @@ type CreateLineVideoDraftToolParams = {
 
 export const LINE_VIDEO_DRAFT_TOOL_NAME = "line_video_draft";
 
+/**
+ * The one explicit way to reach the legacy single-shot draft.
+ *
+ * Storyboard-first is the owner's default video flow, so an ordinary "make me
+ * a video" must never land here: the model would answer it with a legacy
+ * "🎬 Video draft" that skips the storyboard, its visuals and its version
+ * chain. A closed marker keeps the legacy path reachable for the cases that
+ * genuinely need it without letting natural intent fall into it, and it is a
+ * marker rather than a phrase for the same reason `PREVIS` is.
+ */
+export const LINE_LEGACY_VIDEO_DRAFT_MARKER = "#legacy-video";
+
+export function hasLegacyVideoDraftMarker(content: string | undefined): boolean {
+  return (content ?? "").toLowerCase().includes(LINE_LEGACY_VIDEO_DRAFT_MARKER);
+}
+
+/** Bounded so a long-lived process cannot accumulate one entry per session. */
+const LEGACY_TURN_MAX_KEYS = 512;
+
+/**
+ * Per-turn record of whether the owner asked for the legacy path explicitly.
+ *
+ * Keyed by `sessionKey`, the same identity the deterministic reply relay uses,
+ * so the marker observed at `before_dispatch` and the tool factory's decision
+ * are looking at one turn rather than two similar-looking ones.
+ */
+export function createLineLegacyVideoDraftGate() {
+  const markedSessions = new Set<string>();
+  return {
+    beginTurn: (
+      event: { channel?: string; content?: string; body?: string },
+      ctx: { channelId?: string; sessionKey?: string },
+    ): void => {
+      const key = ctx.sessionKey?.trim();
+      if (!key || (event.channel ?? ctx.channelId) !== "line") {
+        return;
+      }
+      if (!hasLegacyVideoDraftMarker(event.body ?? event.content)) {
+        markedSessions.delete(key);
+        return;
+      }
+      if (markedSessions.size >= LEGACY_TURN_MAX_KEYS) {
+        markedSessions.clear();
+      }
+      markedSessions.add(key);
+    },
+    isLegacyTurn: (sessionKey: string | undefined): boolean =>
+      Boolean(sessionKey?.trim() && markedSessions.has(sessionKey.trim())),
+  };
+}
+
 export function createLineVideoDraftTool(params: CreateLineVideoDraftToolParams) {
   if (params.messageChannel !== "line" || params.senderIsOwner !== true) {
     return null;
@@ -361,6 +412,7 @@ export function createLineVideoDraftTool(params: CreateLineVideoDraftToolParams)
         // This path carries at most the owner's own attached image, which is
         // not a Character Library identity lock.
         identityReferenceCount: 0,
+        inputMode: imagePath ? ("image_to_video" as const) : ("text_to_video" as const),
       };
       const offer = offerFalStoryboardDefault(cfg, requirements);
       if (offer.kind !== "offered") {

@@ -33,8 +33,16 @@ import {
   stageLineOutboundVideo,
   stageLineVideoPreviewImage,
 } from "./video-outbound-staging.js";
+import {
+  provenanceForUgcReferenceKind,
+  summarizeReferenceProvenance,
+} from "./video-reference-provenance.js";
 import { resolveLineVideoReferenceUrls } from "./video-reference-urls.js";
-import type { LineVideoNotionTarget, LineVideoUgcScope } from "./video-ugc-scope.js";
+import {
+  orderLineVideoUgcReferences,
+  type LineVideoNotionTarget,
+  type LineVideoUgcScope,
+} from "./video-ugc-scope.js";
 
 const log = createSubsystemLogger("line/video-job");
 
@@ -145,6 +153,7 @@ async function runProviderGeneration(params: {
   // markers were compiled against. A draft with no scope carries at most the
   // owner's own attached image, and is submitted with whatever it has rather
   // than being refused here -- the endpoint is the authority on what it needs.
+  const scopeReferences = params.ugcScope ? orderLineVideoUgcReferences(params.ugcScope) : [];
   const references = params.ugcScope
     ? await resolveLineVideoReferenceUrls(params.ugcScope, { correlationId: params.jobId })
     : [];
@@ -156,6 +165,27 @@ async function runProviderGeneration(params: {
           role: "reference_image" as const,
         }))
       : await loadDraftSourceImages(params.draft);
+  // Class only, never the asset. A provider moderation refusal otherwise says
+  // nothing about WHAT was submitted, and the alternative — logging locators —
+  // is exactly what must not happen. Ordered assets keep their scope kind; a
+  // draft with no scope carried the owner's own attached image.
+  const referenceProvenance =
+    references.length > 0
+      ? scopeReferences.map((reference) => provenanceForUgcReferenceKind(reference.kind))
+      : // A storyboard-backed draft's image is the first frame the owner froze
+        // into that scene; a legacy draft's is whatever they attached to the
+        // request. Same file field, genuinely different provenance.
+        inputImages.map(() =>
+          params.draft.storyboardId
+            ? ("first_frame_image" as const)
+            : ("inbound_source_image" as const),
+        );
+  log.info("LINE video reference provenance", {
+    correlationId: params.jobId,
+    jobId: params.jobId,
+    referenceCount: inputImages.length,
+    provenance: summarizeReferenceProvenance(referenceProvenance),
+  });
   const result = await generateVideo({
     cfg: getRuntimeConfig(),
     prompt: params.draft.prompt,

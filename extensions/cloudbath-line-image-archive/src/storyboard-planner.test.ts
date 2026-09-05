@@ -157,7 +157,8 @@ describe("LLM-assisted storyboard planning", () => {
     );
     expect(result.source).toBe("storyboard");
     const document = (await h.latest()).document;
-    expect(document.beats).toHaveLength(3);
+    expect(document.beats).toHaveLength(6);
+    expect(document.beats.every((beat) => Boolean(beat.caption))).toBe(true);
     expect(document.beats[0]?.startSeconds).toBe(0);
     expect(document.beats.at(-1)?.endSeconds).toBe(15);
     expect(document.beats.map((beat) => beat.action).join(" ")).not.toContain("อยู่ในฉาก");
