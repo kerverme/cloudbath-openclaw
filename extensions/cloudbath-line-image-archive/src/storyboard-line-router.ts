@@ -34,6 +34,7 @@ import {
   DIRECTOR_QUESTION,
   directorScenePrompt,
   nextDirectorSlot,
+  needsDirectorSceneDescription,
   openDirectorSession,
   ownsDirectorSession,
   parseDirectorAnswer,
@@ -1028,6 +1029,7 @@ export class CloudbathStoryboardLineRouter {
       environment: readStoryboardEnvironment(scenePrompt),
       updatedAt: new Date(this.deps.now()).toISOString(),
       mediaRequired: true,
+      ...(needsDirectorSceneDescription(scenePrompt) ? { sceneRequired: true as const } : {}),
     });
     await store.register(storyboardDirectorKey(claim), session);
     return DIRECTOR_QUESTION.media;
