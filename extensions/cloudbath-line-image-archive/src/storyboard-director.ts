@@ -86,7 +86,7 @@ export type StoryboardDirectorSession = Readonly<{
 }>;
 
 /** The slot the owner is being asked about, or undefined once none is left. */
-export type DirectorSlot = "media" | "duration" | "dialogue" | "dialogue_text";
+export type DirectorSlot = "media" | "scene" | "duration" | "dialogue" | "dialogue_text";
 
 export function storyboardDirectorKey(claim: StoryboardAccessClaim): string {
   return `storyboard-director:${claim.accountId}:${claim.lineGroupId}:${claim.ownerSenderId}`;
@@ -212,7 +212,7 @@ export function parseDirectorAnswer(params: {
   if (params.slot === "media") {
     return readMediaAnswer(text);
   }
-  if (params.slot === "duration") {
+  if (params.slot === "scene") {\n    const scene = text.slice(0, 600).trim();\n    return scene ? { kind: "scene", text: scene } : undefined;\n  }\n  if (params.slot === "duration") {
     const bare = text.match(BARE_SECONDS)?.[1];
     // An explicit unit wins ("15 วิ" is fifteen seconds, never menu item 15);
     // a bare number is read against the menu first.
@@ -242,13 +242,13 @@ export function parseDirectorAnswer(params: {
 /** Applies one answer, returning the session to store next. */
 export function applyDirectorAnswer(
   session: StoryboardDirectorSession,
-  answer: Extract<DirectorAnswer, { kind: "media" | "duration" | "dialogue" | "dialogue_text" }>,
+  answer: Extract<\n    DirectorAnswer,\n    { kind: "media" | "scene" | "duration" | "dialogue" | "dialogue_text" }\n  >,
   updatedAt: string,
 ): StoryboardDirectorSession {
   if (answer.kind === "media") {
     return Object.freeze({ ...session, media: answer.media, updatedAt });
   }
-  if (answer.kind === "duration") {
+  if (answer.kind === "scene") {\n    return Object.freeze({ ...session, sceneDescription: answer.text, updatedAt });\n  }\n  if (answer.kind === "duration") {
     return Object.freeze({ ...session, durationSeconds: answer.durationSeconds, updatedAt });
   }
   if (answer.kind === "dialogue") {
