@@ -55,6 +55,10 @@ export type StoryboardDirectorSession = Readonly<{
   lineGroupId: string;
   ownerSenderId: string;
   scenePrompt: string;
+  /** Scene details gathered after a bare "make video" command. */
+  sceneDescription?: string;
+  /** Ask for scene details only when the opening command carried none. */
+  sceneRequired?: true;
   characterNames: readonly string[];
   environment: string;
   /**
@@ -103,6 +107,9 @@ export function nextDirectorSlot(session: StoryboardDirectorSession): DirectorSl
   if (session.mediaRequired && !session.media) {
     return "media";
   }
+  if (session.sceneRequired && !session.sceneDescription) {
+    return "scene";
+  }
   if (session.durationSeconds === undefined) {
     return "duration";
   }
@@ -128,6 +135,7 @@ export const DIRECTOR_QUESTION: Readonly<Record<DirectorSlot, string>> = Object.
     "2. ใช้ภาพที่ส่งมาเป็นเฟรมแรก",
     "3. ใช้ตัวละครจาก Character Library",
   ].join("\n"),
+  scene: "อยากให้ในคลิปเกิดอะไรขึ้น? บรรยายฉากสั้น ๆ ได้เลย",
   duration: [
     "ต้องการความยาวเท่าไร?",
     ...STORYBOARD_DURATION_CHOICES.map((seconds, index) => `${index + 1}. ${seconds} วินาที`),
@@ -184,6 +192,7 @@ function readDurationChoice(value: number): number {
 export type DirectorAnswer =
   | Readonly<{ kind: "cancel" }>
   | Readonly<{ kind: "media"; media: DirectorMedia }>
+  | Readonly<{ kind: "scene"; text: string }>
   /** The owner asked for an image without saying which one. */
   | Readonly<{ kind: "media_ambiguous" }>
   | Readonly<{ kind: "duration"; durationSeconds: number }>
@@ -212,7 +221,11 @@ export function parseDirectorAnswer(params: {
   if (params.slot === "media") {
     return readMediaAnswer(text);
   }
-  if (params.slot === "scene") {\n    const scene = text.slice(0, 600).trim();\n    return scene ? { kind: "scene", text: scene } : undefined;\n  }\n  if (params.slot === "duration") {
+  if (params.slot === "scene") {
+    const scene = text.slice(0, 600).trim();
+    return scene ? { kind: "scene", text: scene } : undefined;
+  }
+  if (params.slot === "duration") {
     const bare = text.match(BARE_SECONDS)?.[1];
     // An explicit unit wins ("15 วิ" is fifteen seconds, never menu item 15);
     // a bare number is read against the menu first.
@@ -242,13 +255,19 @@ export function parseDirectorAnswer(params: {
 /** Applies one answer, returning the session to store next. */
 export function applyDirectorAnswer(
   session: StoryboardDirectorSession,
-  answer: Extract<\n    DirectorAnswer,\n    { kind: "media" | "scene" | "duration" | "dialogue" | "dialogue_text" }\n  >,
+  answer: Extract<
+    DirectorAnswer,
+    { kind: "media" | "scene" | "duration" | "dialogue" | "dialogue_text" }
+  >,
   updatedAt: string,
 ): StoryboardDirectorSession {
   if (answer.kind === "media") {
     return Object.freeze({ ...session, media: answer.media, updatedAt });
   }
-  if (answer.kind === "scene") {\n    return Object.freeze({ ...session, sceneDescription: answer.text, updatedAt });\n  }\n  if (answer.kind === "duration") {
+  if (answer.kind === "scene") {
+    return Object.freeze({ ...session, sceneDescription: answer.text, updatedAt });
+  }
+  if (answer.kind === "duration") {
     return Object.freeze({ ...session, durationSeconds: answer.durationSeconds, updatedAt });
   }
   if (answer.kind === "dialogue") {
@@ -271,6 +290,7 @@ export function applyDirectorAnswer(
 export function openDirectorSession(params: {
   claim: StoryboardAccessClaim;
   scenePrompt: string;
+  sceneRequired?: true;
   characterNames: readonly string[];
   environment: string;
   durationSeconds?: number;
@@ -286,6 +306,7 @@ export function openDirectorSession(params: {
     lineGroupId: params.claim.lineGroupId,
     ownerSenderId: params.claim.ownerSenderId,
     scenePrompt: params.scenePrompt,
+    ...(params.sceneRequired ? { sceneRequired: true as const } : {}),
     characterNames: Object.freeze([...params.characterNames]),
     environment: params.environment,
     ...(params.durationSeconds === undefined ? {} : { durationSeconds: params.durationSeconds }),
@@ -325,6 +346,22 @@ export function ownsDirectorSession(
  * request, which is where every other scene detail already comes from.
  */
 export function directorScenePrompt(session: StoryboardDirectorSession): string {
+  const base = session.sceneDescription?.trim() || session.scenePrompt;
   const spoken = session.dialogue?.wanted ? session.dialogue.text : undefined;
-  return spoken ? `${session.scenePrompt} พูดว่า "${spoken}"` : session.scenePrompt;
+  return spoken ? `${base} พูดว่า "${spoken}"` : base;
+}
+
+/**
+ * True only when the opening turn is a bare request to make a video and carries
+ * no usable scene content. This prevents the director from eventually handing
+ * a prompt like "ทำวีดีโอ" to the planner.
+ */
+export function needsDirectorSceneDescription(content: string): boolean {
+  const text = normalizeStoryboardText(content);
+  if (!text) {
+    return true;
+  }
+  return /^(?:(?:ช่วย|ขอ|อยาก|อยากได้)\s*)?(?:(?:ทำ|สร้าง)\s*)?(?:วิดีโอ|วีดีโอ|คลิป)(?:\s*(?:ให้(?:หน่อย)?|หน่อย|ที|ทีครับ|ทีค่ะ))?$/iu.test(
+    text,
+  );
 }
