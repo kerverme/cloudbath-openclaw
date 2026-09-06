@@ -229,7 +229,7 @@ export function deriveConversationQuestion(
   if (state.active) {
     return buildQuestion({
       id: "storyboard_confirm",
-      // Nothing was asked: the storyboard is on screen and these two controls
+      // Nothing was asked: the storyboard is on screen and these controls
       // stay available until it moves on.
       stance: "standing",
       // Confirming is not a change to something settled: the storyboard is a
@@ -241,15 +241,19 @@ export function deriveConversationQuestion(
         id: state.active.storyboardId,
         ...(state.activeVersionNumber === undefined ? {} : { version: state.activeVersionNumber }),
       },
-      // "แก้ Storyboard" has no canonical single command — a revision names what
-      // to change — so the negating choice prompts for that instead of pretending
-      // to be one. It is a `negate` role so "ยังไม่เอา" reaches it.
-      specs: binarySpecs({
-        affirmLabel: "ยืนยัน Storyboard",
-        affirmText: "ยืนยัน Storyboard",
-        negateLabel: "แก้ Storyboard",
-        negateText: "แก้ Storyboard",
-      }),
+      // These are review/navigation controls only. Each callback remains bound
+      // to this question's storyboard subject and version; none is a paid action.
+      specs: [
+        {
+          label: "ทำวิดีโอจาก Storyboard นี้",
+          role: "affirm",
+          canonicalText: "ทำวิดีโอจาก Storyboard นี้",
+        },
+        { label: "แก้ Storyboard", role: "negate", canonicalText: "แก้ Storyboard" },
+        { label: "แก้ Shot", role: "value", canonicalText: "แก้ Shot", value: 1 },
+        { label: "ใช้รูปต้นฉบับ", role: "value", canonicalText: "ใช้รูปต้นฉบับ", value: 2 },
+        { label: "เปลี่ยน Style", role: "value", canonicalText: "เปลี่ยน Style", value: 3 },
+      ],
       ...mint,
     });
   }

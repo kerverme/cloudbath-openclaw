@@ -247,9 +247,14 @@ export class CloudbathConversationRouter {
           })
         : undefined;
       if (referent) {
-        const kind = utterance.visualRequest
-          ? ("generate_storyboard_visuals" as const)
-          : ("continue_toward_video" as const);
+        // The requested action outranks nouns that merely identify its source:
+        // "use this image for video" is a video continuation, not a request to
+        // redraw the image. This also routes through the visual-readiness gate.
+        const kind = utterance.videoRequest
+          ? ("continue_toward_video" as const)
+          : utterance.visualRequest
+            ? ("generate_storyboard_visuals" as const)
+            : ("continue_toward_video" as const);
         this.deps.logger?.info("contextual_work_route_resolved", {
           routeKind: kind,
           resolvedWorkKind: referent.workKind,

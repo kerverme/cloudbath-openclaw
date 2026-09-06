@@ -124,6 +124,7 @@ function planner() {
 /** The REAL visual service; only its three side effects are in memory. */
 function visualService() {
   const artifacts = mem<StoryboardVisualArtifact>();
+  const media = new Map<string, { bytes: Uint8Array; mimeType: string }>();
   const calls: {
     shotIndex: number;
     identityReferences: readonly UgcReferenceAsset[];
@@ -160,7 +161,10 @@ function visualService() {
       width: 1024,
       height: 1024,
     }),
-    persist: async () => {},
+    persist: async ({ objectKey, bytes, contentType }) => {
+      media.set(objectKey, { bytes, mimeType: contentType });
+    },
+    read: async ({ objectKey }) => media.get(objectKey)!,
   });
   return { artifacts, calls, generate, service };
 }
@@ -214,6 +218,33 @@ async function buildStoryboard(g: ReturnType<typeof unbound>, mediaAnswer: strin
 }
 
 describe("the selected first frame reaches every consumer", () => {
+  it("lets video actions outrank image and storyboard source nouns", async () => {
+    const g = unbound();
+    await g.h.dispatch("ช่วยสร้างรูปชามราเมง");
+    await g.h.conversationRouter.observeGeneratedImage(
+      g.h.claim,
+      MEDIA_ID,
+      "2026-08-30T10:00:00.000Z",
+    );
+    await g.h.dispatch("ทำเป็น storyboard");
+    await g.h.dispatch("15 วิ");
+    await g.h.dispatch("ไม่มี");
+    await g.h.dispatch("ทำภาพแต่ละช็อต");
+    g.generate.mockClear();
+
+    for (const request of ["เอารูปเมื่อกี้มาทำวิดีโอ", "ใช้ storyboard นี้ทำวิดีโอ", "ช่วยทำวิดีโอ"]) {
+      const continued = await g.h.dispatch(request);
+      expect(continued.text).toContain("พิมพ์ “ยืนยัน Storyboard”");
+      expect(continued.text).not.toContain("Visual Storyboard");
+    }
+    await g.h.dispatch("รูป storyboard ที่ส่งมาไง");
+    g.generate.mockClear();
+    const deictic = await g.h.dispatch("เอาอันนั้นทำวิดีโอ");
+    expect(deictic.text).toContain("พิมพ์ “ยืนยัน Storyboard”");
+    expect(g.generate).not.toHaveBeenCalled();
+    expect(g.paid.prepareCalls).toBe(0);
+  });
+
   it("hands the conversation's one proven image directly into a six-shot storyboard", async () => {
     const g = unbound();
     await g.h.dispatch("ช่วยสร้างรูปชามราเมง");
@@ -264,8 +295,21 @@ describe("the selected first frame reaches every consumer", () => {
     const v2 = await g.h.latest();
     expect(v2.storyboardId).toBe(v1.storyboardId);
     expect(v2.versionNumber).toBe(2);
+    expect(
+      v2.document.beats.map(
+        (beat, index) => JSON.stringify(beat) === JSON.stringify(v1.document.beats[index]),
+      ),
+    ).toEqual([true, true, true, true, true, false]);
 
-    const drafted = await g.h.dispatch("ทำวิดีโอเลย");
+    g.generate.mockClear();
+    const regenerated = await g.h.dispatch("เอารูป storyboard เมื่อกี้มาทำวิดีโอ");
+    expect(regenerated.text).toContain("Visual Storyboard v2 พร้อมแล้ว");
+    expect(g.generate).toHaveBeenCalledTimes(1);
+    expect(g.calls.at(-1)?.shotIndex).toBe(6);
+    expect(g.paid.prepareCalls).toBe(0);
+
+    await g.h.dispatch("ยืนยัน Storyboard");
+    const drafted = await g.h.dispatch("ใช้ Default");
     expect(drafted.text).toContain("Final Video Draft");
     expect(drafted.text).not.toContain("🎬 Video draft");
     expect(g.paid.prepareCalls).toBe(1);
@@ -301,7 +345,9 @@ describe("the selected first frame reaches every consumer", () => {
     // The artifact records it distinctly too, so a later reader can still tell
     // a first frame from a Character reference.
     const artifacts = await g.artifacts.entries();
-    for (const { value } of artifacts) {
+    for (const { value } of artifacts.filter(
+      ({ value }) => value.generationPurpose === "storyboard-shot",
+    )) {
       expect(value.sourceImageMediaId).toBe(MEDIA_ID);
       expect(value.sourceReferenceAssetIds).toEqual([]);
     }

@@ -532,14 +532,19 @@ export class CloudbathStoryboardLineRouter {
     // conversation layer routes the same two classes when it resolves them
     // first; this path is what answers when no semantic resolver is wired.
     const utterance = classifyConversationUtterance(event.content ?? "");
-    if (utterance?.visualRequest || utterance?.continuation) {
+    if (
+      (utterance?.videoRequest && this.deps.visuals) ||
+      (!utterance?.videoRequest && (utterance?.visualRequest || utterance?.continuation))
+    ) {
       const active = await this.readActive(claim);
       if (active) {
         return {
           handled: true,
-          text: utterance.visualRequest
-            ? await this.generateVisualStoryboard(claim, active)
-            : await this.continueTowardVideo(claim, active),
+          text: utterance.videoRequest
+            ? await this.continueTowardVideo(claim, active)
+            : utterance.visualRequest
+              ? await this.generateVisualStoryboard(claim, active)
+              : await this.continueTowardVideo(claim, active),
         };
       }
     }
@@ -1364,6 +1369,7 @@ export class CloudbathStoryboardLineRouter {
         claim,
         edit,
       });
+      await this.deps.visuals?.inheritUnchangedShots({ previous: latest, next: version, claim });
       await this.touchActive(active);
       return formatStoryboardForLine({
         versionNumber: version.versionNumber,
@@ -1414,6 +1420,7 @@ export class CloudbathStoryboardLineRouter {
           ...this.editCharacterIds(latest, intent.characterNames),
         },
       });
+      await this.deps.visuals?.inheritUnchangedShots({ previous: latest, next: version, claim });
       // Keep the pointer alive while the owner is actively iterating; only an
       // ABANDONED storyboard should age out.
       await this.touchActive(active);
