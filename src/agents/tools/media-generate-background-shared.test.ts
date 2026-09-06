@@ -26,6 +26,10 @@ const cronContinuationCleanupMocks = vi.hoisted(() => ({
 const sessionMocks = vi.hoisted(() => ({
   loadSessionEntry: vi.fn<() => SessionEntry | undefined>(() => undefined),
 }));
+const mediaCompletionHook = vi.hoisted(() => ({
+  hasHooks: vi.fn(() => false),
+  runMediaGenerationCompleted: vi.fn(async () => {}),
+}));
 
 vi.mock("../subagent-announce-delivery.js", () => subagentAnnounceDeliveryMocks);
 vi.mock("../../config/sessions/session-accessor.js", async () => ({
@@ -37,6 +41,9 @@ vi.mock("../../config/sessions/session-accessor.js", async () => ({
 vi.mock("../../tasks/detached-task-runtime.js", () => detachedTaskRuntimeMocks);
 vi.mock("../../tasks/task-registry-delivery-runtime.js", () => taskRegistryDeliveryRuntimeMocks);
 vi.mock("../../tasks/cron-run-continuation-cleanup.js", () => cronContinuationCleanupMocks);
+vi.mock("../../plugins/hook-runner-global.js", () => ({
+  getGlobalHookRunner: () => mediaCompletionHook,
+}));
 
 import {
   createMediaGenerationTaskLifecycle,
@@ -56,6 +63,51 @@ beforeEach(() => {
   taskRegistryDeliveryRuntimeMocks.sendMessage.mockReset();
   cronContinuationCleanupMocks.removeCronRunContinuationSessionIfIdle.mockClear();
   sessionMocks.loadSessionEntry.mockReset().mockReturnValue(undefined);
+  mediaCompletionHook.hasHooks.mockReset().mockReturnValue(false);
+  mediaCompletionHook.runMediaGenerationCompleted.mockClear();
+});
+
+it("publishes authoritative detached image artifacts before completion delivery", async () => {
+  const scheduled: Array<() => Promise<void>> = [];
+  const lifecycle = createImageMediaLifecycle();
+  mediaCompletionHook.hasHooks.mockReturnValue(true);
+  subagentAnnounceDeliveryMocks.deliverSubagentAnnouncement.mockResolvedValue({ delivered: true });
+
+  scheduleMediaGenerationTaskCompletion({
+    lifecycle,
+    handle: {
+      taskId: "task-image-1",
+      runId: "run-image-1",
+      requesterSessionKey: "agent:main:line:group:C1",
+      taskLabel: "ramen cat",
+    },
+    scheduleBackgroundWork: (work) => void scheduled.push(work),
+    progressSummary: "Generating image",
+    toolName: "Image generation",
+    onWakeFailure: vi.fn(),
+    run: async () => ({
+      provider: "test",
+      model: "test-image",
+      count: 1,
+      paths: ["/managed/cat.jpg"],
+      attachments: [
+        { type: "image", path: "/managed/cat.jpg", mimeType: "image/jpeg", name: "cat" },
+      ],
+      wakeResult: "generated",
+    }),
+  });
+
+  await scheduled[0]?.();
+
+  expect(mediaCompletionHook.runMediaGenerationCompleted).toHaveBeenCalledWith(
+    expect.objectContaining({
+      taskId: "task-image-1",
+      requesterSessionKey: "agent:main:line:group:C1",
+      mediaType: "image",
+      artifacts: [{ path: "/managed/cat.jpg", mimeType: "image/jpeg", name: "cat" }],
+    }),
+    expect.objectContaining({ sessionKey: "agent:main:line:group:C1" }),
+  );
 });
 
 function createImageMediaLifecycle() {

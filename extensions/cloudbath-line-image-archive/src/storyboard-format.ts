@@ -33,6 +33,7 @@ function beatBlock(document: StoryboardDocument): string[] {
       `${beat.startSeconds}–${beat.endSeconds} วิ`,
       heading,
       beat.action,
+      ...(beat.caption && beat.caption !== beat.action ? [`คำบรรยาย: ${beat.caption}`] : []),
       // SPEECH and SOUND are labelled apart. One shared "เสียง:" line is what
       // made "มีเสียง" and "มีบทพูด" read identically to the owner.
       ...(beat.dialogue ? [`พูด: ${beat.dialogue}`] : []),

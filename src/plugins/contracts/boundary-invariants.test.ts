@@ -34,6 +34,7 @@ const BUNDLED_TYPED_HOOK_REGISTRATION_GUARDS = {
     "after_tool_call",
     "before_dispatch",
     "before_tool_call",
+    "media_generation_completed",
     "message_received",
   ],
   "extensions/codex/index.ts": ["after_compaction", "inbound_claim", "session_end"],

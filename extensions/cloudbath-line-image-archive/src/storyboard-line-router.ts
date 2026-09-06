@@ -532,14 +532,19 @@ export class CloudbathStoryboardLineRouter {
     // conversation layer routes the same two classes when it resolves them
     // first; this path is what answers when no semantic resolver is wired.
     const utterance = classifyConversationUtterance(event.content ?? "");
-    if (utterance?.visualRequest || utterance?.continuation) {
+    if (
+      (utterance?.videoRequest && this.deps.visuals) ||
+      (!utterance?.videoRequest && (utterance?.visualRequest || utterance?.continuation))
+    ) {
       const active = await this.readActive(claim);
       if (active) {
         return {
           handled: true,
-          text: utterance.visualRequest
-            ? await this.generateVisualStoryboard(claim, active)
-            : await this.continueTowardVideo(claim, active),
+          text: utterance.videoRequest
+            ? await this.continueTowardVideo(claim, active)
+            : utterance.visualRequest
+              ? await this.generateVisualStoryboard(claim, active)
+              : await this.continueTowardVideo(claim, active),
         };
       }
     }
@@ -557,7 +562,10 @@ export class CloudbathStoryboardLineRouter {
     // opens a storyboard only when the request already names a cast, and every
     // other reading below needs an active one — so a video request that fits
     // neither used to fall through, and a single-shot legacy draft answered it.
-    const opensStoryboard = intent?.kind === "create" || intent?.kind === "director_open";
+    const opensStoryboard =
+      intent?.kind === "create" ||
+      intent?.kind === "director_open" ||
+      intent?.kind === "source_storyboard";
     if (!opensStoryboard && utterance?.videoRequest) {
       if (!active) {
         // Nothing about the workspace yet: the missing thing is what the scene
@@ -578,7 +586,12 @@ export class CloudbathStoryboardLineRouter {
     }
     // An edit, revision or draft request without an active storyboard is not
     // ours: it must fall through so the existing previs routing keeps working.
-    if (intent.kind !== "create" && intent.kind !== "director_open" && !active) {
+    if (
+      intent.kind !== "create" &&
+      intent.kind !== "director_open" &&
+      intent.kind !== "source_storyboard" &&
+      !active
+    ) {
       return undefined;
     }
     // While a storyboard is active a bare natural request is ambiguous between
@@ -651,7 +664,9 @@ export class CloudbathStoryboardLineRouter {
     // Rendering is a visible interaction with this exact work. Refresh the
     // canonical pointer before delivery so later conversation observes it as current.
     await this.touchActive(active);
-    for (const artifact of status.artifacts) {
+    const preview = deriveContactSheetPreview(status);
+    const deliveredArtifacts = preview ? [preview] : status.artifacts;
+    for (const artifact of deliveredArtifacts) {
       await this.deps.sendVisualImage({
         to: claim.lineGroupId,
         accountId: claim.accountId,
@@ -669,7 +684,9 @@ export class CloudbathStoryboardLineRouter {
       this.deps.logger?.info?.("storyboard_visual_sent_to_line", {
         storyboardId: version.storyboardId,
         storyboardVersion: version.versionNumber,
-        shotIndex: artifact.shotIndex,
+        ...(artifact.generationPurpose === "storyboard-shot"
+          ? { shotIndex: artifact.shotIndex }
+          : { panelCount: artifact.panels.length }),
         artifactId: artifact.artifactId,
       });
     }
@@ -677,9 +694,8 @@ export class CloudbathStoryboardLineRouter {
     // shots that already exist rather than standing in for them. When it cannot
     // be derived the storyboard is not ready, and the reply says which shots
     // are missing instead of claiming a version the owner cannot confirm.
-    const preview = deriveContactSheetPreview(status);
     return preview
-      ? `Visual Storyboard v${version.versionNumber} พร้อมแล้ว (${preview.shotArtifactIds.length} ช็อต)\nยืนยัน Storyboard หรือบอกจุดที่ต้องการแก้`
+      ? `Visual Storyboard v${version.versionNumber} พร้อมแล้ว (${preview.panels.length} ช็อต)\nยืนยัน Storyboard หรือบอกจุดที่ต้องการแก้`
       : `Visual Storyboard v${version.versionNumber} สำเร็จบางส่วน ลองทำภาพช็อต ${status.failedShotIndexes.join(", ")} ใหม่`;
   }
 
@@ -757,6 +773,9 @@ export class CloudbathStoryboardLineRouter {
     }
     if (intent.kind === "director_open") {
       return await this.openDirector(intent, claim);
+    }
+    if (intent.kind === "source_storyboard") {
+      return await this.openSourceStoryboardDirector(intent.scenePrompt, claim);
     }
     if (intent.kind === "revision") {
       return await this.revise(intent.revision, claim, active!);
@@ -863,6 +882,31 @@ export class CloudbathStoryboardLineRouter {
     } catch (error) {
       return this.failure("storyboard_create_failed", error);
     }
+  }
+
+  /** Starts storyboard work from the one recent image this owner can prove. */
+  private async openSourceStoryboardDirector(
+    scenePrompt: string,
+    claim: StoryboardAccessClaim,
+  ): Promise<string> {
+    if (!this.deps.director) {
+      return REPLY.directorUnavailable;
+    }
+    const selected = await this.deps.resolveSelectedSourceImage?.(claim);
+    if (selected?.kind !== "selected") {
+      return REPLY.sourceImageAmbiguous;
+    }
+    const session = openDirectorSession({
+      claim,
+      scenePrompt,
+      characterNames: [],
+      environment: "",
+      updatedAt: new Date(this.deps.now()).toISOString(),
+    });
+    return await this.advanceDirector(claim, session, {
+      kind: "media",
+      media: { kind: "source_image", mediaId: selected.mediaId },
+    });
   }
 
   /** Opens a session and asks the first missing question. Writes no Notion work. */
@@ -1083,11 +1127,18 @@ export class CloudbathStoryboardLineRouter {
       return durationTooLongReply(revision.durationSeconds);
     }
     try {
+      const previous = await this.deps.store.readLatest({
+        storyboardId: active.storyboardId,
+        claim,
+      });
       const version = await this.deps.store.appendRevision({
         storyboardId: active.storyboardId,
         claim,
         revision,
       });
+      if (previous && this.deps.visuals) {
+        await this.deps.visuals.inheritUnchangedShots({ previous, next: version, claim });
+      }
       await this.touchActive(active);
       const storyboard = formatStoryboardForLine({
         versionNumber: version.versionNumber,
@@ -1318,6 +1369,7 @@ export class CloudbathStoryboardLineRouter {
         claim,
         edit,
       });
+      await this.deps.visuals?.inheritUnchangedShots({ previous: latest, next: version, claim });
       await this.touchActive(active);
       return formatStoryboardForLine({
         versionNumber: version.versionNumber,
@@ -1368,6 +1420,7 @@ export class CloudbathStoryboardLineRouter {
           ...this.editCharacterIds(latest, intent.characterNames),
         },
       });
+      await this.deps.visuals?.inheritUnchangedShots({ previous: latest, next: version, claim });
       // Keep the pointer alive while the owner is actively iterating; only an
       // ABANDONED storyboard should age out.
       await this.touchActive(active);

@@ -254,6 +254,32 @@ describe("E: a postback chip", () => {
 });
 
 describe("a standing offer versus a question the assistant is waiting on", () => {
+  it("renders the five version-bound storyboard review actions as callbacks", async () => {
+    const h = harness({ paidDraftRuntime: stubPaidRuntime() });
+    await h.dispatch(NATURAL_REQUEST);
+    await h.dispatch("15");
+    const storyboard = await h.dispatch("ไม่มี");
+    const block = storyboard.presentation?.blocks[0];
+    expect(block?.type).toBe("buttons");
+    if (block?.type !== "buttons") {
+      throw new Error("expected storyboard actions");
+    }
+    expect(block.buttons.map((button) => button.label)).toEqual([
+      "ทำวิดีโอจาก Storyboard นี้",
+      "แก้ Storyboard",
+      "แก้ Shot",
+      "ใช้รูปต้นฉบับ",
+      "เปลี่ยน Style",
+    ]);
+    expect(block.buttons.every((button) => button.action.type === "callback")).toBe(true);
+
+    const oldAction = block.buttons[0]!.action;
+    await h.dispatch("เปลี่ยนตอนท้ายให้มีคนมาแย่งราเมง");
+    const stale = await h.dispatch(oldAction.type === "callback" ? oldAction.value : "");
+    expect(stale.text).toContain("ขั้นตอนก่อนหน้า");
+    expect(stale.conversation).toMatchObject({ kind: "answer" });
+  });
+
   it("does not let a refusal on screen become 'แก้ Storyboard'", async () => {
     const h = harness({ paidDraftRuntime: stubPaidRuntime() });
     await h.dispatch(NATURAL_REQUEST);
@@ -261,7 +287,7 @@ describe("a standing offer versus a question the assistant is waiting on", () =>
     await h.dispatch("มี");
     await h.dispatch("ทักทายกันหน่อย");
 
-    // The storyboard is on screen with its two controls, but nothing was ASKED,
+    // The storyboard is on screen with review controls, but nothing was ASKED,
     // so this refusal is the revision itself rather than an answer.
     const revised = await h.dispatch("ไม่เอาเสียงพูด");
 
@@ -278,20 +304,20 @@ describe("a standing offer versus a question the assistant is waiting on", () =>
     await h.dispatch("15");
     const storyboard = await h.dispatch("ไม่มี");
     const block = storyboard.presentation?.blocks[0];
-    const confirm =
+    const continueVideo =
       block?.type === "buttons"
-        ? block.buttons.find((button) => button.label === "ยืนยัน Storyboard")
+        ? block.buttons.find((button) => button.label === "ทำวิดีโอจาก Storyboard นี้")
         : undefined;
 
     const pressed = await h.dispatch(
-      confirm?.action?.type === "callback" ? confirm.action.value : "",
+      continueVideo?.action?.type === "callback" ? continueVideo.action.value : "",
     );
 
     expect(pressed.conversation).toEqual({
       kind: "rewrite",
-      canonicalText: "ยืนยัน Storyboard",
+      canonicalText: "ทำวิดีโอจาก Storyboard นี้",
     });
-    expect(pressed.text).toContain("MiniMax H3 Reference-to-Video");
+    expect(pressed.text).not.toMatch(/ยืนยัน VIDEO \d{4}/u);
   });
 });
 

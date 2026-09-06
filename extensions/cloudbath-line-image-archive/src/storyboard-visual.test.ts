@@ -3,6 +3,7 @@ import { StoryboardStore } from "./storyboard-store.js";
 import type { StoryboardDocument, StoryboardVersion } from "./storyboard-types.js";
 import {
   StoryboardVisualService,
+  storyboardContactSheetKey,
   storyboardVisualKey,
   storyboardVisualUrl,
   type StoryboardVisualArtifact,
@@ -90,38 +91,50 @@ function version(versionNumber = 1): StoryboardVersion {
 function harness(failShot?: number) {
   const artifacts = new MemoryStore<StoryboardVisualArtifact>();
   const persisted: string[] = [];
+  const media = new Map<string, { bytes: Uint8Array; mimeType: string }>();
+  const composedSheets: string[] = [];
   let counter = 0;
+  const generate = vi.fn(async ({ shotIndex, identityReferences }) => {
+    expect(identityReferences.map((reference) => reference.locator)).toEqual([
+      "characters/f99/front.jpg",
+      "characters/f99/side.jpg",
+    ]);
+    if (shotIndex === failShot) {
+      throw new Error("mock generation failed");
+    }
+    return {
+      bytes: Buffer.from(`provider-image-${shotIndex}`),
+      mimeType: "image/webp",
+      width: 1024,
+      height: 1792,
+      provider: "mock-image",
+      model: "mock-model",
+    };
+  });
   const service = new StoryboardVisualService({
     artifacts,
     concurrency: 2,
     now: () => Date.parse("2026-09-04T00:00:00.000Z"),
     randomId: () => String(++counter).padStart(36, "0"),
-    generate: vi.fn(async ({ shotIndex, identityReferences }) => {
-      expect(identityReferences.map((reference) => reference.locator)).toEqual([
-        "characters/f99/front.jpg",
-        "characters/f99/side.jpg",
-      ]);
-      if (shotIndex === failShot) {
-        throw new Error("mock generation failed");
+    generate,
+    normalize: vi.fn(async ({ bytes, mimeType, maxWidth }) => {
+      if (mimeType === "image/svg+xml") {
+        composedSheets.push(Buffer.from(bytes).toString("utf8"));
       }
       return {
-        bytes: Buffer.from(`provider-image-${shotIndex}`),
-        mimeType: "image/webp",
-        width: 1024,
-        height: 1792,
-        provider: "mock-image",
-        model: "mock-model",
+        bytes: Buffer.concat([Buffer.from(maxWidth === 240 ? "preview:" : "original:"), bytes]),
+        mimeType: "image/jpeg" as const,
+        width: maxWidth === 240 ? 137 : 1024,
+        height: maxWidth === 240 ? 240 : 1792,
       };
     }),
-    normalize: vi.fn(async ({ bytes, maxWidth }) => ({
-      bytes: Buffer.concat([Buffer.from(maxWidth === 240 ? "preview:" : "original:"), bytes]),
-      mimeType: "image/jpeg" as const,
-      width: maxWidth === 240 ? 137 : 1024,
-      height: maxWidth === 240 ? 240 : 1792,
-    })),
-    persist: vi.fn(async ({ objectKey }) => void persisted.push(objectKey)),
+    persist: vi.fn(async ({ objectKey, bytes, contentType }) => {
+      persisted.push(objectKey);
+      media.set(objectKey, { bytes, mimeType: contentType });
+    }),
+    read: async ({ objectKey }) => media.get(objectKey)!,
   });
-  return { artifacts, persisted, service };
+  return { artifacts, composedSheets, generate, media, persisted, service };
 }
 
 describe("storyboard visual artifacts", () => {
@@ -134,7 +147,7 @@ describe("storyboard visual artifacts", () => {
       throw new Error("expected ready visuals");
     }
     expect(result.artifacts).toHaveLength(2);
-    expect(h.persisted).toHaveLength(4);
+    expect(h.persisted).toHaveLength(6);
     expect(result.artifacts[0]).toMatchObject({
       storyboardId: "sb-test",
       storyboardVersionNumber: 1,
@@ -146,6 +159,65 @@ describe("storyboard visual artifacts", () => {
       generationModel: "mock-model",
     });
     expect(result.artifacts[0]?.originalObjectKey).not.toBe(result.artifacts[0]?.previewObjectKey);
+  });
+
+  it("composes an ordered, captioned, derived-only six-panel review sheet", async () => {
+    const h = harness();
+    const beats = Array.from({ length: 6 }, (_, index) => ({
+      ...document.beats[index % document.beats.length]!,
+      beatId: `beat-${index + 1}`,
+      caption: `Caption ${index + 1}`,
+    }));
+    const sixShotVersion = {
+      ...version(),
+      document: { ...document, beats: Object.freeze(beats) },
+    } satisfies StoryboardVersion;
+
+    const result = await h.service.generate({ version: sixShotVersion, claim });
+    expect(result.kind).toBe("ready");
+    if (result.kind !== "ready") {
+      throw new Error("expected ready visuals");
+    }
+    expect(result.artifacts).toHaveLength(6);
+    expect(result.contactSheet).toMatchObject({
+      generationProvider: "derived",
+      generationPurpose: "storyboard-contact-sheet",
+      panels: beats.map((beat, index) => ({ shotIndex: index + 1, caption: beat.caption })),
+    });
+    const svg = h.composedSheets[0]!;
+    expect(svg.match(/<image /gu)).toHaveLength(6);
+    for (let index = 1; index <= 6; index += 1) {
+      expect(svg.indexOf(`Caption ${index}`)).toBeGreaterThan(svg.indexOf(`Shot ${index}`));
+    }
+  });
+
+  it("does not treat a derived sheet as authoritative visual readiness", async () => {
+    const h = harness();
+    await h.artifacts.register(storyboardContactSheetKey("sb-test", 1), {
+      version: 1,
+      artifactId: "derived-only",
+      storyboardId: "sb-test",
+      storyboardVersionNumber: 1,
+      ...claim,
+      conversationId: claim.lineGroupId,
+      sourceCharacterIds: [],
+      sourceReferenceAssetIds: [],
+      originalObjectKey: "sheet-original.jpg",
+      previewObjectKey: "sheet-preview.jpg",
+      mimeType: "image/jpeg",
+      width: 1536,
+      height: 832,
+      byteSize: 1,
+      generationProvider: "derived",
+      generationModel: "contact-sheet-svg-v1",
+      generationPurpose: "storyboard-contact-sheet",
+      status: "completed",
+      panels: [],
+      createdAt: "2026-09-04T00:00:00.000Z",
+    });
+    expect(await h.service.status({ version: version(), claim })).toMatchObject({
+      kind: "not_generated",
+    });
   });
 
   it("keeps prior visuals on v1 and requires regeneration for v2", async () => {
@@ -170,8 +242,34 @@ describe("storyboard visual artifacts", () => {
     for (const [key, value] of failed.artifacts.values) {
       retry.artifacts.values.set(key, value);
     }
+    for (const [key, value] of failed.media) {
+      retry.media.set(key, value);
+    }
     const result = await retry.service.generate({ version: version(), claim, shotIndexes: [2] });
     expect(result.kind).toBe("ready");
+  });
+
+  it("carries unchanged shots forward and regenerates only the revised shot", async () => {
+    const h = harness();
+    const previous = version(1);
+    await h.service.generate({ version: previous, claim });
+    h.generate.mockClear();
+    const next = {
+      ...version(2),
+      document: {
+        ...document,
+        beats: document.beats.map((beat, index) =>
+          index === 1 ? { ...beat, framing: "extreme close-up" } : beat,
+        ),
+      },
+    } satisfies StoryboardVersion;
+
+    await h.service.inheritUnchangedShots({ previous, next, claim });
+    const result = await h.service.generate({ version: next, claim });
+
+    expect(result.kind).toBe("ready");
+    expect(h.generate).toHaveBeenCalledTimes(1);
+    expect(h.generate).toHaveBeenCalledWith(expect.objectContaining({ shotIndex: 2 }));
   });
 
   it("derives stable query-free LINE URLs instead of provider URLs", () => {

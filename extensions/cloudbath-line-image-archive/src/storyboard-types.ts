@@ -78,6 +78,8 @@ export type StoryboardBeat = Readonly<{
   framing: string;
   /** What happens, in the owner's own scene language. */
   action: string;
+  /** Short owner-facing label used below the shot in review UI. */
+  caption?: string;
   /** Camera instruction, e.g. "Track with the subject". */
   camera: string;
   /** SPEECH only: the spoken line, verbatim. Absent unless the beat is spoken. */

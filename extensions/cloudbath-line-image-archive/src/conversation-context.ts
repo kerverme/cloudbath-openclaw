@@ -39,6 +39,22 @@ export type ConversationTaskType = "video_generation" | "storyboard" | "characte
  */
 export type ConversationTaskStatus = "pending" | "running" | "resolved";
 
+export type CreativeArtifactRef = Readonly<{
+  artifactId: string;
+  kind: "generated_image" | "source_image" | "storyboard_shot" | "storyboard_contact_sheet";
+  createdAt: string;
+}>;
+
+export type ActiveCreativeWork = Readonly<{
+  workId: string;
+  kind: "image" | "storyboard" | "video";
+  status: "open" | "resolved";
+  storyboardId?: string;
+  storyboardVersionNumber?: number;
+  projectInstanceId?: string;
+  updatedAt: string;
+}>;
+
 /**
  * One task, by reference.
  *
@@ -161,6 +177,20 @@ export type ActiveConversationContext = Readonly<{
   ownerSenderId: string;
   /** Most recent first. Bounded; the authoritative stores keep the history. */
   tasks: readonly ConversationTaskRef[];
+  /** One authoritative referent shared by every creative specialist. */
+  currentWork?: ActiveCreativeWork;
+  /** Most recent generated image explicitly registered by the image workflow. */
+  latestGeneratedImage?: CreativeArtifactRef;
+  latestStoryboardId?: string;
+  latestStoryboardVersion?: number;
+  latestStoryboardVisualVersion?: number;
+  latestFinalVideoDraft?: Readonly<{
+    draftId: string;
+    storyboardId: string;
+    storyboardVersionNumber: number;
+  }>;
+  /** Explicit source choice; never inferred from an arbitrary attachment. */
+  selectedSourceArtifact?: CreativeArtifactRef;
   /** Notion project instance the active work belongs to. */
   activeProjectId?: string;
   /** Canonical Character codes frozen into that project. */

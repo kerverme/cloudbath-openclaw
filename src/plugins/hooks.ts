@@ -19,6 +19,7 @@ import type { GlobalHookRunnerRegistry, HookRunnerRegistry } from "./hook-regist
 import type {
   PluginHookAfterCompactionEvent,
   PluginHookAfterToolCallEvent,
+  PluginHookMediaGenerationCompletedEvent,
   PluginHookAgentContext,
   PluginHookAgentEndEvent,
   PluginHookBeforeAgentFinalizeEvent,
@@ -143,6 +144,7 @@ export type {
   PluginHookCronReconciledContext,
   PluginHookCronReconciledEvent,
   PluginHookAfterToolCallEvent,
+  PluginHookMediaGenerationCompletedEvent,
   PluginHookToolResultPersistContext,
   PluginHookToolResultPersistEvent,
   PluginHookToolResultPersistResult,
@@ -1328,6 +1330,14 @@ export function createHookRunner(
     return runVoidHook("after_tool_call", event, ctx);
   }
 
+  /** Observe successful generated media after its managed artifacts exist. */
+  async function runMediaGenerationCompleted(
+    event: PluginHookMediaGenerationCompletedEvent,
+    ctx: PluginHookToolContext,
+  ): Promise<void> {
+    return runVoidHook("media_generation_completed", event, ctx);
+  }
+
   /**
    * Run tool_result_persist hook.
    *
@@ -1688,6 +1698,7 @@ export function createHookRunner(
     // Tool hooks
     runBeforeToolCall,
     runAfterToolCall,
+    runMediaGenerationCompleted,
     runToolResultPersist,
     // Message write hooks
     runBeforeMessageWrite,

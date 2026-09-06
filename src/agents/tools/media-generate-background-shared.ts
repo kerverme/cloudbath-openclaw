@@ -10,6 +10,7 @@ import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { clearAgentRunContext, registerAgentRunContext } from "../../infra/agent-events.js";
 import { formatErrorMessage } from "../../infra/errors.js";
 import { createSubsystemLogger } from "../../logging/subsystem.js";
+import { getGlobalHookRunner } from "../../plugins/hook-runner-global.js";
 import { resolveAgentIdFromSessionKey } from "../../routing/session-key.js";
 import { parseCronRunScopeSuffix } from "../../sessions/session-key-utils.js";
 import { removeCronRunContinuationSessionIfIdle } from "../../tasks/cron-run-continuation-cleanup.js";
@@ -556,6 +557,43 @@ export function scheduleMediaGenerationTaskCompletion<
       }
     };
     recordCompletionDeliveryProgress();
+    const hookRunner = getGlobalHookRunner();
+    if (params.handle && hookRunner?.hasHooks("media_generation_completed")) {
+      const artifacts = (executed.attachments ?? []).flatMap((attachment) => {
+        const artifactPath = attachment.path ?? attachment.filePath;
+        return artifactPath && attachment.mimeType
+          ? [
+              {
+                path: artifactPath,
+                mimeType: attachment.mimeType,
+                ...(attachment.name ? { name: attachment.name } : {}),
+              },
+            ]
+          : [];
+      });
+      await hookRunner.runMediaGenerationCompleted(
+        {
+          taskId: params.handle.taskId,
+          runId: params.handle.runId,
+          requesterSessionKey: params.handle.requesterSessionKey,
+          mediaType: /image/iu.test(params.toolName)
+            ? "image"
+            : /video/iu.test(params.toolName)
+              ? "video"
+              : "audio",
+          provider: executed.provider,
+          model: executed.model,
+          completedAt: new Date().toISOString(),
+          artifacts,
+        },
+        {
+          toolName: params.toolName,
+          sessionKey: params.handle.requesterSessionKey,
+          runId: params.handle.runId,
+          channelId: params.handle.requesterOrigin?.channel,
+        },
+      );
+    }
     let terminalResult: RequiredCompletionTerminalResult | undefined;
     try {
       const wakeOutcome = await wakeMediaGenerationTaskCompletionWithRetry({

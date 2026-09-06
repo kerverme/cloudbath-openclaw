@@ -402,7 +402,7 @@ export class UgcCharacterImageWorkflow {
    * CLAIMS the turn is still the UGC question: an unbound conversation must fall
    * through to archiving exactly as before, so it captures and returns false.
    */
-  async rememberImage(job: InboundImageJob): Promise<boolean> {
+  async rememberImage(job: InboundImageJob, explicitGenerated = false): Promise<boolean> {
     const binding = await this.registry.lookup(job.accountId, job.groupId);
     const senderId = job.userId?.trim();
     const accountId = job.accountId?.trim();
@@ -418,6 +418,7 @@ export class UgcCharacterImageWorkflow {
     // enter this pending-media directory at all.
     if (
       !ugcOwned &&
+      !explicitGenerated &&
       !(await this.hasStoryboardWorkInProgress?.({
         accountId,
         lineGroupId: job.groupId,
@@ -463,6 +464,7 @@ export class UgcCharacterImageWorkflow {
           // say which; the flag is what lets the storyboard flow ask instead of
           // quietly taking whichever arrived last.
           const displacedRecently =
+            !explicitGenerated &&
             current &&
             Date.parse(next.sourceReceivedAt) - Date.parse(current.sourceReceivedAt) <=
               SOURCE_IMAGE_AMBIGUITY_WINDOW_MS;
@@ -501,6 +503,31 @@ export class UgcCharacterImageWorkflow {
       });
     }
     return ugcOwned;
+  }
+
+  /** Persists the one image this owner just asked the assistant to generate. */
+  async rememberGeneratedImage(params: {
+    claim: Readonly<{ accountId: string; lineGroupId: string; ownerSenderId: string }>;
+    mediaPath: string;
+    mimeType: string;
+    createdAt: string;
+    sessionKey?: string;
+  }): Promise<LatestCharacterImage | undefined> {
+    await this.rememberImage(
+      {
+        accountId: params.claim.accountId,
+        groupId: params.claim.lineGroupId,
+        lineTarget: params.claim.lineGroupId,
+        messageId: `generated-${crypto.randomUUID()}`,
+        userId: params.claim.ownerSenderId,
+        ...(params.sessionKey ? { sessionKey: params.sessionKey } : {}),
+        mediaPath: params.mediaPath,
+        mimeType: params.mimeType,
+        receivedAt: params.createdAt,
+      },
+      true,
+    );
+    return await this.readLatestInboundImage(params.claim);
   }
 
   /**

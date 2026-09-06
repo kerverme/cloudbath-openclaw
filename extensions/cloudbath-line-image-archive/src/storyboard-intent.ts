@@ -47,6 +47,10 @@ const EXPLICIT_PREVIS_PATTERN = /\bprevis\b|พรีวิส|^\s*อนุม�
 const CREATE_VIDEO_PATTERN =
   /^(?:สร้าง|ทำ)\s*(?:วิดีโอ|วีดีโอ|วิดิโอ|คลิป)(?:\s*(?:เลย|ครับ|ค่ะ|คะ|นะ|หน่อย|ให้หน่อย|ได้เลย))*$|^(?:create|make|generate)\s+(?:the\s+)?video$/iu;
 
+/** Turns the conversation's explicitly tracked image into storyboard work. */
+const IMAGE_TO_STORYBOARD_PATTERN =
+  /(?:ทำ|สร้าง|เปลี่ยน).*(?:storyboard|สตอรี่บอร์ด)|(?:storyboard|สตอรี่บอร์ด).*(?:จาก|ด้วย).*(?:ภาพ|รูป)|\b(?:turn|make|convert)\b.*\b(?:image|photo|this|it)\b.*\bstoryboard\b/iu;
+
 /**
  * Nouns that name a video artefact outright.
  *
@@ -203,6 +207,7 @@ export type StoryboardIntent =
       environment: string;
       scenePrompt: string;
     }>
+  | Readonly<{ kind: "source_storyboard"; scenePrompt: string }>
   /** A document-level change to the storyboard already being iterated on. */
   | Readonly<{ kind: "revision"; revision: StoryboardDocumentRevision | StoryboardCastAddition }>
   | Readonly<{ kind: "create_video" }>;
@@ -224,6 +229,9 @@ export function parseStoryboardIntent(params: {
   }
   if (CREATE_VIDEO_PATTERN.test(text)) {
     return { kind: "create_video" };
+  }
+  if (IMAGE_TO_STORYBOARD_PATTERN.test(text)) {
+    return { kind: "source_storyboard", scenePrompt: text };
   }
 
   const matched = matchKnownNames(text, params.knownCharacterNames);
@@ -269,7 +277,7 @@ export function parseStoryboardIntent(params: {
         (name, index, all) => all.indexOf(name) === index,
       )
     : explicitUnknownNames;
-  if (matched.length > 0 && !range && activeEditMarker(text) && !SCENE_NOUNS.test(text)) {
+  if (!range && activeEditMarker(text) && !SCENE_NOUNS.test(text)) {
     return { kind: "natural_edit", request: text };
   }
   // A second storyboard needs an explicit cast list, OR a self-contained

@@ -263,6 +263,7 @@ function buildDerivedBeats(params: CompileStoryboardParams): StoryboardBeat[] {
       kind: beat.kind,
       framing: beat.framing,
       action: beat.action,
+      caption: beat.action.slice(0, 80),
       camera: beat.camera,
       ...(beat.dialogue ? { dialogue: beat.dialogue } : {}),
       ...(beat.environmentNote ? { environmentNote: beat.environmentNote } : {}),

@@ -91,35 +91,40 @@ function paidRuntime(options: { rejectSourceImage?: boolean } = {}) {
 }
 
 function planner() {
-  return new StoryboardLlmPlanner(async () => ({
-    text: JSON.stringify({
-      beats: [
-        {
-          startSeconds: 1,
-          endSeconds: 4,
-          kind: "establishing",
-          framing: "Wide",
-          action: "the cat walks",
-          camera: "Static",
-          characterNames: [],
-        },
-        {
-          startSeconds: 4,
-          endSeconds: 8,
-          kind: "action",
-          framing: "Medium",
-          action: "the cat jumps",
-          camera: "Track",
-          characterNames: [],
-        },
-      ],
-    }),
+  return new StoryboardLlmPlanner(async ({ purpose }) => ({
+    text: JSON.stringify(
+      purpose === "cloudbath-storyboard-edit"
+        ? { fromSeconds: 12, toSeconds: 15, action: "Shin-chan steals the ramen" }
+        : {
+            beats: [
+              {
+                startSeconds: 1,
+                endSeconds: 4,
+                kind: "establishing",
+                framing: "Wide",
+                action: "the cat walks",
+                camera: "Static",
+                characterNames: [],
+              },
+              {
+                startSeconds: 4,
+                endSeconds: 8,
+                kind: "action",
+                framing: "Medium",
+                action: "the cat jumps",
+                camera: "Track",
+                characterNames: [],
+              },
+            ],
+          },
+    ),
   }));
 }
 
 /** The REAL visual service; only its three side effects are in memory. */
 function visualService() {
   const artifacts = mem<StoryboardVisualArtifact>();
+  const media = new Map<string, { bytes: Uint8Array; mimeType: string }>();
   const calls: {
     shotIndex: number;
     identityReferences: readonly UgcReferenceAsset[];
@@ -156,7 +161,10 @@ function visualService() {
       width: 1024,
       height: 1024,
     }),
-    persist: async () => {},
+    persist: async ({ objectKey, bytes, contentType }) => {
+      media.set(objectKey, { bytes, mimeType: contentType });
+    },
+    read: async ({ objectKey }) => media.get(objectKey)!,
   });
   return { artifacts, calls, generate, service };
 }
@@ -210,6 +218,103 @@ async function buildStoryboard(g: ReturnType<typeof unbound>, mediaAnswer: strin
 }
 
 describe("the selected first frame reaches every consumer", () => {
+  it("lets video actions outrank image and storyboard source nouns", async () => {
+    const g = unbound();
+    await g.h.dispatch("ช่วยสร้างรูปชามราเมง");
+    await g.h.conversationRouter.observeGeneratedImage(
+      g.h.claim,
+      MEDIA_ID,
+      "2026-08-30T10:00:00.000Z",
+    );
+    await g.h.dispatch("ทำเป็น storyboard");
+    await g.h.dispatch("15 วิ");
+    await g.h.dispatch("ไม่มี");
+    await g.h.dispatch("ทำภาพแต่ละช็อต");
+    g.generate.mockClear();
+
+    for (const request of ["เอารูปเมื่อกี้มาทำวิดีโอ", "ใช้ storyboard นี้ทำวิดีโอ", "ช่วยทำวิดีโอ"]) {
+      const continued = await g.h.dispatch(request);
+      expect(continued.text).toContain("พิมพ์ “ยืนยัน Storyboard”");
+      expect(continued.text).not.toContain("Visual Storyboard");
+    }
+    await g.h.dispatch("รูป storyboard ที่ส่งมาไง");
+    g.generate.mockClear();
+    const deictic = await g.h.dispatch("เอาอันนั้นทำวิดีโอ");
+    expect(deictic.text).toContain("พิมพ์ “ยืนยัน Storyboard”");
+    expect(g.generate).not.toHaveBeenCalled();
+    expect(g.paid.prepareCalls).toBe(0);
+  });
+
+  it("hands the conversation's one proven image directly into a six-shot storyboard", async () => {
+    const g = unbound();
+    await g.h.dispatch("ช่วยสร้างรูปชามราเมง");
+    await g.h.conversationRouter.observeGeneratedImage(
+      g.h.claim,
+      MEDIA_ID,
+      "2026-08-30T10:00:00.000Z",
+    );
+
+    const started = await g.h.dispatch("ทำเป็น storyboard");
+
+    expect(started.text).toBe(DIRECTOR_QUESTION.duration);
+    await g.h.dispatch("15 วิ");
+    await g.h.dispatch("ไม่มี");
+    const version = await g.h.latest();
+    expect(version.document.sourceImage).toMatchObject({ mediaId: MEDIA_ID });
+    expect(version.document.beats).toHaveLength(6);
+    expect(version.document.beats.every((beat) => Boolean(beat.caption?.trim()))).toBe(true);
+    const activeWork = (await g.h.conversationContext.entries()).at(-1)?.value;
+    expect(activeWork).toMatchObject({
+      latestStoryboardId: version.storyboardId,
+      latestStoryboardVersion: version.versionNumber,
+      currentWork: {
+        kind: "storyboard",
+        storyboardId: version.storyboardId,
+        storyboardVersionNumber: version.versionNumber,
+      },
+    });
+  });
+
+  it("keeps image → storyboard revision → Final Video Draft in one active work", async () => {
+    const g = unbound();
+    await g.h.dispatch("ช่วยสร้างรูปชามราเมง");
+    await g.h.conversationRouter.observeGeneratedImage(
+      g.h.claim,
+      MEDIA_ID,
+      "2026-08-30T10:00:00.000Z",
+    );
+    await g.h.dispatch("ทำเป็น storyboard");
+    await g.h.dispatch("15 วิ");
+    await g.h.dispatch("ไม่มี");
+    const v1 = await g.h.latest();
+    expect(v1.document.beats).toHaveLength(6);
+    await g.h.dispatch("ทำภาพแต่ละช็อต");
+
+    const revised = await g.h.dispatch("เปลี่ยนตอนท้ายให้มีชินจังมาแย่งราเมง");
+    expect(revised.source).toBe("storyboard");
+    const v2 = await g.h.latest();
+    expect(v2.storyboardId).toBe(v1.storyboardId);
+    expect(v2.versionNumber).toBe(2);
+    expect(
+      v2.document.beats.map(
+        (beat, index) => JSON.stringify(beat) === JSON.stringify(v1.document.beats[index]),
+      ),
+    ).toEqual([true, true, true, true, true, false]);
+
+    g.generate.mockClear();
+    const regenerated = await g.h.dispatch("เอารูป storyboard เมื่อกี้มาทำวิดีโอ");
+    expect(regenerated.text).toContain("Visual Storyboard v2 พร้อมแล้ว");
+    expect(g.generate).toHaveBeenCalledTimes(1);
+    expect(g.calls.at(-1)?.shotIndex).toBe(6);
+    expect(g.paid.prepareCalls).toBe(0);
+
+    await g.h.dispatch("ยืนยัน Storyboard");
+    const drafted = await g.h.dispatch("ใช้ Default");
+    expect(drafted.text).toContain("Final Video Draft");
+    expect(drafted.text).not.toContain("🎬 Video draft");
+    expect(g.paid.prepareCalls).toBe(1);
+  });
+
   it("freezes the handle the owner's selection resolved to", async () => {
     const g = unbound();
 
@@ -240,9 +345,11 @@ describe("the selected first frame reaches every consumer", () => {
     // The artifact records it distinctly too, so a later reader can still tell
     // a first frame from a Character reference.
     const artifacts = await g.artifacts.entries();
-    for (const { value } of artifacts) {
-      expect(value.sourceImageMediaId).toBe(MEDIA_ID);
-      expect(value.sourceReferenceAssetIds).toEqual([]);
+    for (const { value: artifact } of artifacts.filter(
+      ({ value: candidate }) => candidate.generationPurpose === "storyboard-shot",
+    )) {
+      expect(artifact.sourceImageMediaId).toBe(MEDIA_ID);
+      expect(artifact.sourceReferenceAssetIds).toEqual([]);
     }
   });
 

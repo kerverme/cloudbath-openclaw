@@ -163,6 +163,8 @@ export type ConversationRouterDeps = Readonly<{
 type EntityMention = Readonly<{ kind: SemanticReferentType; id: string; label: string }>;
 
 export class CloudbathConversationRouter {
+  private readonly ownerClaimsBySession = new Map<string, StoryboardAccessClaim>();
+
   constructor(private readonly deps: ConversationRouterDeps) {}
 
   /** Step 1-7 above. Never writes anything the owner has to undo. */
@@ -186,6 +188,16 @@ export class CloudbathConversationRouter {
     });
     if (authorization.kind === "denied") {
       return { kind: "pass" };
+    }
+    const sessionKey = context.sessionKey?.trim();
+    if (sessionKey) {
+      if (this.ownerClaimsBySession.size >= 5_000 && !this.ownerClaimsBySession.has(sessionKey)) {
+        const oldest = this.ownerClaimsBySession.keys().next().value;
+        if (oldest) {
+          this.ownerClaimsBySession.delete(oldest);
+        }
+      }
+      this.ownerClaimsBySession.set(sessionKey, claim);
     }
     const content = event.content ?? "";
     let stored = await this.readContext(claim);
@@ -235,9 +247,14 @@ export class CloudbathConversationRouter {
           })
         : undefined;
       if (referent) {
-        const kind = utterance.visualRequest
-          ? ("generate_storyboard_visuals" as const)
-          : ("continue_toward_video" as const);
+        // The requested action outranks nouns that merely identify its source:
+        // "use this image for video" is a video continuation, not a request to
+        // redraw the image. This also routes through the visual-readiness gate.
+        const kind = utterance.videoRequest
+          ? ("continue_toward_video" as const)
+          : utterance.visualRequest
+            ? ("generate_storyboard_visuals" as const)
+            : ("continue_toward_video" as const);
         this.deps.logger?.info("contextual_work_route_resolved", {
           routeKind: kind,
           resolvedWorkKind: referent.workKind,
@@ -440,6 +457,10 @@ export class CloudbathConversationRouter {
       this.deps.modelSelection?.lookup(storyboardModelSelectionKey(claim)),
       this.deps.active.lookup(activeStoryboardKey(claim)),
     ]);
+    const activeReferent = active
+      ? await this.deps.resolveStoryboardReferent?.({ storyboardId: active.storyboardId, claim })
+      : undefined;
+    const activeVersionNumber = activeReferent?.storyboardVersionNumber;
     const updatedAt = new Date(this.deps.now()).toISOString();
     const question = deriveConversationQuestion(
       {
@@ -458,11 +479,40 @@ export class CloudbathConversationRouter {
           ? {
               activeStoryboardId: active.storyboardId,
               activeProjectId: active.projectInstanceId,
+              latestStoryboardId: active.storyboardId,
+              ...(activeVersionNumber === undefined
+                ? {}
+                : {
+                    activeStoryboardVersion: activeVersionNumber,
+                    latestStoryboardVersion: activeVersionNumber,
+                  }),
+              currentWork: {
+                workId: active.projectInstanceId ?? active.storyboardId,
+                kind: "storyboard" as const,
+                status: "open" as const,
+                storyboardId: active.storyboardId,
+                ...(activeVersionNumber === undefined
+                  ? {}
+                  : { storyboardVersionNumber: activeVersionNumber }),
+                ...(active.projectInstanceId
+                  ? { projectInstanceId: active.projectInstanceId }
+                  : {}),
+                updatedAt,
+              },
             }
           : {}),
         ...(director?.durationSeconds === undefined
           ? {}
           : { durationSeconds: director.durationSeconds }),
+        ...(director?.media?.kind === "source_image"
+          ? {
+              selectedSourceArtifact: {
+                artifactId: director.media.mediaId,
+                kind: "source_image" as const,
+                createdAt: director.updatedAt,
+              },
+            }
+          : {}),
       },
       updatedAt,
     );
@@ -495,6 +545,41 @@ export class CloudbathConversationRouter {
     }
     await this.write(claim, next);
     return question ? conversationQuestionPresentation(question) : undefined;
+  }
+
+  /** Resolves tool completion back to the owner turn that started it. */
+  claimForSession(sessionKey: string | undefined): StoryboardAccessClaim | undefined {
+    return sessionKey ? this.ownerClaimsBySession.get(sessionKey.trim()) : undefined;
+  }
+
+  /** Records a durable generated image as current work; bytes stay in its media store. */
+  async observeGeneratedImage(
+    claim: StoryboardAccessClaim,
+    artifactId: string,
+    createdAt: string,
+  ): Promise<void> {
+    const stored = await this.readContext(claim);
+    const artifact = Object.freeze({
+      artifactId,
+      kind: "generated_image" as const,
+      createdAt,
+    });
+    await this.write(
+      claim,
+      mergeConversationContext(
+        stored,
+        {
+          latestGeneratedImage: artifact,
+          currentWork: {
+            workId: artifactId,
+            kind: "image",
+            status: "open",
+            updatedAt: createdAt,
+          },
+        },
+        createdAt,
+      ),
+    );
   }
 
   private async readContext(claim: StoryboardAccessClaim): Promise<ActiveConversationContext> {

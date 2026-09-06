@@ -16,6 +16,10 @@ import { createCloudbathConversationRouter } from "./src/conversation-runtime.js
 import { createConversationSemanticResolver } from "./src/conversation-semantic-resolver.js";
 import { createConversationTranscriptReader } from "./src/conversation-transcript.js";
 import {
+  createCloudbathCreativeSpecialists,
+  readGeneratedImageAttachment,
+} from "./src/creative-specialists.js";
+import {
   isWorkspacePolicyCommand,
   LineGroupWorkspacePolicyRegistry,
 } from "./src/group-workspace-policy.js";
@@ -425,6 +429,15 @@ export default definePluginEntry({
                     sha256,
                   });
                 },
+                read: async ({ objectKey }) => {
+                  const media = await r2.fetchPrivateObject({
+                    bucketName: config.r2.bucketName,
+                    objectKey,
+                    maxBytes: config.imageMaxBytes,
+                    contentTypePrefix: "image/",
+                  });
+                  return { bytes: media.bytes, mimeType: media.contentType };
+                },
               })
             : undefined;
           if (storyboardVisuals) {
@@ -552,6 +565,11 @@ export default definePluginEntry({
                 }
               : {}),
           });
+          const creativeSpecialists = createCloudbathCreativeSpecialists({
+            storyboard: storyboardLineRouter,
+            ...(storyboardVisuals ? { visuals: storyboardVisuals } : {}),
+            listCharacterNames: (claim) => storyboardResolver.listCharacterNames(claim),
+          });
           // Referent arbitration runs AHEAD of every handler, and reads the
           // storyboard flow's own stores rather than a copy, so "which question
           // is open" has exactly one answer. The paid seam is resolved per call:
@@ -564,10 +582,10 @@ export default definePluginEntry({
                 await workspaceRegistry?.lookup(accountId, groupId),
             },
             resolver: storyboardResolver,
-            resolveStoryboardReferent: async (params) =>
-              await storyboardLineRouter?.resolveStoryboardReferent(params),
-            isStoryboardRevisionCandidate: async (params) =>
-              Boolean(await storyboardLineRouter?.isStoryboardRevisionCandidate(params)),
+            resolveStoryboardReferent: (params) =>
+              creativeSpecialists.storyboard.resolveReferent(params),
+            isStoryboardRevisionCandidate: (params) =>
+              creativeSpecialists.storyboard.isRevisionCandidate(params),
             transcript: createConversationTranscriptReader(),
             semanticResolver: createConversationSemanticResolver(
               async (request) =>
@@ -933,11 +951,61 @@ export default definePluginEntry({
     });
 
     api.on("after_tool_call", async (event, ctx) => {
-      await tryGetCloudbathWorkspacePolicyRuntime()?.ugcWorkflow?.afterToolCall({
+      const runtime = tryGetCloudbathWorkspacePolicyRuntime();
+      await runtime?.ugcWorkflow?.afterToolCall({
         toolName: event.toolName,
         result: event.result,
         sessionKey: ctx.sessionKey,
       });
+      if (event.toolName !== "image_generate" || event.error) {
+        return;
+      }
+      const image = readGeneratedImageAttachment(event.result);
+      const claim = runtime?.conversationRouter?.claimForSession(ctx.sessionKey);
+      if (!image || !claim || !runtime?.ugcCharacterWorkflow) {
+        return;
+      }
+      const createdAt = new Date().toISOString();
+      const stored = await runtime.ugcCharacterWorkflow.rememberGeneratedImage({
+        claim,
+        mediaPath: image.path,
+        mimeType: image.mimeType,
+        createdAt,
+        ...(ctx.sessionKey ? { sessionKey: ctx.sessionKey } : {}),
+      });
+      if (stored) {
+        await runtime.conversationRouter?.observeGeneratedImage(
+          claim,
+          stored.durableMediaKey,
+          createdAt,
+        );
+      }
+    });
+
+    api.on("media_generation_completed", async (event) => {
+      if (event.mediaType !== "image" || event.artifacts.length !== 1) {
+        return;
+      }
+      const runtime = tryGetCloudbathWorkspacePolicyRuntime();
+      const claim = runtime?.conversationRouter?.claimForSession(event.requesterSessionKey);
+      const artifact = event.artifacts[0];
+      if (!claim || !artifact || !runtime?.ugcCharacterWorkflow) {
+        return;
+      }
+      const stored = await runtime.ugcCharacterWorkflow.rememberGeneratedImage({
+        claim,
+        mediaPath: artifact.path,
+        mimeType: artifact.mimeType,
+        createdAt: event.completedAt,
+        sessionKey: event.requesterSessionKey,
+      });
+      if (stored) {
+        await runtime.conversationRouter?.observeGeneratedImage(
+          claim,
+          stored.durableMediaKey,
+          event.completedAt,
+        );
+      }
     });
 
     api.on(

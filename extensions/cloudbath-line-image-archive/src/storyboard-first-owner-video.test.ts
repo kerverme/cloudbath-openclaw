@@ -125,6 +125,7 @@ function planner() {
  */
 function visualService() {
   const artifacts = mem<StoryboardVisualArtifact>();
+  const media = new Map<string, { bytes: Uint8Array; mimeType: string }>();
   const generate = vi.fn(async ({ shotIndex }: { shotIndex: number }) => ({
     bytes: Buffer.from(`shot-${shotIndex}`),
     mimeType: "image/png",
@@ -143,7 +144,10 @@ function visualService() {
       width: 1024,
       height: 1024,
     }),
-    persist: async () => {},
+    persist: async ({ objectKey, bytes, contentType }) => {
+      media.set(objectKey, { bytes, mimeType: contentType });
+    },
+    read: async ({ objectKey }) => media.get(objectKey)!,
   });
   return { artifacts, generate, service };
 }
@@ -193,7 +197,7 @@ describe("A. an active storyboard renders authoritative per-shot visuals", () =>
       });
       expect(artifact?.artifactId).toMatch(/^[a-f0-9]{36}$/u);
     }
-    expect(g.sent).toHaveLength(version.document.beats.length);
+    expect(g.sent).toHaveLength(1);
   });
 
   it("offers a contact sheet only as a preview DERIVED from ready shots", async () => {
@@ -209,7 +213,10 @@ describe("A. an active storyboard renders authoritative per-shot visuals", () =>
     const ready = await g.service.status({ version: await g.h.latest(), claim: CLAIM });
 
     expect(ready.kind).toBe("ready");
-    expect(deriveContactSheetPreview(ready)).toMatchObject({ kind: "derived_preview" });
+    expect(deriveContactSheetPreview(ready)).toMatchObject({
+      generationPurpose: "storyboard-contact-sheet",
+      panels: expect.arrayContaining([expect.objectContaining({ shotIndex: 1 })]),
+    });
   });
 });
 
