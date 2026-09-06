@@ -89,6 +89,28 @@ describe("conversational video director", () => {
     expect(paid.calls).toEqual([]);
   });
 
+  it("asks for scene details before duration when a bare text-only video request has no scene", async () => {
+    const h = harness();
+
+    const opened = await h.dispatch("ทำวีดีโอ");
+    expect(opened.text).toContain("จะทำวิดีโอจากอะไรดี?");
+
+    const textOnly = await h.dispatch("1");
+    expect(textOnly.text).toBe("อยากให้ในคลิปเกิดอะไรขึ้น? บรรยายฉากสั้น ๆ ได้เลย");
+
+    const scene = await h.dispatch("แมวส้มกินราเมงในร้านราเมน นานาเซะ");
+    expect(scene.text).toBe(DURATION_QUESTION);
+
+    expect((await h.dispatch("15 วิ")).text).toBe(DIALOGUE_QUESTION);
+    const done = await h.dispatch("ไม่มีเสียงพูด");
+
+    expect(done.text).toContain("Storyboard v1");
+    expect(done.text).not.toContain("สร้าง Storyboard ไม่สำเร็จ");
+    const version = await h.latest();
+    expect(version.document.scenePrompt).toContain("แมวส้มกินราเมง");
+    expect(version.document.durationSeconds).toBe(15);
+  });
+
   it("writes nothing billable while the request is still being gathered", async () => {
     const h = harness();
     await h.dispatch(NATURAL_REQUEST);
