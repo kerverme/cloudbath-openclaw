@@ -345,11 +345,11 @@ describe("the selected first frame reaches every consumer", () => {
     // The artifact records it distinctly too, so a later reader can still tell
     // a first frame from a Character reference.
     const artifacts = await g.artifacts.entries();
-    for (const { value } of artifacts.filter(
-      ({ value }) => value.generationPurpose === "storyboard-shot",
+    for (const { value: artifact } of artifacts.filter(
+      ({ value: candidate }) => candidate.generationPurpose === "storyboard-shot",
     )) {
-      expect(value.sourceImageMediaId).toBe(MEDIA_ID);
-      expect(value.sourceReferenceAssetIds).toEqual([]);
+      expect(artifact.sourceImageMediaId).toBe(MEDIA_ID);
+      expect(artifact.sourceReferenceAssetIds).toEqual([]);
     }
   });
 
