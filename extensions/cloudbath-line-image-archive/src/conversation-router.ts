@@ -67,6 +67,7 @@ import {
   type StoryboardModelSelectionStore,
 } from "./storyboard-confirmation.js";
 import { storyboardDirectorKey, type StoryboardDirectorSession } from "./storyboard-director.js";
+import { parseStoryboardMediaIntent } from "./storyboard-intent.js";
 import {
   resolveStoryboardAccessClaim,
   type StoryboardContextualRoute,
@@ -225,6 +226,22 @@ export class CloudbathConversationRouter {
     // read back out. A chip is not language and is deliberately not recorded.
     stored = recordOwnerTurn(stored, utterance.text, this.deps.now());
     await this.write(claim, stored);
+    const mediaIntent = parseStoryboardMediaIntent(content);
+    if (mediaIntent?.kind === "generate_visuals") {
+      // Conversation memory expires sooner than the active storyboard and can
+      // still name older work. Resolve this explicit output request from the
+      // authoritative pointer before entity matching or video-answer rewriting.
+      const active = await this.deps.active.lookup(activeStoryboardKey(claim));
+      const referent = active
+        ? await this.deps.resolveStoryboardReferent?.({ storyboardId: active.storyboardId, claim })
+        : undefined;
+      return referent
+        ? { kind: "route", route: { kind: "generate_storyboard_visuals", referent } }
+        : { kind: "pass" };
+    }
+    if (mediaIntent?.kind === "source_storyboard") {
+      return { kind: "pass" };
+    }
     const entities = await this.detectEntities(content, claim);
 
     // 2. Something named outright outranks anything remembered. "F99 บันทึกเสร็จยัง"
