@@ -1,4 +1,4 @@
-import { stringEnum } from "openclaw/plugin-sdk/compat";
+import { stringEnum } from "openclaw/plugin-sdk/core";
 import type { OpenClawPluginToolContext } from "openclaw/plugin-sdk/plugin-entry";
 import { jsonResult } from "openclaw/plugin-sdk/tool-results";
 import { Type, type Static } from "typebox";
