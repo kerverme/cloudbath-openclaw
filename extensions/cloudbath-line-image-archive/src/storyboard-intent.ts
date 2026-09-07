@@ -10,6 +10,7 @@
  * previs router), and anything shaped like the exact paid confirmation.
  */
 
+import { classifyConversationUtterance } from "./conversation-utterance.js";
 import { matchKnownNames } from "./previs-intent.js";
 import {
   normalizeStoryboardText,
@@ -50,6 +51,60 @@ const CREATE_VIDEO_PATTERN =
 /** Turns the conversation's explicitly tracked image into storyboard work. */
 const IMAGE_TO_STORYBOARD_PATTERN =
   /(?:ทำ|สร้าง|เปลี่ยน).*(?:storyboard|สตอรี่บอร์ด)|(?:storyboard|สตอรี่บอร์ด).*(?:จาก|ด้วย).*(?:ภาพ|รูป)|\b(?:turn|make|convert)\b.*\b(?:image|photo|this|it)\b.*\bstoryboard\b/iu;
+
+const STORYBOARD_NOUN = /สตอรี่บอร์ด|สตอรีบอร์ด|\bstoryboards?\b/iu;
+const EACH_SHOT = /(?:แต่ละ|ทุก)\s*(?:ฉาก|ช็อต|ซีน)|\b(?:each|every|all)\s+(?:scenes?|shots?)\b/iu;
+// Direction matters: images FROM a storyboard are output; a storyboard FROM
+// an image needs a selected input. Image nouns alone cannot choose that input.
+const STORYBOARD_IMAGE_INPUT =
+  /จาก\s*(?:ภาพ|รูป)(?!แบบ)|(?:ด้วย|ใช้)\s*(?:ภาพ|รูป)(?:นี้|นั้น|เดิม|ล่าสุด|ที่[^.!?]*(?:ส่ง|แนบ|เลือก|อัปโหลด)|จาก)|(?:ภาพ|รูป)(?!แบบ).*(?:ทำ|สร้าง|เป็น|ให้เป็น)\s*(?:storyboard|สตอรี่บอร์ด|สตอรีบอร์ด)/iu;
+const ENGLISH_IMAGE_TRANSFORM =
+  /\b(?:images?|photos?|pictures?)\b(?:.*\b(?:to|into|as)\s+|\s+(?:a|an|the|my|our|your)\s+)(?:[\p{L}\p{N}'’-]+\s+)*storyboard\b/iu;
+const ENGLISH_IMAGE_SOURCE =
+  /\b(?:from|using|with)\s+(?:[\p{L}\p{N}'’-]+\s+)*(?:images?|photos?|pictures?)\b(?!['’]|[\s-]+(?:(?:file|aspect)[\s-]+)?(?:format|style|layout|size|dimensions?|resolution|quality|mode|settings?|ratio)\b)/iu;
+const EXISTING_IMAGE_REFERENCE =
+  /\b(?:this|that|these|those|my|our|your|his|her|their|attached|uploaded|selected|existing|saved|reference|previous|last)\b/iu;
+
+type StoryboardMediaIntent =
+  | Readonly<{ kind: "generate_visuals" }>
+  | Readonly<{ kind: "source_storyboard"; scenePrompt: string }>;
+
+/** Shared by arbitration and direct dispatch, before pending video questions. */
+export function parseStoryboardMediaIntent(content: string): StoryboardMediaIntent | undefined {
+  const utterance = classifyConversationUtterance(content);
+  if (
+    !utterance ||
+    utterance.videoRequest ||
+    PAID_CONFIRMATION_PATTERN.test(utterance.text) ||
+    EXPLICIT_PREVIS_PATTERN.test(utterance.text)
+  ) {
+    return undefined;
+  }
+  const text = utterance.text;
+  const namesStoryboard = STORYBOARD_NOUN.test(text);
+  // A source noun phrase cannot cross the storyboard or another request:
+  // "from this storyboard make images" names the storyboard as the input.
+  const sourcePhrase = text.match(ENGLISH_IMAGE_SOURCE)?.[0];
+  const usesSourceImage =
+    sourcePhrase !== undefined &&
+    !STORYBOARD_NOUN.test(sourcePhrase) &&
+    !classifyConversationUtterance(sourcePhrase)?.visualRequest &&
+    // "Using images" can specify the output format. An existing image must
+    // actually be referenced before that wording can open first-frame selection.
+    (/^from\b/iu.test(sourcePhrase) || EXISTING_IMAGE_REFERENCE.test(sourcePhrase));
+  if (
+    namesStoryboard &&
+    (STORYBOARD_IMAGE_INPUT.test(text) || ENGLISH_IMAGE_TRANSFORM.test(text) || usesSourceImage)
+  ) {
+    return { kind: "source_storyboard", scenePrompt: text };
+  }
+  if (utterance.visualRequest && (namesStoryboard || EACH_SHOT.test(text))) {
+    return { kind: "generate_visuals" };
+  }
+  return IMAGE_TO_STORYBOARD_PATTERN.test(text)
+    ? { kind: "source_storyboard", scenePrompt: text }
+    : undefined;
+}
 
 /**
  * Nouns that name a video artefact outright.
@@ -207,7 +262,7 @@ export type StoryboardIntent =
       environment: string;
       scenePrompt: string;
     }>
-  | Readonly<{ kind: "source_storyboard"; scenePrompt: string }>
+  | StoryboardMediaIntent
   /** A document-level change to the storyboard already being iterated on. */
   | Readonly<{ kind: "revision"; revision: StoryboardDocumentRevision | StoryboardCastAddition }>
   | Readonly<{ kind: "create_video" }>;
@@ -227,11 +282,12 @@ export function parseStoryboardIntent(params: {
   if (!text || PAID_CONFIRMATION_PATTERN.test(text) || EXPLICIT_PREVIS_PATTERN.test(text)) {
     return undefined;
   }
+  const mediaIntent = parseStoryboardMediaIntent(text);
+  if (mediaIntent) {
+    return mediaIntent;
+  }
   if (CREATE_VIDEO_PATTERN.test(text)) {
     return { kind: "create_video" };
-  }
-  if (IMAGE_TO_STORYBOARD_PATTERN.test(text)) {
-    return { kind: "source_storyboard", scenePrompt: text };
   }
 
   const matched = matchKnownNames(text, params.knownCharacterNames);

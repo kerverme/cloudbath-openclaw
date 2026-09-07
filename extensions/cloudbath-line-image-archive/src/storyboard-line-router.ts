@@ -43,7 +43,11 @@ import {
 } from "./storyboard-director.js";
 import { buildStoryboardDraftScope } from "./storyboard-draft-scope.js";
 import { formatFinalVideoDraftForLine, formatStoryboardForLine } from "./storyboard-format.js";
-import { parseStoryboardIntent, type StoryboardIntent } from "./storyboard-intent.js";
+import {
+  parseStoryboardIntent,
+  parseStoryboardMediaIntent,
+  type StoryboardIntent,
+} from "./storyboard-intent.js";
 import {
   formatStoryboardModelCandidates,
   formatStoryboardModelDefault,
@@ -504,6 +508,20 @@ export class CloudbathStoryboardLineRouter {
       return undefined;
     }
 
+    // A new output request is not an answer to a pending video question. The
+    // same media intent owns arbitration, so cache loss cannot reopen first-frame
+    // selection or send a text-only storyboard through Character Library.
+    const mediaIntent = parseStoryboardMediaIntent(event.content ?? "");
+    if (mediaIntent?.kind === "generate_visuals") {
+      const active = await this.readActive(claim);
+      return {
+        handled: true,
+        text: active
+          ? await this.generateVisualStoryboard(claim, active)
+          : "ยังไม่มี Storyboard ที่ใช้งานอยู่ กรุณาสร้าง Storyboard ก่อนทำภาพ",
+      };
+    }
+
     // A pending question is answered before anything is classified, because the
     // answer ("10 วิ", "ไม่มี") is deliberately too weak to be an intent on its
     // own. An unrelated message still parses normally: only a reply that
@@ -534,8 +552,9 @@ export class CloudbathStoryboardLineRouter {
     // first; this path is what answers when no semantic resolver is wired.
     const utterance = classifyConversationUtterance(event.content ?? "");
     if (
-      (utterance?.videoRequest && this.deps.visuals) ||
-      (!utterance?.videoRequest && (utterance?.visualRequest || utterance?.continuation))
+      mediaIntent?.kind !== "source_storyboard" &&
+      ((utterance?.videoRequest && this.deps.visuals) ||
+        (!utterance?.videoRequest && (utterance?.visualRequest || utterance?.continuation)))
     ) {
       const active = await this.readActive(claim);
       if (active) {
@@ -658,6 +677,12 @@ export class CloudbathStoryboardLineRouter {
     if (!version) {
       return REPLY.missingVersion;
     }
+    // Returning to the existing storyboard retires an unfinished new-video
+    // request, otherwise observeHandledTurn would reattach its first-frame menu.
+    const director = await this.readDirector(claim);
+    if (director) {
+      await this.closeDirector(claim, director);
+    }
     const status = await this.deps.visuals.generate({ version, claim });
     if (status.kind !== "ready" && status.kind !== "partial") {
       return "สร้าง Visual Storyboard ไม่สำเร็จ กรุณาลองอีกครั้ง";
@@ -691,12 +716,10 @@ export class CloudbathStoryboardLineRouter {
         artifactId: artifact.artifactId,
       });
     }
-    // The review sheet is DERIVED, and only from a complete set: it summarises
-    // shots that already exist rather than standing in for them. When it cannot
-    // be derived the storyboard is not ready, and the reply says which shots
-    // are missing instead of claiming a version the owner cannot confirm.
-    return preview
-      ? `Visual Storyboard v${version.versionNumber} พร้อมแล้ว (${preview.panels.length} ช็อต)\nยืนยัน Storyboard หรือบอกจุดที่ต้องการแก้`
+    // Completeness belongs to per-shot artifacts; a contact sheet only changes
+    // how they are delivered. Seven delivered shots are ready without a sheet.
+    return status.kind === "ready"
+      ? `Visual Storyboard v${version.versionNumber} พร้อมแล้ว (${status.artifacts.length} ช็อต)\nยืนยัน Storyboard หรือบอกจุดที่ต้องการแก้`
       : `Visual Storyboard v${version.versionNumber} สำเร็จบางส่วน ลองทำภาพช็อต ${status.failedShotIndexes.join(", ")} ใหม่`;
   }
 
@@ -777,6 +800,9 @@ export class CloudbathStoryboardLineRouter {
     }
     if (intent.kind === "source_storyboard") {
       return await this.openSourceStoryboardDirector(intent.scenePrompt, claim);
+    }
+    if (intent.kind === "generate_visuals") {
+      return await this.generateVisualStoryboard(claim, active!);
     }
     if (intent.kind === "revision") {
       return await this.revise(intent.revision, claim, active!);
