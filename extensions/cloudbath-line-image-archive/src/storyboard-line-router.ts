@@ -82,7 +82,7 @@ import {
   type StoryboardDocumentRevision,
 } from "./storyboard-revision.js";
 import { activeStoryboardKey, StoryboardStore } from "./storyboard-store.js";
-import type { StoryboardToolInput } from "./storyboard-tool.js";
+import type { StoryboardToolInput } from "./storyboard-tool-schema.js";
 import {
   STORYBOARD_ASPECT_RATIOS,
   STORYBOARD_RESOLUTIONS,

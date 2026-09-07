@@ -1,58 +1,11 @@
-import { stringEnum } from "openclaw/plugin-sdk/core";
 import type { OpenClawPluginToolContext } from "openclaw/plugin-sdk/plugin-entry";
 import { jsonResult } from "openclaw/plugin-sdk/tool-results";
-import { Type, type Static } from "typebox";
 import { Value } from "typebox/value";
 import type { CloudbathConversationRouter } from "./conversation-router.js";
 import type { CloudbathStoryboardLineRouter } from "./storyboard-line-router.js";
-import { STORYBOARD_ASPECT_RATIOS } from "./storyboard-types.js";
+import { storyboardToolSchema as schema } from "./storyboard-tool-schema.js";
 
 export const STORYBOARD_TOOL_NAME = "cloudbath_storyboard";
-
-const text = () => Type.String({ minLength: 1, maxLength: 4000 });
-const schema = Type.Object(
-  {
-    action: stringEnum(["read", "save", "render"] as const),
-    baseVersionNumber: Type.Optional(Type.Integer({ minimum: 1 })),
-    newStoryboard: Type.Optional(Type.Boolean()),
-    brief: Type.Optional(text()),
-    aspectRatio: Type.Optional(stringEnum(STORYBOARD_ASPECT_RATIOS)),
-    columns: Type.Optional(Type.Integer({ minimum: 1, maximum: 4 })),
-    panels: Type.Optional(
-      Type.Array(
-        Type.Object(
-          {
-            framing: text(),
-            action: text(),
-            caption: Type.String({ maxLength: 160 }),
-            dialogue: Type.Optional(Type.String({ maxLength: 1000 })),
-            camera: Type.Optional(text()),
-            environmentNote: Type.Optional(Type.String({ maxLength: 4000 })),
-            soundDesign: Type.Optional(Type.String({ maxLength: 4000 })),
-            characterIds: Type.Array(Type.String()),
-          },
-          { additionalProperties: false },
-        ),
-        { minItems: 1, maxItems: 24 },
-      ),
-    ),
-    references: Type.Optional(
-      Type.Array(
-        Type.Object(
-          {
-            image: text(),
-            role: stringEnum(["identity", "style"] as const),
-          },
-          { additionalProperties: false },
-        ),
-        { maxItems: 8 },
-      ),
-    ),
-  },
-  { additionalProperties: false },
-);
-
-export type StoryboardToolInput = Static<typeof schema>;
 
 /** The agent plans with its full multimodal context; the tool owns state and rendering. */
 export function createStoryboardTool(
