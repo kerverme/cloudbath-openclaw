@@ -63,6 +63,7 @@ import {
 } from "./conversation-utterance.js";
 import { resolveStoryboardAuthorization } from "./storyboard-authorization.js";
 import {
+  isStoryboardConfirmation,
   storyboardModelSelectionKey,
   type StoryboardModelSelectionStore,
 } from "./storyboard-confirmation.js";
@@ -113,7 +114,9 @@ export type ConversationTurnResolution =
   /** Two plausible referents; ask rather than pick one. */
   | Readonly<{ kind: "clarify"; text: string }>
   /** Not ours: the turn continues to the handlers unchanged. */
-  | Readonly<{ kind: "pass" }>;
+  | Readonly<{ kind: "pass" }>
+  /** Let the main multimodal agent use its storyboard tool, bypassing keyword routers. */
+  | Readonly<{ kind: "agent" }>;
 
 export type ConversationRouterDeps = Readonly<{
   context: ConversationContextStore;
@@ -226,6 +229,27 @@ export class CloudbathConversationRouter {
     // read back out. A chip is not language and is deliberately not recorded.
     stored = recordOwnerTurn(stored, utterance.text, this.deps.now());
     await this.write(claim, stored);
+    // The meaning resolver runs before keyword handlers, not only after they
+    // have consumed the turn. It delegates authoring to the main multimodal
+    // agent; the model cannot use this result to authorize a paid action.
+    const protocolTurn =
+      isStoryboardConfirmation(content) ||
+      /^\s*\//u.test(content) ||
+      /^ยืนยัน\s+VIDEO\s+\d{4}$/iu.test(content.trim());
+    const earlyResolver = protocolTurn ? undefined : this.deps.semanticResolver;
+    const semantic = earlyResolver
+      ? await earlyResolver.resolve({
+          message: content,
+          context: stored,
+          unresolvedTasks: unresolvedConversationTasks(stored),
+          ...(stored.question ? { question: stored.question } : {}),
+          recentTurns: await this.readRecentTurns(event, context, stored),
+          entities: [],
+        })
+      : undefined;
+    if (semantic?.intent === "storyboard_request") {
+      return { kind: "agent" };
+    }
     const mediaIntent = parseStoryboardMediaIntent(content);
     if (mediaIntent?.kind === "generate_visuals") {
       // Conversation memory expires sooner than the active storyboard and can
@@ -370,15 +394,19 @@ export class CloudbathConversationRouter {
         ? { kind: "clarify", text: AMBIGUOUS_REFERENT_REPLY }
         : { kind: "pass" };
     }
-    const recentTurns = await this.readRecentTurns(event, context, stored);
-    const resolution = await this.deps.semanticResolver.resolve({
-      message: utterance.text,
-      context: stored,
-      unresolvedTasks: unresolved,
-      ...(question ? { question } : {}),
-      recentTurns,
-      entities,
-    });
+    // Every named-entity case returned above (including video jobs), so this
+    // fallback still has no entity candidates and can reuse the early result.
+    const recentTurns = earlyResolver ? [] : await this.readRecentTurns(event, context, stored);
+    const resolution = earlyResolver
+      ? semantic
+      : await this.deps.semanticResolver.resolve({
+          message: utterance.text,
+          context: stored,
+          unresolvedTasks: unresolved,
+          ...(question ? { question } : {}),
+          recentTurns,
+          entities,
+        });
     if (!resolution) {
       return { kind: "pass" };
     }

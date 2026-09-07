@@ -219,8 +219,9 @@ function escapeXml(value: string): string {
 
 function composeContactSheetSvg(params: {
   panels: readonly Readonly<{ bytes: Uint8Array; mimeType: string; caption: string }>[];
+  columns?: number;
 }): Uint8Array {
-  const columns = 3;
+  const columns = params.columns ?? 3;
   const panelWidth = 512;
   const imageHeight = 320;
   const captionHeight = 96;
@@ -309,6 +310,10 @@ export class StoryboardVisualService {
       )
       .toSorted((a, b) => a - b);
     if (jobs.length === 0) {
+      if (existing.kind === "ready" && !existing.contactSheet && this.deps.read) {
+        await this.generateContactSheet(params.version, existing.artifacts);
+        return await this.status(params);
+      }
       return existing;
     }
     this.deps.logger?.info?.("storyboard_visual_generation_requested", {
@@ -366,7 +371,10 @@ export class StoryboardVisualService {
         };
       }),
     );
-    const svg = composeContactSheetSvg({ panels });
+    const svg = composeContactSheetSvg({
+      panels,
+      columns: version.document.visualPresentation?.columns,
+    });
     const original = await this.deps.normalize({
       bytes: svg,
       mimeType: "image/svg+xml",
@@ -462,9 +470,12 @@ export class StoryboardVisualService {
     const previousDocument = params.previous.document;
     const nextDocument = params.next.document;
     const globalChanged =
+      previousDocument.scenePrompt !== nextDocument.scenePrompt ||
       previousDocument.environment !== nextDocument.environment ||
       previousDocument.aspectRatio !== nextDocument.aspectRatio ||
       previousDocument.sourceImage?.mediaId !== nextDocument.sourceImage?.mediaId ||
+      JSON.stringify(previousDocument.visualPresentation?.references ?? []) !==
+        JSON.stringify(nextDocument.visualPresentation?.references ?? []) ||
       JSON.stringify(params.previous.characterLocks) !== JSON.stringify(params.next.characterLocks);
     if (globalChanged) {
       return;

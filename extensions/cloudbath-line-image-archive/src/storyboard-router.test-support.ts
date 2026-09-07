@@ -172,6 +172,7 @@ export function harness(
     sendVisualImage?: StoryboardLineRouterDeps["sendVisualImage"];
     /** Stands where the media store proves an EXPLICIT first-frame choice. */
     resolveSelectedSourceImage?: StoryboardLineRouterDeps["resolveSelectedSourceImage"];
+    persistVisualReference?: StoryboardLineRouterDeps["persistVisualReference"];
     publicAssetBaseUrl?: string;
   } = {},
 ) {
@@ -255,6 +256,9 @@ export function harness(
     ...(options.draftScopes ? { draftScopes: options.draftScopes } : {}),
     ...(options.modelSelection ? { modelSelection: options.modelSelection } : {}),
     ...(options.ugcCapabilities ? { ugcCapabilities: options.ugcCapabilities } : {}),
+    ...(options.persistVisualReference
+      ? { persistVisualReference: options.persistVisualReference }
+      : {}),
     ...(options.visuals ? { visuals: options.visuals } : {}),
     ...(options.sendVisualImage ? { sendVisualImage: options.sendVisualImage } : {}),
     ...(options.resolveSelectedSourceImage
@@ -307,6 +311,9 @@ export function harness(
       agentId: "main",
     };
     const conversation = await conversationRouter.resolveTurn(event, ctx);
+    if (conversation.kind === "agent") {
+      return { source: "model", handled: false, conversation };
+    }
     if (conversation.kind === "answer" || conversation.kind === "clarify") {
       return { source: "conversation", handled: true, text: conversation.text, conversation };
     }

@@ -79,6 +79,8 @@ jobs:
             extensions/cloudbath-line-image-archive/src/profiles.test.ts \
             extensions/cloudbath-line-image-archive/src/r2.test.ts \
             extensions/cloudbath-line-image-archive/src/retry.test.ts \
+            extensions/cloudbath-line-image-archive/src/storyboard-tool.test.ts \
+            extensions/cloudbath-line-image-archive/src/storyboard-visual.test.ts \
             extensions/cloudbath-line-image-archive/src/storyboard-visual-routing.test.ts \
             extensions/cloudbath-line-image-archive/src/storyboard-line-router.test.ts \
             extensions/cloudbath-line-image-archive/src/storyboard-first-owner-video.test.ts \

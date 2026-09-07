@@ -30,6 +30,16 @@ beforeEach(() => {
   vi.stubEnv("CLOUDBATH_IMAGE_ANALYSIS_ENABLED", "false");
   vi.stubEnv("OPEN_CLAW_NOTION_WRITE_TOKEN", "test-value");
   vi.stubEnv("RAILWAY_PUBLIC_DOMAIN", "cloudbath.example");
+  // These are registry/hook tests, not Notion integration tests. Arbitration
+  // may read character names; stub it before service construction and deny
+  // outbound fetch so a missing mock cannot reach a live SaaS endpoint.
+  vi.spyOn(UgcNotionWorkflowClient.prototype, "listCharacterNames").mockResolvedValue([]);
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () => {
+      throw new Error("Network disabled in runtime tests");
+    }),
+  );
   resetGlobalHookRunner();
   resetPluginRuntimeStateForTest();
 });
@@ -45,6 +55,7 @@ afterEach(async () => {
   }
   vi.restoreAllMocks();
   vi.unstubAllEnvs();
+  vi.unstubAllGlobals();
 });
 
 describe("Cloudbath workspace policy runtime across plugin registries", () => {

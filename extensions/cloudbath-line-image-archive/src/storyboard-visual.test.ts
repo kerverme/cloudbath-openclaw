@@ -272,6 +272,22 @@ describe("storyboard visual artifacts", () => {
     expect(h.generate).toHaveBeenCalledWith(expect.objectContaining({ shotIndex: 2 }));
   });
 
+  it("regenerates every panel when the story art direction changes", async () => {
+    const h = harness();
+    const previous = version(1);
+    await h.service.generate({ version: previous, claim });
+    h.generate.mockClear();
+    const next = {
+      ...version(2),
+      document: { ...document, scenePrompt: "The same story illustrated in watercolor" },
+    } satisfies StoryboardVersion;
+
+    await h.service.inheritUnchangedShots({ previous, next, claim });
+    await h.service.generate({ version: next, claim });
+
+    expect(h.generate).toHaveBeenCalledTimes(document.beats.length);
+  });
+
   it("derives stable query-free LINE URLs instead of provider URLs", () => {
     const url = storyboardVisualUrl({
       publicAssetBaseUrl: "https://cloudbath.example",

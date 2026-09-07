@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import type { OpenClawPluginApi, PluginLogger } from "openclaw/plugin-sdk/plugin-entry";
@@ -69,6 +69,7 @@ import {
   createCloudbathStoryboardLineRouter,
   openStoryboardConversationStores,
 } from "./src/storyboard-runtime.js";
+import { createStoryboardTool, STORYBOARD_TOOL_NAME } from "./src/storyboard-tool.js";
 import type { StoryboardVersion } from "./src/storyboard-types.js";
 import {
   createStoryboardVisualRouteHandler,
@@ -207,6 +208,18 @@ export default definePluginEntry({
         () => tryGetCloudbathWorkspacePolicyRuntime()?.previsReview,
       ),
     });
+
+    api.registerTool(
+      (ctx) => {
+        const runtime = tryGetCloudbathWorkspacePolicyRuntime();
+        return createStoryboardTool(
+          ctx,
+          runtime?.storyboardLineRouter,
+          runtime?.conversationRouter,
+        );
+      },
+      { names: [STORYBOARD_TOOL_NAME] },
+    );
 
     api.registerTool(() => createCloudbathNotionTools(), {
       names: [...CLOUDBATH_NOTION_TOOL_NAMES],
@@ -368,17 +381,47 @@ export default definePluginEntry({
                   const firstFrame = sourceImage
                     ? await runtimeSourceImageBytes(version, sourceImage.mediaId)
                     : undefined;
-                  const inputImages = firstFrame ? [firstFrame, ...identityImages] : identityImages;
+                  const visualReferences = version.document.visualPresentation?.references ?? [];
+                  const referenceImages = await Promise.all(
+                    visualReferences.map(async (reference) => {
+                      const media = await r2.fetchPrivateObject({
+                        bucketName: config.r2.bucketName,
+                        objectKey: reference.objectKey,
+                        maxBytes: config.imageMaxBytes,
+                        contentTypePrefix: "image/",
+                      });
+                      return { buffer: Buffer.from(media.bytes), mimeType: media.contentType };
+                    }),
+                  );
+                  const inputImages = [
+                    ...identityImages,
+                    ...referenceImages,
+                    ...(firstFrame ? [firstFrame] : []),
+                  ];
                   const beat = version.document.beats[shotIndex - 1]!;
                   const generated = await api.runtime.imageGeneration.generate({
                     cfg: api.runtime.config.current() as OpenClawConfig,
                     prompt: [
-                      `Storyboard shot ${shotIndex} of ${version.document.beats.length}.`,
+                      `Storyboard shot ${shotIndex}. Depict only this shot, not the entire sheet.`,
                       `Environment: ${beat.environmentNote ?? version.document.environment}.`,
                       `Framing: ${beat.framing}. Camera: ${beat.camera}. Action: ${beat.action}.`,
-                      "Preserve the identity and outfit of every ordered reference image exactly.",
+                      `Story and art direction: ${version.document.scenePrompt}.`,
+                      `Preserve identity and outfit from the first ${identityImages.length} frozen cast references.`,
+                      ...visualReferences.map(
+                        (reference, index) =>
+                          `Reference ${identityImages.length + index + 1}: ${
+                            reference.role === "identity"
+                              ? "preserve these characters and outfits throughout the sequence"
+                              : "use visual style only; do not copy its characters or events; the contact sheet layout is composed separately"
+                          }.`,
+                      ),
+                      ...(beat.dialogue
+                        ? [`Render this dialogue legibly in speech balloons: ${beat.dialogue}.`]
+                        : []),
                       ...(firstFrame
-                        ? ["The first reference image is this scene's opening frame; match it."]
+                        ? [
+                            "The last reference image is this scene's opening frame; use it as scene context while depicting the specified action.",
+                          ]
                         : []),
                     ].join(" "),
                     inputImages,
@@ -523,6 +566,29 @@ export default definePluginEntry({
             resolver: storyboardResolver,
             workspaceRegistry,
             logger,
+            persistVisualReference: async (reference, claim) => {
+              // Use the SDK's bounded media loader: no arbitrary local-root or
+              // SSRF bypass. Freeze bytes into R2 so a temporary image survives edits.
+              const media = await api.runtime.media.loadWebMedia(reference.image, {
+                maxBytes: config.imageMaxBytes,
+                optimizeImages: false,
+              });
+              if (media.kind !== "image" || !media.contentType?.startsWith("image/")) {
+                throw new Error("Storyboard references must be images");
+              }
+              const sha256 = createHash("sha256").update(media.buffer).digest("hex");
+              const scope = createHash("sha256").update(JSON.stringify(claim)).digest("hex");
+              const objectKey = `storyboards/references/${scope}/${sha256}`;
+              await r2.ensureObject({
+                body: media.buffer,
+                bucketName: config.r2.bucketName,
+                objectKey,
+                contentType: media.contentType,
+                contentLength: media.buffer.byteLength,
+                sha256,
+              });
+              return { role: reference.role, objectKey };
+            },
             planner: new StoryboardLlmPlanner(
               async (request) =>
                 await api.runtime.llm.complete({
@@ -860,6 +926,11 @@ export default definePluginEntry({
       // already parses, so the handlers below keep exactly one implementation
       // of every decision.
       const conversation = await runtime.conversationRouter?.resolveTurn(event, ctx);
+      if (conversation?.kind === "agent") {
+        // The main agent has the original text, images and tool history. Do not
+        // feed its storyboard request back through a first-frame keyword router.
+        return undefined;
+      }
       if (conversation?.kind === "answer" || conversation?.kind === "clarify") {
         return { handled: true, text: conversation.text };
       }

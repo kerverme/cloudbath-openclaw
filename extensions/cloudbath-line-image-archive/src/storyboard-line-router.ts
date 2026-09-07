@@ -82,6 +82,7 @@ import {
   type StoryboardDocumentRevision,
 } from "./storyboard-revision.js";
 import { activeStoryboardKey, StoryboardStore } from "./storyboard-store.js";
+import type { StoryboardToolInput } from "./storyboard-tool.js";
 import {
   STORYBOARD_ASPECT_RATIOS,
   STORYBOARD_RESOLUTIONS,
@@ -90,6 +91,7 @@ import {
   type StoryboardAspectRatio,
   type StoryboardCastMember,
   type StoryboardFinalVideoDraft,
+  type StoryboardDocument,
   type StoryboardResolution,
   type StoryboardSourceImage,
   type StoryboardVersion,
@@ -257,6 +259,13 @@ export type StoryboardLineRouterDeps = Readonly<{
     | Readonly<{ kind: "none" }>
     | undefined
   >;
+  persistVisualReference?: (
+    reference: {
+      image: string;
+      role: "identity" | "style";
+    },
+    claim: StoryboardAccessClaim,
+  ) => Promise<{ role: "identity" | "style"; objectKey: string }>;
   publicAssetBaseUrl?: string;
   sendVisualImage?: (params: {
     to: string;
@@ -666,9 +675,151 @@ export class CloudbathStoryboardLineRouter {
     }
   }
 
+  /** Main-agent tool execution: no director questions, library lookup or video generation. */
+  async handleAgentTool(
+    input: StoryboardToolInput,
+    event: StoryboardDispatchEvent,
+    context: StoryboardDispatchContext,
+  ): Promise<Record<string, unknown>> {
+    const claim = context.channelId === "line" ? this.trustedClaim(event, context) : undefined;
+    if (!claim || (await this.authorize(claim)).kind === "denied") {
+      throw new Error("Storyboard is not accessible to this sender");
+    }
+    const active = await this.readActive(claim);
+    const current = active
+      ? await this.deps.store.readLatest({ storyboardId: active.storyboardId, claim })
+      : undefined;
+    if (input.action === "read") {
+      return current
+        ? {
+            storyboardId: current.storyboardId,
+            versionNumber: current.versionNumber,
+            document: current.document,
+            instruction:
+              "Use render for the existing panels. Save only when creating or changing the story/layout.",
+          }
+        : {
+            status: "no_saved_storyboard",
+            instruction:
+              "Use the story and references in this chat to author and save all panels. No first frame or Character Library is required.",
+          };
+    }
+    if (input.action === "render") {
+      if (!active) {
+        throw new Error("Save the storyboard panels from the conversation before rendering");
+      }
+      return { text: await this.generateVisualStoryboard(claim, active, false) };
+    }
+    if (!input.panels?.length || !input.brief?.trim()) {
+      throw new Error("Saving a storyboard requires a brief and every ordered panel");
+    }
+    const previous = input.newStoryboard ? undefined : current;
+    if (previous && input.baseVersionNumber !== previous.versionNumber) {
+      throw new Error("Read the latest storyboard and provide its baseVersionNumber before saving");
+    }
+    const cast = previous?.document.cast ?? [];
+    const castIds = new Set(cast.map((member) => member.characterId));
+    if (input.panels.some((panel) => panel.characterIds.some((id) => !castIds.has(id)))) {
+      throw new Error(
+        "Panel characterIds must come from the saved cast; describe text-only characters in actions",
+      );
+    }
+    const references =
+      input.references === undefined
+        ? (previous?.document.visualPresentation?.references ?? [])
+        : await Promise.all(
+            input.references.map(async (reference) => {
+              if (!this.deps.persistVisualReference) {
+                throw new Error("Storyboard reference storage is unavailable");
+              }
+              return await this.deps.persistVisualReference(reference, claim);
+            }),
+          );
+    // Timing is internal until a video is requested. It never controls how many
+    // panels the agent authored, and an image request asks no video questions.
+    const duration = previous?.document.durationSeconds ?? input.panels.length;
+    const document: StoryboardDocument = {
+      version: 1,
+      scenePrompt: input.brief,
+      durationSeconds: duration,
+      aspectRatio: input.aspectRatio ?? previous?.document.aspectRatio ?? "16:9",
+      resolution: previous?.document.resolution ?? "1080p",
+      environment: previous?.document.environment ?? "",
+      audio: previous?.document.audio ?? "off",
+      cast,
+      ...(previous?.document.sourceImage ? { sourceImage: previous.document.sourceImage } : {}),
+      visualPresentation: {
+        columns:
+          input.columns ?? previous?.document.visualPresentation?.columns ?? (previous ? 3 : 2),
+        references,
+      },
+      beats: input.panels.map((panel, index) => ({
+        ...previous?.document.beats[index],
+        beatId: `BEAT-${index + 1}`,
+        startSeconds:
+          previous?.document.beats.length === input.panels!.length
+            ? previous.document.beats[index]!.startSeconds
+            : (index * duration) / input.panels!.length,
+        endSeconds:
+          previous?.document.beats.length === input.panels!.length
+            ? previous.document.beats[index]!.endSeconds
+            : ((index + 1) * duration) / input.panels!.length,
+        kind:
+          panel.dialogue === undefined
+            ? (previous?.document.beats[index]?.kind ?? "action")
+            : panel.dialogue
+              ? "dialogue"
+              : "action",
+        framing: panel.framing,
+        action: panel.action,
+        caption: panel.caption,
+        ...(panel.dialogue !== undefined ? { dialogue: panel.dialogue } : {}),
+        ...(panel.environmentNote !== undefined ? { environmentNote: panel.environmentNote } : {}),
+        ...(panel.soundDesign !== undefined ? { soundDesign: panel.soundDesign } : {}),
+        camera: panel.camera ?? previous?.document.beats[index]?.camera ?? "Static",
+        characterIds: panel.characterIds,
+      })),
+    };
+    const version = previous
+      ? await this.deps.store.replaceDocument({
+          storyboardId: previous.storyboardId,
+          claim,
+          baseVersionNumber: previous.versionNumber,
+          document,
+        })
+      : (await this.deps.store.createStoryboard({ document, claim, characterLocks: [] })).version;
+    if (previous) {
+      await this.deps.visuals?.inheritUnchangedShots({ previous, next: version, claim });
+    }
+    await this.deps.active.register(activeStoryboardKey(claim), {
+      version: 1,
+      storyboardId: version.storyboardId,
+      ...(version.project ? { projectInstanceId: version.project.projectInstanceId } : {}),
+      accountId: claim.accountId,
+      lineGroupId: claim.lineGroupId,
+      ownerSenderId: claim.ownerSenderId,
+      updatedAt: new Date(this.deps.now()).toISOString(),
+    });
+    const director = await this.readDirector(claim);
+    if (director) {
+      await this.closeDirector(claim, director);
+    }
+    if (active) {
+      await this.retirePaidStateForNewVersion(claim, active, context.conversationId);
+    }
+    return {
+      status: "saved",
+      storyboardId: version.storyboardId,
+      versionNumber: version.versionNumber,
+      panelCount: version.document.beats.length,
+      instruction: "Call render to generate and deliver all panels as a contact sheet.",
+    };
+  }
+
   private async generateVisualStoryboard(
     claim: StoryboardAccessClaim,
     active: ActiveStoryboardContext,
+    offerVideoContinuation = true,
   ): Promise<string> {
     if (!this.deps.visuals || !this.deps.publicAssetBaseUrl || !this.deps.sendVisualImage) {
       return "ยังไม่พร้อมสร้าง Visual Storyboard ในระบบนี้";
@@ -682,6 +833,12 @@ export class CloudbathStoryboardLineRouter {
     const director = await this.readDirector(claim);
     if (director) {
       await this.closeDirector(claim, director);
+    }
+    if (!offerVideoContinuation) {
+      const modelStep = await this.readModelSelection(claim);
+      if (modelStep) {
+        await this.clearModelSelection(claim, modelStep);
+      }
     }
     const status = await this.deps.visuals.generate({ version, claim });
     if (status.kind !== "ready" && status.kind !== "partial") {
@@ -719,7 +876,7 @@ export class CloudbathStoryboardLineRouter {
     // Completeness belongs to per-shot artifacts; a contact sheet only changes
     // how they are delivered. Seven delivered shots are ready without a sheet.
     return status.kind === "ready"
-      ? `Visual Storyboard v${version.versionNumber} พร้อมแล้ว (${status.artifacts.length} ช็อต)\nยืนยัน Storyboard หรือบอกจุดที่ต้องการแก้`
+      ? `Visual Storyboard v${version.versionNumber} พร้อมแล้ว (${status.artifacts.length} ช็อต)\n${offerVideoContinuation ? "ยืนยัน Storyboard หรือบอกจุดที่ต้องการแก้" : "บอกจุดที่ต้องการแก้ได้เลย"}`
       : `Visual Storyboard v${version.versionNumber} สำเร็จบางส่วน ลองทำภาพช็อต ${status.failedShotIndexes.join(", ")} ใหม่`;
   }
 
