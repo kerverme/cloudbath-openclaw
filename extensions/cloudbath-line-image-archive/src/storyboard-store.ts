@@ -135,8 +135,12 @@ export class StoryboardStore {
     claim: StoryboardAccessClaim,
     baseVersionNumber: number | undefined,
     transform: (document: StoryboardDocument) => StoryboardDocument,
+    requireLatest = false,
   ): Promise<StoryboardVersion> {
     const head = await this.requireHead(storyboardId, claim);
+    if (requireLatest && head.latestVersionNumber !== baseVersionNumber) {
+      throw new Error("Storyboard changed; read the latest version before saving");
+    }
     const baseNumber = baseVersionNumber ?? head.latestVersionNumber;
     const base = await this.deps.versions.lookup(storyboardVersionKey(storyboardId, baseNumber));
     if (!base) {
@@ -186,6 +190,22 @@ export class StoryboardStore {
       params.claim,
       params.baseVersionNumber,
       (document) => applyStoryboardDocumentRevision(document, params.revision),
+    );
+  }
+
+  /** Agent-authored replacement uses the same version slot and frozen identity owner. */
+  async replaceDocument(params: {
+    storyboardId: string;
+    claim: StoryboardAccessClaim;
+    baseVersionNumber: number;
+    document: StoryboardDocument;
+  }): Promise<StoryboardVersion> {
+    return await this.appendDocument(
+      params.storyboardId,
+      params.claim,
+      params.baseVersionNumber,
+      () => params.document,
+      true,
     );
   }
 

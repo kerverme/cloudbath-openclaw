@@ -14,7 +14,8 @@
       "construction_upload_create",
       "construction_upload_update",
       "cloudbath_ugc_video_prepare",
-      "cloudbath_ugc_project_finalize"
+      "cloudbath_ugc_project_finalize",
+      "cloudbath_storyboard"
     ]
   },
   "toolMetadata": {

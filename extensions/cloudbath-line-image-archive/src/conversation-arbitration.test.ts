@@ -386,6 +386,7 @@ describe("I: the model, when the deterministic steps cannot decide", () => {
     };
     const { h, paid } = await upToModelQuestion({ semanticResolver: resolver });
 
+    asked.length = 0;
     const answered = await h.dispatch("อันล่าสุดแหละ");
 
     expect(asked).toHaveLength(1);
@@ -413,7 +414,7 @@ describe("I: the model, when the deterministic steps cannot decide", () => {
     expect(paid.calls).toBe(0);
   });
 
-  it("is never consulted for a message that is plainly new work", async () => {
+  it("classifies new creative work before deterministic handlers", async () => {
     let calls = 0;
     const resolver: ConversationSemanticResolver = {
       resolve: async () => {
@@ -425,9 +426,8 @@ describe("I: the model, when the deterministic steps cannot decide", () => {
 
     await h.dispatch(NATURAL_REQUEST);
 
-    // Classifying new work belongs to the storyboard router; arbitration only
-    // disambiguates referents, so it must not reach for the model here.
-    expect(calls).toBe(0);
+    // New work must reach meaning resolution before a keyword can claim it.
+    expect(calls).toBe(1);
   });
 });
 

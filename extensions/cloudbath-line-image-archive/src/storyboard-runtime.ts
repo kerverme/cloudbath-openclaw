@@ -130,6 +130,7 @@ export function createCloudbathStoryboardLineRouter(deps: {
   ugcCapabilities?: Readonly<Record<UgcCapabilityId, NotionTarget>>;
   planner?: StoryboardLlmPlanner;
   visuals?: StoryboardVisualService;
+  persistVisualReference?: StoryboardLineRouterDeps["persistVisualReference"];
   publicAssetBaseUrl?: string;
   sendVisualImage?: StoryboardLineRouterDeps["sendVisualImage"];
   /**
@@ -190,6 +191,7 @@ export function createCloudbathStoryboardLineRouter(deps: {
     },
     now,
     logger: deps.logger,
+    ...(deps.persistVisualReference ? { persistVisualReference: deps.persistVisualReference } : {}),
     ...(deps.planner ? { planner: deps.planner } : {}),
     ...(deps.visuals ? { visuals: deps.visuals } : {}),
     ...(deps.publicAssetBaseUrl ? { publicAssetBaseUrl: deps.publicAssetBaseUrl } : {}),

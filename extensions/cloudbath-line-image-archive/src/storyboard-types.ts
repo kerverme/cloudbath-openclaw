@@ -115,6 +115,11 @@ export type StoryboardDocument = Readonly<{
    * first frame is a wrong-content failure, so the director asks instead.
    */
   sourceImage?: StoryboardSourceImage;
+  /** Visual presentation references are not video first frames or cast locks. */
+  visualPresentation?: Readonly<{
+    columns: number;
+    references: readonly Readonly<{ role: "identity" | "style"; objectKey: string }>[];
+  }>;
 }>;
 
 /**

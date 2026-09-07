@@ -1,20 +1,8 @@
 /**
- * The last step before giving up: ask the model what the owner meant.
- *
- * It is reached only when deterministic arbitration cannot decide, and it
- * decides MEANING ONLY. Two structural guards, not conventions, keep it there:
- *
- *  - the result is a closed shape (a fixed intent enum, a referent id, and at
- *    most one requested action), so there is no field through which a free-form
- *    instruction could travel; and
- *  - `requestedAction` is accepted only when it is character-for-character one
- *    of the choices the CURRENT open question offered. Anything else is
- *    discarded, so the model can pick between doors this flow already opened
- *    and can never open one of its own — including the paid one, which is never
- *    an offered choice.
- *
- * It therefore cannot spend money, cannot write to any store, and cannot name a
- * storyboard, project or job the arbiter did not put in front of it.
+ * Meaning resolution before deterministic handlers consume a natural turn.
+ * Storyboard authoring is delegated to the main multimodal agent and its
+ * scoped tool. Existing question answers still require an offered choice;
+ * this resolver cannot write state or authorize a paid video call.
  */
 
 import type {
@@ -26,6 +14,7 @@ import type { StoryboardPlannerComplete } from "./storyboard-planner.js";
 
 /** What the model is allowed to conclude the turn is. */
 export type SemanticIntent =
+  | "storyboard_request"
   | "answer_question"
   | "task_status"
   | "revise_active_storyboard"
@@ -69,6 +58,7 @@ export type ConversationSemanticResolver = Readonly<{
 export const SEMANTIC_CONFIDENCE_FLOOR = 0.6;
 
 const INTENTS = new Set<SemanticIntent>([
+  "storyboard_request",
   "answer_question",
   "task_status",
   "revise_active_storyboard",
@@ -84,13 +74,15 @@ const REFERENTS = new Set<SemanticReferentType>([
 ]);
 
 const SYSTEM_PROMPT = [
-  "You resolve what a chat message REFERS TO in an ongoing video-production conversation.",
+  "You resolve what a chat message REFERS TO in an ongoing creative conversation.",
   "You never decide to spend money, never invent work, and never write anything.",
   "Reply with ONLY a JSON object of this exact shape:",
-  '{"intent":"answer_question|task_status|revise_active_storyboard|new_request|unrelated",',
+  '{"intent":"storyboard_request|answer_question|task_status|revise_active_storyboard|new_request|unrelated",',
   '"referentType":"storyboard|video_job|character|project|none","referentId":"<id from context or omit>",',
   '"requestedAction":"<one offered choice, copied exactly, or omit>","confidence":0.0,',
   '"needsClarification":true|false}',
+  "Use storyboard_request for creating, illustrating or revising a storyboard/comic/panel sequence, including follow-ups to a generated image or a story written only in chat. This delegates to the main agent, which can see the images and use cloudbath_storyboard; do not infer a video request or first-frame selection from the word storyboard.",
+  "An explicit video request, a status inquiry, and an answer to a video question are not storyboard_request. A new storyboard request outranks an unrelated pending video question. References can specify identity or layout/style, not necessarily an opening frame.",
   "Use requestedAction ONLY when the message answers the open question, and copy an offered choice verbatim.",
   "If two referents are equally plausible, set needsClarification true and lower confidence.",
 ].join("\n");

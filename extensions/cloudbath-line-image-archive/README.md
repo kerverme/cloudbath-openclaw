@@ -11,6 +11,38 @@ This additive OpenClaw plugin separates permanent image assets from configurable
 
 It targets OpenClaw `2026.7.2` and uses supported plugin hooks and SQLite-backed plugin state.
 
+## Visual storyboards in LINE
+
+The owner can ask for a storyboard or comic page using the current conversation and images.
+The semantic resolver delegates this work to the main agent before video/director keyword handlers.
+The main agent sees the original multimodal conversation and uses `cloudbath_storyboard`:
+
+- `read`: retrieve the active storyboard's latest version. If no document is saved, use the story
+  already in chat or author the requested sequence; missing saved state does not require a first frame.
+- `save`: persist the complete ordered `panels` (1–24), `brief`, and optional `columns` (1–4; new pages default to 2)
+  and one `aspectRatio` shared by all panels. Each panel includes framing, action, caption and character IDs, with
+  optional dialogue, camera, environment note and sound design. Omitted optional shot fields retain
+  their values at the same panel position on edits; supply updated values when reordering shots.
+  A revision requires `baseVersionNumber` from `read`; `newStoryboard: true`
+  starts separate work only when the owner requests a new story.
+  Revisions retain the existing total duration and layout when no layout change is requested,
+  including the three-column default of older documents.
+- `render`: generate all saved panels and deliver a contact sheet, or the completed individual panels
+  if a sheet is unavailable. Rendering an unchanged version reuses its completed images.
+
+For text-only characters, use descriptions in the brief/actions and empty `characterIds`.
+Existing cast locks and project references survive revisions. Optional `references` name image
+paths/URLs from the conversation and a role: `identity` preserves appearance, while `style` supplies
+art direction without replacing the story's cast. References are copied into private R2 storage;
+editing with `references` omitted preserves them, while an empty list clears visual references.
+These references never become a video first frame or a Character Library lock. Reference imports
+use the SDK media access checks and are unavailable to sandboxed or workspace-confined sessions.
+
+Image generation can incur image-provider charges. The tool does not prepare a video draft, mint a
+VIDEO code, or invoke a paid video provider. It requires the existing image-generation, R2 and public
+asset URL setup. Restart the gateway after updating the plugin so the new tool is registered; any
+explicit tool allowlist must permit `cloudbath_storyboard`.
+
 ## LINE group workspace policies
 
 The plugin also owns a durable, model-independent registry from native LINE group ID to one of two
@@ -437,8 +469,8 @@ insert, and update-content capabilities on the Upload Inbox so the plugin can va
 prevent duplicate Record IDs, and update an existing row. Neither integration needs schema-update,
 comment, or delete capabilities.
 
-All tools are registered as optional. Enable only the intended tools on the LINE agent, for
-example:
+The Notion/UGC tools are optional. The owner-scoped storyboard tool is registered by default.
+If the LINE agent uses an explicit tool allowlist, include each intended tool, for example:
 
 ```json5
 {
@@ -454,6 +486,7 @@ example:
             "construction_upload_create",
             "construction_upload_update",
             "cloudbath_ugc_video_prepare",
+            "cloudbath_storyboard",
           ],
         },
       },

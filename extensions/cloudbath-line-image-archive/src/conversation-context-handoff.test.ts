@@ -216,6 +216,8 @@ describe("B: 'แก้อันเมื่อกี้ให้ตอนท้
     const semantic = semanticStub(REVISE);
     const transcript = transcriptFor({ [SESSION_KEY]: HISTORY });
     const { h } = await withActiveStoryboard({ semanticResolver: semantic, transcript });
+    semantic.seen.length = 0;
+    transcript.asked.length = 0;
 
     await h.dispatch("แก้อันเมื่อกี้ให้ตอนท้ายแรงขึ้น");
 
@@ -247,8 +249,9 @@ describe("C: the same deictic message in a fresh conversation", () => {
 
     expect(asked.conversation?.kind).toBe("clarify");
     expect(asked.text).toContain("หมายถึงงานไหน");
-    // Nothing to bind, so the model was never even consulted.
-    expect(semantic.seen).toHaveLength(0);
+    // Meaning is resolved even without saved work; a claimed revision still
+    // cannot bind to a nonexistent storyboard.
+    expect(semantic.seen).toHaveLength(1);
     expect(paid.calls).toBe(0);
   });
 });
@@ -281,6 +284,8 @@ describe("E: history belonging to a different LINE conversation", () => {
       "line:group:CsomeoneElse": [{ role: "owner", text: "ความลับของกลุ่มอื่น" }],
     });
     const { h } = await withActiveStoryboard({ semanticResolver: semantic, transcript });
+    semantic.seen.length = 0;
+    transcript.asked.length = 0;
 
     await h.dispatch("แก้อันเมื่อกี้ให้ตอนท้ายแรงขึ้น");
 
@@ -342,6 +347,7 @@ describe("H: buttons stay deterministic", () => {
     const block = opened.presentation?.blocks[0];
     const chip = block?.type === "buttons" ? block.buttons[0]!.action : undefined;
 
+    semantic.seen.length = 0;
     const pressed = await h.dispatch(chip?.type === "callback" ? chip.value : "");
 
     expect(pressed.conversation).toEqual({ kind: "rewrite", canonicalText: "15 วิ" });
