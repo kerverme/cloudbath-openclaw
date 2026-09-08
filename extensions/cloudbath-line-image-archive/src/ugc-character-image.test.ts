@@ -1069,3 +1069,250 @@ describe("resolving a frozen first frame", () => {
     expect(value.displacedRecentAt).toBeUndefined();
   });
 });
+
+/**
+ * Inbound capture in a conversation this workspace does NOT own.
+ *
+ * Capture is keyed by the sender the inbound envelope attributes, so an unbound
+ * owner can later say "the image I sent". That widened what lands in the
+ * plugin's pending-media directory, and the questions this answers are the ones
+ * a widening has to answer: who else can reach it, and does the archive still
+ * see the turn.
+ *
+ * Two axes, deliberately separated. CAPTURE follows attributable need — only a
+ * sender with storyboard work already open, because `message_received` carries
+ * no `senderIsOwner` and there is no owner registry outside a UGC binding, so
+ * identity cannot be established here without inventing it. CLAIMING the turn
+ * is still the UGC question, so an unbound turn captures and returns false and
+ * the archive path runs exactly as it did.
+ */
+describe("capturing an image in an unbound conversation", () => {
+  let stateDir: string;
+
+  beforeEach(async () => {
+    stateDir = await fsp.realpath(await fsp.mkdtemp(path.join(os.tmpdir(), "ugc-unbound-")));
+    vi.stubEnv("OPENCLAW_STATE_DIR", stateDir);
+  });
+
+  afterEach(async () => {
+    vi.unstubAllEnvs();
+    await fsp.rm(stateDir, { recursive: true, force: true });
+  });
+
+  /**
+   * `policyId` decides binding; `storyboardWork` decides attributable need.
+   * The TTL every registration asks for is recorded, so a capture arriving by
+   * the widened route cannot quietly get a different lifetime from a bound one.
+   */
+  function unboundHarness(
+    options: {
+      policyId?: "UGC" | "ARCHIVE";
+      storyboardWork?: boolean;
+      now?: () => number;
+    } = {},
+  ) {
+    const policyId = options.policyId ?? "ARCHIVE";
+    const registry = {
+      lookup: vi.fn(async (_accountId: string | undefined, groupId: string) => ({
+        accountId: "primary",
+        groupId,
+        policyId,
+        boundByOwnerId: "U-owner",
+        boundAt: "2026-08-26T00:00:00.000Z",
+      })),
+    };
+    const latestImages = memoryStore<LatestCharacterImage>();
+    const registeredTtlMs: (number | undefined)[] = [];
+    const recordingStore = {
+      ...latestImages,
+      update: async (
+        key: string,
+        updateValue: (
+          current: LatestCharacterImage | undefined,
+        ) => LatestCharacterImage | undefined,
+        opts?: { ttlMs?: number },
+      ) => {
+        registeredTtlMs.push(opts?.ttlMs);
+        return await latestImages.update(key, updateValue);
+      },
+    };
+    const hasStoryboardWorkInProgress = vi.fn(async () => options.storyboardWork ?? false);
+    const workflow = new UgcCharacterImageWorkflow(
+      registry as never,
+      recordingStore as never,
+      { ensureObject: vi.fn(async () => ({ kind: "uploaded" as const })) } as never,
+      {} as never,
+      CAPABILITIES as never,
+      stateDir,
+      10 * 1024 * 1024,
+      {
+        endpoint: "https://r2.example",
+        bucketName: "bucket",
+        accessKeyId: "key",
+        secretAccessKey: "secret",
+      },
+      { info: vi.fn(), warn: vi.fn(), error: vi.fn() } as never,
+      undefined,
+      options.now ?? (() => Date.UTC(2026, 8, 5)),
+      undefined,
+      undefined,
+      hasStoryboardWorkInProgress,
+    );
+    return { workflow, latestImages, registeredTtlMs, hasStoryboardWorkInProgress, registry };
+  }
+
+  async function send(
+    workflow: UgcCharacterImageWorkflow,
+    over: { groupId?: string; userId?: string; receivedAt?: string } = {},
+  ): Promise<boolean> {
+    const media = await saveMediaBuffer(
+      PNG_BYTES,
+      "image/png",
+      "inbound",
+      10 * 1024 * 1024,
+      "unbound.png",
+    );
+    return await workflow.rememberImage({
+      accountId: "primary",
+      groupId: over.groupId ?? "C-unbound",
+      lineTarget: `line:group:${over.groupId ?? "C-unbound"}`,
+      messageId: `m-${over.receivedAt ?? "1"}`,
+      userId: over.userId ?? "U-sender",
+      mediaPath: media.path,
+      mimeType: "image/png",
+      receivedAt: over.receivedAt ?? "2026-09-05T00:00:00.000Z",
+    });
+  }
+
+  const claimFor = (groupId: string, senderId: string) => ({
+    accountId: "primary",
+    lineGroupId: groupId,
+    ownerSenderId: senderId,
+  });
+
+  it("captures an attributable sender's image and still leaves the turn to the archive", async () => {
+    const h = unboundHarness({ storyboardWork: true });
+
+    const claimed = await send(h.workflow);
+
+    // Captured: one row, resolvable by the sender it was attributed to.
+    const [row] = await h.latestImages.entries();
+    expect(row).toBeDefined();
+    const resolved = await h.workflow.resolveSelectedSourceImage(
+      claimFor("C-unbound", "U-sender"),
+      row!.value.durableMediaKey,
+    );
+    expect(resolved?.mimeType).toBe("image/png");
+    // NOT claimed: `ugcOwned` is false, so archive fallthrough is untouched.
+    expect(claimed).toBe(false);
+  });
+
+  it("captures nothing at all from a sender with no storyboard work open", async () => {
+    const h = unboundHarness({ storyboardWork: false });
+
+    const claimed = await send(h.workflow);
+
+    expect(claimed).toBe(false);
+    expect(await h.latestImages.entries()).toEqual([]);
+    // Never reaches the pending-media directory: the archive path stores it, as
+    // it did before this widening, and this store keeps nothing.
+    const pendingRoot = path.join(stateDir, UGC_CHARACTER_PENDING_MEDIA_RELATIVE_DIR);
+    expect(await fsp.readdir(pendingRoot).catch(() => [])).toEqual([]);
+  });
+
+  it("does not let another sender in the same conversation resolve the image", async () => {
+    const h = unboundHarness({ storyboardWork: true });
+    await send(h.workflow, { userId: "U-sender" });
+    const [row] = await h.latestImages.entries();
+
+    expect(
+      await h.workflow.resolveSelectedSourceImage(
+        claimFor("C-unbound", "U-someone-else"),
+        row!.value.durableMediaKey,
+      ),
+    ).toBeUndefined();
+  });
+
+  it("does not let another LINE conversation resolve the image", async () => {
+    const h = unboundHarness({ storyboardWork: true });
+    await send(h.workflow, { groupId: "C-unbound" });
+    const [row] = await h.latestImages.entries();
+
+    expect(
+      await h.workflow.resolveSelectedSourceImage(
+        claimFor("C-other-group", "U-sender"),
+        row!.value.durableMediaKey,
+      ),
+    ).toBeUndefined();
+  });
+
+  it("keeps one row per sender rather than pooling a conversation's images", async () => {
+    const h = unboundHarness({ storyboardWork: true });
+
+    await send(h.workflow, { userId: "U-sender", receivedAt: "2026-09-05T00:00:00.000Z" });
+    await send(h.workflow, { userId: "U-second", receivedAt: "2026-09-05T00:01:00.000Z" });
+
+    // Scoped per sender: neither sender's selection can become the other's.
+    const rows = await h.latestImages.entries();
+    expect(rows).toHaveLength(2);
+    const first = rows.find((entry) => entry.value.sourceReceivedAt === "2026-09-05T00:00:00.000Z");
+    expect(first).toBeDefined();
+    expect(
+      await h.workflow.resolveSelectedSourceImage(
+        claimFor("C-unbound", "U-second"),
+        first!.value.durableMediaKey,
+      ),
+    ).toBeUndefined();
+  });
+
+  it("registers the widened capture on the same TTL a bound one gets", async () => {
+    const unbound = unboundHarness({ storyboardWork: true });
+    await send(unbound.workflow);
+
+    const bound = unboundHarness({ policyId: "UGC", storyboardWork: false });
+    await send(bound.workflow, { groupId: "C-ugc", userId: "U-owner" });
+
+    expect(unbound.registeredTtlMs).toEqual([24 * 60 * 60 * 1_000]);
+    expect(unbound.registeredTtlMs).toEqual(bound.registeredTtlMs);
+  });
+
+  it("sweeps an unreferenced widened capture on the same expiry rule", async () => {
+    const h = unboundHarness({ storyboardWork: true });
+    await send(h.workflow);
+    const [row] = await h.latestImages.entries();
+    const capturedPath = path.join(
+      stateDir,
+      UGC_CHARACTER_PENDING_MEDIA_RELATIVE_DIR,
+      ...row!.value.durableMediaKey.split("/"),
+    );
+    await h.latestImages.delete(row!.key);
+    await fsp.utimes(capturedPath, new Date(0), new Date(0));
+
+    await h.workflow.cleanupExpiredPendingImages();
+
+    expect(await fsp.stat(capturedPath).catch(() => undefined)).toBeUndefined();
+  });
+
+  it("never asks about storyboard work for a conversation the workspace owns", async () => {
+    const h = unboundHarness({ policyId: "UGC", storyboardWork: false });
+
+    const claimed = await send(h.workflow, { groupId: "C-ugc", userId: "U-owner" });
+
+    // The bound path is unchanged: it captures on binding alone and claims the
+    // turn, so the narrowing predicate is not part of that decision at all.
+    expect(h.hasStoryboardWorkInProgress).not.toHaveBeenCalled();
+    expect(claimed).toBe(true);
+    expect(await h.latestImages.entries()).toHaveLength(1);
+  });
+
+  it("still refuses a non-owner's image in a bound conversation", async () => {
+    const h = unboundHarness({ policyId: "UGC", storyboardWork: true });
+
+    const claimed = await send(h.workflow, { groupId: "C-ugc", userId: "U-not-the-owner" });
+
+    // Claimed, because the conversation is UGC — but nothing is remembered, so
+    // a bound group's Character work still only ever sees its owner's image.
+    expect(claimed).toBe(true);
+    expect(await h.latestImages.entries()).toEqual([]);
+  });
+});
