@@ -277,6 +277,12 @@ export type StoryboardIntent =
 export function parseStoryboardIntent(params: {
   content: string;
   knownCharacterNames: readonly string[];
+  /**
+   * Current length of the storyboard this conversation is bound to, when the
+   * caller has one. Passed straight to the revision reader as the evidence
+   * that a named length is a change rather than a fresh request.
+   */
+  activeDurationSeconds?: number;
 }): StoryboardIntent | undefined {
   const text = normalizeStoryboardText(params.content);
   if (!text || PAID_CONFIRMATION_PATTERN.test(text) || EXPLICIT_PREVIS_PATTERN.test(text)) {
@@ -383,6 +389,12 @@ export function parseStoryboardIntent(params: {
     const revision = parseStoryboardRevision({
       content: params.content,
       knownCharacterNames: params.knownCharacterNames,
+      // A turn that asks for something NEW is not a revision of the bound
+      // storyboard, however its length is phrased, so the binding evidence is
+      // withheld there and the marker-gated reading stands.
+      ...(params.activeDurationSeconds !== undefined && !NEW_SCENE_MARKER.test(text)
+        ? { activeDurationSeconds: params.activeDurationSeconds }
+        : {}),
     });
     if (revision) {
       return { kind: "revision", revision };

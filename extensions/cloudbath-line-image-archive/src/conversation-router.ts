@@ -39,6 +39,7 @@ import {
 } from "./conversation-context.js";
 import {
   conversationQuestionPresentation,
+  conversationQuestionsMatch,
   deriveConversationQuestion,
   looksLikeConversationPostback,
   parseConversationPostbackToken,
@@ -102,8 +103,15 @@ const AMBIGUOUS_REFERENT_REPLY = "หมายถึงงานไหน? บ�
 const STALE_POSTBACK_REPLY = "ปุ่มนี้เป็นของขั้นตอนก่อนหน้า ใช้ไม่ได้แล้ว — พิมพ์คำตอบล่าสุดได้เลย";
 
 export type ConversationTurnResolution =
-  /** Hand this turn to the existing handler with wording it already parses. */
-  | Readonly<{ kind: "rewrite"; canonicalText: string }>
+  /**
+   * Hand this turn to the existing handler with wording it already parses.
+   *
+   * `source` is how the owner produced the answer, never what it means: a chip
+   * and the same words typed normalize to the SAME canonical text here, which
+   * is what makes them one action downstream. It is carried only so a claimed
+   * route can say which one arrived.
+   */
+  | Readonly<{ kind: "rewrite"; canonicalText: string; source: "button" | "text" }>
   /** The arbiter answers. Only status and stale-chip replies take this path. */
   | Readonly<{ kind: "answer"; text: string }>
   /**
@@ -212,8 +220,29 @@ export class CloudbathConversationRouter {
     if (looksLikeConversationPostback(content)) {
       const token = parseConversationPostbackToken(content);
       const choice = token ? resolveConversationPostback(stored, token) : undefined;
+      // Identifiers only, and the exact reason a chip was refused. The reported
+      // failure was a chip from the message still on screen being called stale,
+      // and nothing logged said which question was open when it arrived.
+      this.deps.logger?.info?.("conversation_postback_resolved", {
+        inputSource: "button",
+        resolved: Boolean(choice),
+        tokenParsed: Boolean(token),
+        ...(token ? { tokenNonceMatched: token.nonce === stored.question?.nonce } : {}),
+        ...(stored.question
+          ? {
+              questionId: stored.question.id,
+              questionNonce: stored.question.nonce,
+              questionStance: stored.question.stance,
+              questionSubjectId: stored.question.subject.id,
+              ...(stored.question.subject.version === undefined
+                ? {}
+                : { questionSubjectVersion: stored.question.subject.version }),
+            }
+          : {}),
+        ...(choice ? { choiceRole: choice.role } : {}),
+      });
       return choice
-        ? { kind: "rewrite", canonicalText: choice.canonicalText }
+        ? { kind: "rewrite", canonicalText: choice.canonicalText, source: "button" }
         : { kind: "answer", text: STALE_POSTBACK_REPLY };
     }
 
@@ -360,7 +389,7 @@ export class CloudbathConversationRouter {
     if (question && utterance.text.length <= ANSWER_ONLY_MAX_CHARS) {
       const choice = matchQuestionChoice(question, utterance);
       if (choice) {
-        return { kind: "rewrite", canonicalText: choice.canonicalText };
+        return { kind: "rewrite", canonicalText: choice.canonicalText, source: "text" };
       }
     }
 
@@ -426,7 +455,7 @@ export class CloudbathConversationRouter {
       (choice) => choice.canonicalText === resolution.requestedAction,
     );
     if (resolution.intent === "answer_question" && offered) {
-      return { kind: "rewrite", canonicalText: offered.canonicalText };
+      return { kind: "rewrite", canonicalText: offered.canonicalText, source: "text" };
     }
     if (resolution.intent === "revise_active_storyboard" && stored.activeStoryboardId) {
       // Bound to the storyboard OUR state says is active, never to an id the
@@ -507,15 +536,36 @@ export class CloudbathConversationRouter {
       : undefined;
     const activeVersionNumber = activeReferent?.storyboardVersionNumber;
     const updatedAt = new Date(this.deps.now()).toISOString();
-    const question = deriveConversationQuestion(
-      {
-        ...(director ? { director } : {}),
-        ...(modelSelection ? { modelSelection } : {}),
-        ...(active ? { active } : {}),
-      },
-      { nonce: this.deps.randomId(), askedAt: updatedAt },
-    );
     const stored = await this.readContext(claim);
+    const derive = (mint: Readonly<{ nonce: string; askedAt: string }>) =>
+      deriveConversationQuestion(
+        {
+          ...(director ? { director } : {}),
+          ...(modelSelection ? { modelSelection } : {}),
+          ...(active ? { active } : {}),
+          // The version the standing storyboard controls belong to. Load-bearing
+          // now that a re-derived question keeps its nonce: without it the review
+          // chips carried no version, so a chip minted for v1 still matched after
+          // a revision moved the scene to v2.
+          ...(activeVersionNumber === undefined ? {} : { activeVersionNumber }),
+        },
+        mint,
+      );
+    const derived = derive({ nonce: this.deps.randomId(), askedAt: updatedAt });
+    // Re-deriving the SAME open step keeps the nonce it already published. A
+    // fresh one on every handled turn silently killed the chips the owner was
+    // looking at: they tapped a button from the message on screen and were told
+    // it belonged to an earlier step. A materially different question still
+    // mints a new nonce, so real staleness is unaffected.
+    //
+    // Re-DERIVED with the old nonce rather than patched: every choice token is
+    // built from it, so overwriting the field alone would publish chips whose
+    // tokens no longer name the question that holds them.
+    const carried =
+      derived && conversationQuestionsMatch(derived, stored.question)
+        ? derive({ nonce: stored.question!.nonce, askedAt: stored.question!.askedAt })
+        : undefined;
+    const question = carried ?? derived;
     let next = mergeConversationContext(
       stored,
       {

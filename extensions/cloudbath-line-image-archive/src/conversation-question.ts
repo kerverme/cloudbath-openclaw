@@ -141,7 +141,9 @@ export function deriveConversationQuestion(
   state: ConversationQuestionState,
   mint: Readonly<{ nonce: string; askedAt: string }>,
 ): ConversationQuestion | undefined {
-  const modelStep = state.modelSelection;
+  // A retired step publishes no question, exactly as a closed director session
+  // does: its chips are bound to a frozen version the owner has moved past.
+  const modelStep = state.modelSelection?.closed ? undefined : state.modelSelection;
   if (modelStep?.step === "default") {
     return buildQuestion({
       id: "model_default",
@@ -299,11 +301,44 @@ export function conversationQuestionPresentation(
 }
 
 /**
+ * Whether two derived questions are the SAME question, re-derived.
+ *
+ * The nonce identifies a question, not a turn. Re-deriving the same open step
+ * on a later turn — which happens every time any handler answers anything —
+ * must keep the nonce it already published, or the chips the owner is looking
+ * at right now stop matching the step they belong to. That is what produced
+ * "this button is from an earlier step" for a button rendered one message ago.
+ *
+ * Identity is what a chip's meaning depends on: which decision, about which
+ * subject and version, offering which choices. Any of those changing is a
+ * genuinely different question and correctly invalidates the old chips.
+ */
+export function conversationQuestionsMatch(
+  left: ConversationQuestion | undefined,
+  right: ConversationQuestion | undefined,
+): boolean {
+  if (!left || !right) {
+    return false;
+  }
+  return (
+    left.id === right.id &&
+    left.stance === right.stance &&
+    left.subject.kind === right.subject.kind &&
+    left.subject.id === right.subject.id &&
+    left.subject.version === right.subject.version &&
+    left.choices.length === right.choices.length &&
+    left.choices.every(
+      (choice, index) => choice.canonicalText === right.choices[index]?.canonicalText,
+    )
+  );
+}
+
+/**
  * The choice a current chip names, or undefined when the chip is stale.
  *
- * Staleness is structural: a new question mints a new nonce, so a chip from an
- * older step cannot match the open one and is rejected without ever reaching a
- * handler. That is also why the payload needs no id of its own.
+ * Staleness is structural: a DIFFERENT question mints a new nonce, so a chip
+ * from an older step cannot match the open one and is rejected without ever
+ * reaching a handler. That is also why the payload needs no id of its own.
  */
 export function resolveConversationPostback(
   context: ActiveConversationContext,

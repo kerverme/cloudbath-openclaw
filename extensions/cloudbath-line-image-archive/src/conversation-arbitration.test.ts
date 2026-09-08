@@ -122,7 +122,11 @@ describe("A: an answer that repeats none of the offered wording", () => {
 
     // Rewritten to the wording the model handler already parses, so a chip and
     // this typed refusal run one implementation.
-    expect(answered.conversation).toEqual({ kind: "rewrite", canonicalText: "ใช้ Default" });
+    expect(answered.conversation).toEqual({
+      kind: "rewrite",
+      canonicalText: "ใช้ Default",
+      source: "text",
+    });
     expect(answered.text).toMatch(/ยืนยัน VIDEO 9566/u);
     expect(paid.calls).toBe(1);
   });
@@ -132,7 +136,11 @@ describe("A: an answer that repeats none of the offered wording", () => {
 
     const answered = await h.dispatch("เอาตัวเดิม");
 
-    expect(answered.conversation).toEqual({ kind: "rewrite", canonicalText: "ใช้ Default" });
+    expect(answered.conversation).toEqual({
+      kind: "rewrite",
+      canonicalText: "ใช้ Default",
+      source: "text",
+    });
   });
 
   it("reads a bare agreement as the AFFIRMING choice, which here is changing it", async () => {
@@ -143,7 +151,11 @@ describe("A: an answer that repeats none of the offered wording", () => {
     // which of its choices agreement selects, not this word.
     const answered = await h.dispatch("เอา");
 
-    expect(answered.conversation).toEqual({ kind: "rewrite", canonicalText: "เปลี่ยน Model" });
+    expect(answered.conversation).toEqual({
+      kind: "rewrite",
+      canonicalText: "เปลี่ยน Model",
+      source: "text",
+    });
   });
 });
 
@@ -224,7 +236,11 @@ describe("E: a postback chip", () => {
 
     // The chip's own payload carries no wording to parse: it is looked up and
     // rewritten to the canonical answer the director already understands.
-    expect(pressed.conversation).toEqual({ kind: "rewrite", canonicalText: "15 วิ" });
+    expect(pressed.conversation).toEqual({
+      kind: "rewrite",
+      canonicalText: "15 วิ",
+      source: "button",
+    });
     expect(pressed.text).toBe(DIRECTOR_QUESTION.dialogue);
   });
 
@@ -273,8 +289,13 @@ describe("a standing offer versus a question the assistant is waiting on", () =>
     ]);
     expect(block.buttons.every((button) => button.action.type === "callback")).toBe(true);
 
+    // A revision that really appends a version: these controls are bound to
+    // the version on screen, so staleness has to be proven against a scene that
+    // actually moved, not against a revision the planner refused.
     const oldAction = block.buttons[0]!.action;
-    await h.dispatch("เปลี่ยนตอนท้ายให้มีคนมาแย่งราเมง");
+    await h.dispatch("ขอ 20 วิแทน");
+    expect((await h.latest()).versionNumber).toBe(2);
+
     const stale = await h.dispatch(oldAction.type === "callback" ? oldAction.value : "");
     expect(stale.text).toContain("ขั้นตอนก่อนหน้า");
     expect(stale.conversation).toMatchObject({ kind: "answer" });
@@ -316,6 +337,7 @@ describe("a standing offer versus a question the assistant is waiting on", () =>
     expect(pressed.conversation).toEqual({
       kind: "rewrite",
       canonicalText: "ทำวิดีโอจาก Storyboard นี้",
+      source: "button",
     });
     expect(pressed.text).not.toMatch(/ยืนยัน VIDEO \d{4}/u);
   });

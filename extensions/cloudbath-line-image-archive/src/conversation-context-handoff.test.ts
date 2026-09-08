@@ -350,7 +350,11 @@ describe("H: buttons stay deterministic", () => {
     semantic.seen.length = 0;
     const pressed = await h.dispatch(chip?.type === "callback" ? chip.value : "");
 
-    expect(pressed.conversation).toEqual({ kind: "rewrite", canonicalText: "15 วิ" });
+    expect(pressed.conversation).toEqual({
+      kind: "rewrite",
+      canonicalText: "15 วิ",
+      source: "button",
+    });
     expect(semantic.seen).toHaveLength(0);
   });
 });

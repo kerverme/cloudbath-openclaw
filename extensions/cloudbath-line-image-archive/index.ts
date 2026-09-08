@@ -952,6 +952,11 @@ export default definePluginEntry({
         conversation?.kind === "rewrite"
           ? { ...event, content: conversation.canonicalText }
           : event;
+      // How the owner produced this turn, carried alongside it so the handler
+      // that claims the turn can say so. A chip and the same words typed are
+      // already ONE canonical action by this point; this only records which.
+      const routedCtx =
+        conversation?.kind === "rewrite" ? { ...ctx, inputSource: conversation.source } : ctx;
       const characterResult = await runtime.ugcCharacterWorkflow?.handleBeforeDispatch(
         routedEvent,
         ctx,
@@ -967,7 +972,7 @@ export default definePluginEntry({
       // the previs router below.
       let storyboardResult = await runtime.storyboardLineRouter?.handleBeforeDispatch(
         routedEvent,
-        ctx,
+        routedCtx,
       );
       // A rewrite is a HINT, not a replacement. If the handler it was aimed at
       // declines — its frozen step went stale, the menu it belonged to is gone

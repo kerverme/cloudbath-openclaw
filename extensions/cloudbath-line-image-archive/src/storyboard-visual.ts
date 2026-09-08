@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import type {
   StoryboardAccessClaim,
+  StoryboardBeat,
   StoryboardSourceImage,
   StoryboardVersion,
 } from "./storyboard-types.js";
@@ -245,6 +246,20 @@ function composeContactSheetSvg(params: {
   );
 }
 
+/**
+ * Whether two beats depict the same thing, ignoring WHEN they play.
+ *
+ * A length change re-times every window, so comparing whole beats made a
+ * 7 -> 15 second revision look like an entirely new scene and threw away
+ * finished shots the owner had already approved. The image depends on the
+ * framing, action, camera, kind and cast — never on the seconds.
+ */
+function sameShotSemantics(left: StoryboardBeat, right: StoryboardBeat): boolean {
+  const { startSeconds: _l, endSeconds: _lend, ...leftContent } = left;
+  const { startSeconds: _r, endSeconds: _rend, ...rightContent } = right;
+  return JSON.stringify(leftContent) === JSON.stringify(rightContent);
+}
+
 export class StoryboardVisualService {
   constructor(private readonly deps: StoryboardVisualServiceDeps) {}
 
@@ -459,7 +474,7 @@ export class StoryboardVisualService {
     );
   }
 
-  /** Carries only byte-identical shot semantics into a new storyboard version. */
+  /** Carries only shots whose depicted content is unchanged into a new version. */
   async inheritUnchangedShots(params: {
     previous: StoryboardVersion;
     next: StoryboardVersion;
@@ -482,7 +497,7 @@ export class StoryboardVisualService {
     }
     for (const [index, beat] of nextDocument.beats.entries()) {
       const previousBeat = previousDocument.beats[index];
-      if (!previousBeat || JSON.stringify(previousBeat) !== JSON.stringify(beat)) {
+      if (!previousBeat || !sameShotSemantics(previousBeat, beat)) {
         continue;
       }
       const inherited = await this.deps.artifacts.lookup(
