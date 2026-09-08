@@ -186,7 +186,7 @@ async function textOnlyStoryboard() {
     (reply.presentation?.blocks ?? []).flatMap((block) =>
       block.type === "buttons"
         ? block.buttons.flatMap((button) =>
-            button.action.type === "callback"
+            button.action?.type === "callback"
               ? [{ label: button.label, value: button.action.value }]
               : [],
           )
