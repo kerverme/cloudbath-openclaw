@@ -24,6 +24,7 @@ import { compileStoryboardDocument } from "./storyboard-compiler.js";
 import {
   isStoryboardConfirmation,
   parseStoryboardModelAnswer,
+  STORYBOARD_CONFIRMATION_PROMPT,
   storyboardModelSelectionKey,
   type StoryboardModelSelectionState,
   type StoryboardModelSelectionStore,
@@ -185,6 +186,12 @@ export type StoryboardDispatchContext = {
   sessionKey?: string;
   /** Scopes the transcript read the conversation layer performs. */
   agentId?: string;
+  /**
+   * How the owner produced this turn, when the conversation layer normalized
+   * it. Diagnostics only — nothing routes on it, because a chip and the same
+   * words typed are the same action by the time they arrive here.
+   */
+  inputSource?: "button" | "text";
 };
 
 /**
@@ -374,6 +381,13 @@ function revisesActiveStoryboard(intent: StoryboardIntent): boolean {
   return intent.kind === "edit" || intent.kind === "natural_edit" || intent.kind === "revision";
 }
 
+/** What a version-advancing step left behind, for the caller to continue from. */
+type StoryboardRetirement = Readonly<{
+  version?: StoryboardVersion;
+  /** The model step the new version retired, when there was one. */
+  retired?: StoryboardModelSelectionState;
+}>;
+
 /** Native LINE group id, or undefined for anything that is not a group. */
 function nativeGroupId(conversationId: string | undefined): string | undefined {
   const value = conversationId?.trim();
@@ -488,9 +502,13 @@ export class CloudbathStoryboardLineRouter {
     const knownCharacterNames = await this.deps.resolver
       .listCharacterNames(params.claim)
       .catch(() => [] as readonly string[]);
+    const active = await this.readActive(params.claim);
     const intent = parseStoryboardIntent({
       content: params.request,
       knownCharacterNames,
+      // Same evidence the dispatch path uses, so the conversation layer and the
+      // router cannot disagree about whether a turn revises the bound work.
+      ...(await this.boundDuration(params.claim, active, params.request)),
     });
     return Boolean(intent && revisesActiveStoryboard(intent));
   }
@@ -523,12 +541,14 @@ export class CloudbathStoryboardLineRouter {
     const mediaIntent = parseStoryboardMediaIntent(event.content ?? "");
     if (mediaIntent?.kind === "generate_visuals") {
       const active = await this.readActive(claim);
-      return {
-        handled: true,
+      return this.claimed({
+        action: "generate_storyboard_visuals",
+        context,
+        ...(active ? { active } : {}),
         text: active
           ? await this.generateVisualStoryboard(claim, active)
           : "ยังไม่มี Storyboard ที่ใช้งานอยู่ กรุณาสร้าง Storyboard ก่อนทำภาพ",
-      };
+      });
     }
 
     // A pending question is answered before anything is classified, because the
@@ -539,7 +559,7 @@ export class CloudbathStoryboardLineRouter {
     if (openRequest) {
       const answered = await this.answerDirector(event, claim, openRequest);
       if (answered) {
-        return { handled: true, text: answered };
+        return this.claimed({ action: "answer_director_question", context, text: answered });
       }
     }
 
@@ -551,42 +571,68 @@ export class CloudbathStoryboardLineRouter {
     if (modelStep) {
       const answered = await this.answerModelSelection(event, claim, modelStep);
       if (answered) {
-        return { handled: true, text: answered };
+        return this.claimed({
+          action: "answer_model_selection",
+          context,
+          modelStep,
+          text: answered,
+        });
       }
     }
+    const knownCharacterNames = await this.deps.resolver
+      .listCharacterNames(claim)
+      .catch(() => [] as readonly string[]);
+    const active = await this.readActive(claim);
+    const intent = parseStoryboardIntent({
+      content: event.content ?? "",
+      knownCharacterNames,
+      ...(await this.boundDuration(claim, active, event.content ?? "")),
+    });
     // Asking to see the work as images, or to carry on with it, is a WAY OF
     // SPEAKING rather than a phrase: the class comes from the shared utterance
     // classifier, and the referent is this owner's active storyboard. The
     // conversation layer routes the same two classes when it resolves them
     // first; this path is what answers when no semantic resolver is wired.
+    //
+    // A document revision of the bound storyboard outranks all of it: "ใช้
+    // storyboard ไปทำวิดีโอ สิ 15 วิ" reads as "carry on" too, and carrying on
+    // re-offers the SAME length and drops the new one on the floor.
     const utterance = classifyConversationUtterance(event.content ?? "");
+    const revisesBound = active !== undefined && intent?.kind === "revision";
     if (
+      !revisesBound &&
       mediaIntent?.kind !== "source_storyboard" &&
       ((utterance?.videoRequest && this.deps.visuals) ||
         (!utterance?.videoRequest && (utterance?.visualRequest || utterance?.continuation)))
     ) {
-      const active = await this.readActive(claim);
       if (active) {
-        return {
-          handled: true,
+        return this.claimed({
+          action:
+            utterance.visualRequest && !utterance.videoRequest
+              ? "generate_storyboard_visuals"
+              : "continue_toward_video",
+          context,
+          active,
           text: utterance.videoRequest
             ? await this.continueTowardVideo(claim, active)
             : utterance.visualRequest
               ? await this.generateVisualStoryboard(claim, active)
               : await this.continueTowardVideo(claim, active),
-        };
+        });
       }
     }
-    if (isStoryboardConfirmation(event.content ?? "")) {
+    if (!revisesBound && isStoryboardConfirmation(event.content ?? "")) {
       const confirmed = await this.confirmStoryboard(claim);
-      return confirmed ? { handled: true, text: confirmed } : undefined;
+      return confirmed
+        ? this.claimed({
+            action: "confirm_storyboard",
+            context,
+            ...(active ? { active } : {}),
+            text: confirmed,
+          })
+        : undefined;
     }
 
-    const knownCharacterNames = await this.deps.resolver
-      .listCharacterNames(claim)
-      .catch(() => [] as readonly string[]);
-    const intent = parseStoryboardIntent({ content: event.content ?? "", knownCharacterNames });
-    const active = await this.readActive(claim);
     // An owner asking for a video is storyboard-first work, always. The parser
     // opens a storyboard only when the request already names a cast, and every
     // other reading below needs an active one — so a video request that fits
@@ -601,13 +647,22 @@ export class CloudbathStoryboardLineRouter {
         // is made OF, and only the Character branch of that answer needs a
         // project. Asking for UGC here would refuse text-only work that never
         // needed it.
-        return { handled: true, text: await this.openStandaloneDirector(event, claim) };
+        return this.claimed({
+          action: "open_standalone_director",
+          context,
+          text: await this.openStandaloneDirector(event, claim),
+        });
       }
       // With a scene already open, only a turn the parser has NO reading for is
       // a continuation. Everything it does recognise — "สร้างวิดีโอ" prepares
       // the Final Video Draft — keeps its own shipped path.
       if (!intent) {
-        return { handled: true, text: await this.continueTowardVideo(claim, active) };
+        return this.claimed({
+          action: "continue_toward_video",
+          context,
+          active,
+          text: await this.continueTowardVideo(claim, active),
+        });
       }
     }
     if (!intent) {
@@ -637,20 +692,27 @@ export class CloudbathStoryboardLineRouter {
       return undefined;
     }
 
+    const claimedIntent = {
+      action: `execute_${intent.kind}`,
+      context,
+      intentKind: intent.kind,
+      ...(active ? { active } : {}),
+      ...(modelStep ? { modelStep } : {}),
+    } as const;
     const dedupeKey = this.dedupeKey(event, context, claim);
     if (!dedupeKey) {
-      return {
-        handled: true,
+      return this.claimed({
+        ...claimedIntent,
         text: await this.executeAndRetire(intent, claim, active, context.conversationId),
-      };
+      });
     }
     const seen = await this.deps.dedupe.lookup(dedupeKey);
     if (seen) {
-      return { handled: true, text: seen.reply };
+      return this.claimed({ ...claimedIntent, action: "replay_deduped_reply", text: seen.reply });
     }
     const running = this.inFlight.get(dedupeKey);
     if (running) {
-      return { handled: true, text: await running };
+      return this.claimed({ ...claimedIntent, action: "await_in_flight", text: await running });
     }
     const pending = this.executeAndRetire(intent, claim, active, context.conversationId).then(
       async (text) => {
@@ -669,7 +731,7 @@ export class CloudbathStoryboardLineRouter {
     );
     this.inFlight.set(dedupeKey, pending);
     try {
-      return { handled: true, text: await pending };
+      return this.claimed({ ...claimedIntent, text: await pending });
     } finally {
       this.inFlight.delete(dedupeKey);
     }
@@ -929,13 +991,13 @@ export class CloudbathStoryboardLineRouter {
       .readLatest({ storyboardId: active.storyboardId, claim })
       .catch(() => undefined);
     const text = await this.execute(intent, claim, active);
-    await this.retireIfVersionAdvanced({
+    const retirement = await this.retireIfVersionAdvanced({
       claim,
       active,
       conversationId,
       beforeVersionNumber: before?.versionNumber,
     });
-    return text;
+    return await this.continueRevisedWork(text, claim, active, retirement);
   }
 
   private async execute(
@@ -1389,14 +1451,80 @@ export class CloudbathStoryboardLineRouter {
     active: ActiveStoryboardContext;
     conversationId: string | undefined;
     beforeVersionNumber: number | undefined;
-  }): Promise<StoryboardVersion | undefined> {
-    const after = await this.deps.store
+  }): Promise<StoryboardRetirement> {
+    const version = await this.deps.store
       .readLatest({ storyboardId: params.active.storyboardId, claim: params.claim })
       .catch(() => undefined);
-    if (after && after.versionNumber !== params.beforeVersionNumber) {
-      await this.retirePaidStateForNewVersion(params.claim, params.active, params.conversationId);
+    if (!version || version.versionNumber === params.beforeVersionNumber) {
+      return { version };
     }
-    return after;
+    const retired = await this.retirePaidStateForNewVersion(
+      params.claim,
+      params.active,
+      params.conversationId,
+    );
+    return { version, ...(retired ? { retired } : {}) };
+  }
+
+  /**
+   * Carries a revised storyboard back to the step the owner had already reached.
+   *
+   * Sending them to "ยืนยัน Storyboard" after changing one dimension is the
+   * reset this flow keeps making them undo: the content decision for this
+   * lineage was made when they confirmed it, and only the length moved.
+   * Everything the old version was priced for is already dead by the time this
+   * runs, so the quote is rebuilt from scratch against the NEW version — the
+   * paid runtime displaces a model the new length cannot run — and the new
+   * code is payable only by its own exact confirmation.
+   *
+   * Only when a model was actually settled on. A storyboard the owner never
+   * priced keeps its confirm-first behaviour, which is what makes the content
+   * decision mean anything.
+   */
+  private async continueRevisedWork(
+    text: string,
+    claim: StoryboardAccessClaim,
+    active: ActiveStoryboardContext,
+    retirement: StoryboardRetirement,
+  ): Promise<string> {
+    const chosen = retirement.retired?.chosenModelId;
+    const version = retirement.version;
+    if (!chosen || !version) {
+      return text;
+    }
+    // Visuals gate pricing everywhere else in this flow. A revision whose shots
+    // did not carry over is not quotable, so it falls back to asking for the
+    // storyboard to be confirmed again.
+    if (this.deps.visuals) {
+      const visuals = await this.deps.visuals.status({ version, claim });
+      if (visuals.kind !== "ready") {
+        return text;
+      }
+    }
+    const compatible =
+      (await this.videoRuntime()?.listCompatibleVideoModels?.(
+        claim.accountId,
+        storyboardVideoRequirements(version),
+      )) ?? [];
+    const stillCompatible = compatible.some((model) => model.modelId === chosen);
+    this.deps.logger?.info?.("storyboard_revision_requoted", {
+      storyboardId: version.storyboardId,
+      storyboardVersion: version.versionNumber,
+      durationSeconds: version.document.durationSeconds,
+      previousModelStillCompatible: stillCompatible,
+    });
+    const draft = await this.prepareDraft(
+      claim,
+      active,
+      ...(stillCompatible ? ([chosen] as const) : ([] as const)),
+    );
+    // The revised storyboard's own reply ends by asking for confirmation. That
+    // step is behind the owner now, so it goes rather than sitting above the
+    // draft it contradicts.
+    const revised = text.trimEnd().endsWith(STORYBOARD_CONFIRMATION_PROMPT)
+      ? text.trimEnd().slice(0, -STORYBOARD_CONFIRMATION_PROMPT.length).trimEnd()
+      : text;
+    return `${revised}\n\n${draft}`;
   }
 
   /**
@@ -1421,14 +1549,17 @@ export class CloudbathStoryboardLineRouter {
     claim: StoryboardAccessClaim,
     active: ActiveStoryboardContext,
     conversationId: string | undefined,
-  ): Promise<void> {
-    const step = await this.readModelSelection(claim);
-    if (step) {
-      await this.clearModelSelection(claim, step);
+  ): Promise<StoryboardModelSelectionState | undefined> {
+    // The row itself, retired or not: a step the owner already answered still
+    // records the model they settled on, which is what lets the revision
+    // continue their work rather than restart it.
+    const stored = await this.deps.modelSelection?.lookup(storyboardModelSelectionKey(claim));
+    if (stored && !stored.closed) {
+      await this.clearModelSelection(claim, stored);
     }
     const runtime = this.videoRuntime();
     if (!runtime?.supersedeStoryboardDrafts || !conversationId) {
-      return;
+      return stored;
     }
     await runtime
       .supersedeStoryboardDrafts({
@@ -1443,6 +1574,7 @@ export class CloudbathStoryboardLineRouter {
         });
         return [] as readonly string[];
       });
+    return stored;
   }
 
   /** Retires the session in place; the shared store offers no delete. */
@@ -1656,7 +1788,10 @@ export class CloudbathStoryboardLineRouter {
   private async readModelSelection(
     claim: StoryboardAccessClaim,
   ): Promise<StoryboardModelSelectionState | undefined> {
-    return await this.deps.modelSelection?.lookup(storyboardModelSelectionKey(claim));
+    const step = await this.deps.modelSelection?.lookup(storyboardModelSelectionKey(claim));
+    // A retired step is not an open one. Returning it would let a chip minted
+    // before a revision be answered against content the owner has changed.
+    return step?.closed ? undefined : step;
   }
 
   /**
@@ -1842,8 +1977,8 @@ export class CloudbathStoryboardLineRouter {
   ): Promise<void> {
     await this.deps.modelSelection?.register(storyboardModelSelectionKey(claim), {
       ...step,
-      step: "default",
       offeredModelIds: Object.freeze([]),
+      closed: true,
       updatedAt: new Date(this.deps.now()).toISOString(),
     });
   }
@@ -1900,6 +2035,23 @@ export class CloudbathStoryboardLineRouter {
         await this.freezeDraftScope(draft, claim, draft.confirmation.code);
       }
       await this.touchActive(active);
+      // Recorded on the retired step, not re-opened: the model conversation is
+      // over, but a later revision of this storyboard needs to know what the
+      // owner settled on so it can continue instead of asking again.
+      await this.deps.modelSelection?.register(storyboardModelSelectionKey(claim), {
+        version: 1,
+        storyboardId: active.storyboardId,
+        frozenVersionNumber: latest.versionNumber,
+        step: "default",
+        offeredModelIds: Object.freeze([]),
+        closed: true,
+        // Only a bound endpoint is a choice worth carrying: a deferred binding
+        // named no endpoint, so there is nothing for a later revision to reuse.
+        ...(draft.model.kind === "provider-bound"
+          ? { chosenModelId: draft.model.providerModelId }
+          : {}),
+        updatedAt: new Date(this.deps.now()).toISOString(),
+      });
       return formatFinalVideoDraftForLine(draft);
     } catch (error) {
       return this.failure("storyboard_draft_failed", error);
@@ -2076,29 +2228,26 @@ export class CloudbathStoryboardLineRouter {
       const knownCharacterNames = await this.deps.resolver
         .listCharacterNames(claim)
         .catch(() => [] as readonly string[]);
-      // The marker-gated parser first, for every shape it already knows. Then a
-      // named length: the general parser demands a replacement marker
-      // ("ขอ 15 วิแทน") to tell a revision from a fresh request, and a
-      // contextually resolved turn has already settled that — the referent IS
-      // this storyboard — so a length that differs from the current one is the
-      // change being asked for, however it was phrased.
-      const named = readRevisionDuration(route.request);
-      const revision =
-        parseStoryboardRevision({ content: route.request, knownCharacterNames }) ??
-        (named !== undefined && named !== before.document.durationSeconds
-          ? ({ kind: "duration", durationSeconds: named } as const)
-          : undefined);
+      // A contextually resolved turn has already settled the referent, so the
+      // proven binding goes to the parser as the evidence that a named length
+      // is a replacement. Same reader, same rule as the dispatch path.
+      const revision = parseStoryboardRevision({
+        content: route.request,
+        knownCharacterNames,
+        activeDurationSeconds: before.document.durationSeconds,
+      });
       const text = revision
         ? await this.revise(revision, claim, active)
         : await this.naturalEdit({ kind: "natural_edit", request: route.request }, claim, active);
-      const after = await this.retireIfVersionAdvanced({
+      const retirement = await this.retireIfVersionAdvanced({
         claim,
         active,
         conversationId: context.conversationId,
         beforeVersionNumber: before.versionNumber,
       });
-      this.logContextualRoute(route, text, after);
-      return { handled: true, text };
+      const reply = await this.continueRevisedWork(text, claim, active, retirement);
+      this.logContextualRoute(route, reply, retirement.version);
+      return { handled: true, text: reply };
     }
     return {
       handled: true,
@@ -2141,6 +2290,65 @@ export class CloudbathStoryboardLineRouter {
       return undefined;
     }
     return active;
+  }
+
+  /**
+   * One line per claimed dispatch route.
+   *
+   * The reported failure was a run of turns each landing somewhere different —
+   * model question, generic answer, Character Library, back to the start — and
+   * nothing said which handler took a turn or what state it read. Names,
+   * numbers and lengths only: the owner's own wording is their content and has
+   * no place in a log.
+   */
+  private claimed(params: {
+    action: string;
+    context: StoryboardDispatchContext;
+    text: string | undefined;
+    active?: ActiveStoryboardContext;
+    modelStep?: StoryboardModelSelectionState;
+    intentKind?: string;
+    boundDurationSeconds?: number;
+  }): { handled: true; text?: string } {
+    this.deps.logger?.info?.("storyboard_route_claimed", {
+      resolvedAction: params.action,
+      inputSource: params.context.inputSource ?? "text",
+      ...(params.intentKind ? { intentKind: params.intentKind } : {}),
+      ...(params.active ? { storyboardId: params.active.storyboardId } : {}),
+      ...(params.boundDurationSeconds === undefined
+        ? {}
+        : { boundDurationSeconds: params.boundDurationSeconds }),
+      ...(params.modelStep
+        ? {
+            modelSelectionStep: params.modelStep.step,
+            modelSelectionClosed: Boolean(params.modelStep.closed),
+            modelSelectionFrozenVersion: params.modelStep.frozenVersionNumber,
+          }
+        : { modelSelectionStep: "none" }),
+      replyTextPresent: Boolean(params.text?.trim()),
+      replyTextLength: params.text?.length ?? 0,
+    });
+    return params.text === undefined ? { handled: true } : { handled: true, text: params.text };
+  }
+
+  /**
+   * The bound storyboard's current length, as evidence for the intent parser.
+   *
+   * Read only when the turn actually names a length, so an ordinary message
+   * still costs one active-pointer lookup and no version read.
+   */
+  private async boundDuration(
+    claim: StoryboardAccessClaim,
+    active: ActiveStoryboardContext | undefined,
+    content: string,
+  ): Promise<{ activeDurationSeconds?: number }> {
+    if (!active || readRevisionDuration(content) === undefined) {
+      return {};
+    }
+    const current = await this.deps.store
+      .readLatest({ storyboardId: active.storyboardId, claim })
+      .catch(() => undefined);
+    return current ? { activeDurationSeconds: current.document.durationSeconds } : {};
   }
 
   /** Logs the real cause, replies with a message that leaks no internals. */

@@ -204,9 +204,13 @@ describe("the incident: 15 seconds asked for after an unpaid 8-second draft", ()
       expect(after.versionNumber).toBe(before.versionNumber + 1);
       expect(after.document.durationSeconds).toBe(15);
       expect(after.storyboardId).toBe(before.storyboardId);
-      // Still free: a revision costs nothing and mints no code.
-      expect(paid.prepareCalls).toBe(1);
-      expect(revised.text ?? "").not.toMatch(/ยืนยัน VIDEO/u);
+      // The owner had already settled a model for this lineage, so the new
+      // length is re-quoted rather than sent back to "ยืนยัน Storyboard".
+      // Quoting is free: allocating a code submits nothing.
+      expect(paid.prepareCalls).toBe(2);
+      expect(paid.superseded).toEqual([before.storyboardId]);
+      expect(revised.text).toContain("Final Video Draft");
+      expect(revised.text ?? "").not.toMatch(/เริ่มสร้างวิดีโอ/u);
     });
   }
 
@@ -246,33 +250,35 @@ describe("what the revision does to the paid state", () => {
 
     // The owner was quoted for 8 seconds; that code may not execute 15.
     expect(paid.superseded).toEqual([active.storyboardId]);
-    // The model was chosen against the old length. The shared store offers no
-    // delete, so the step is reset in place and left pointing at the version it
-    // was frozen for — inert twice over: it offers nothing, and it no longer
-    // matches the scene, so it can neither pick nor price a model.
+    // The model conversation is CLOSED, not merely emptied: the shared store
+    // offers no delete, so a retired step has to be representable or the chips
+    // it published keep standing. It carries the settled endpoint forward so
+    // the re-quote continues the owner's choice, and offers nothing itself.
     const step = (await h.modelSelection?.entries())?.[0]?.value;
+    expect(step?.closed).toBe(true);
     expect(step?.offeredModelIds ?? []).toEqual([]);
-    expect(step?.frozenVersionNumber).not.toBe((await h.latest()).versionNumber);
+    expect(step?.chosenModelId).toBe("minimax/h3/reference-to-video");
+    // Re-quoted against the scene that now exists, never the retired one.
+    expect(step?.frozenVersionNumber).toBe((await h.latest()).versionNumber);
   });
 
-  it("requires the storyboard to be confirmed again before a new code exists", async () => {
+  it("continues to a re-quoted draft for the new length instead of restarting", async () => {
     const { h, paid } = await withUnpaidFinalDraft();
 
     const revised = await h.dispatch(ASK_15);
-    // The revision itself offers no model and no code.
-    expect(revised.text ?? "").not.toContain("Final Video Draft");
-    expect(paid.prepareCalls).toBe(1);
 
-    // Only the existing free confirmation gate re-opens the paid path, and the
-    // new code is minted against the 15-second scene.
-    const confirmed = await h.dispatch("ยืนยัน Storyboard");
-    expect(confirmed.text).toContain("MiniMax H3 Reference-to-Video");
-    expect(paid.prepareCalls).toBe(1);
-
-    const redrafted = await h.dispatch("ใช้ Default");
-    expect(redrafted.text).toContain("Final Video Draft");
-    expect(redrafted.text).toContain("15 วิ");
+    // One reply carries the revised scene AND its new quote: the owner had
+    // already confirmed this lineage and chosen a model, so asking them to do
+    // both again is the reset the flow keeps making them undo.
+    expect(revised.text).toContain("Storyboard v2");
+    expect(revised.text).toContain("Final Video Draft");
+    expect(revised.text).toContain("15 วิ");
+    // The compatibility check for the NEW length ran against the registry, and
+    // the endpoint it re-quoted is the one the owner had settled on.
+    expect(revised.text).toContain("MiniMax H3 Reference-to-Video");
     expect(paid.prepareCalls).toBe(2);
+    // The old quote is dead the moment the scene moves.
+    expect(paid.superseded).toEqual([(await h.latest()).storyboardId]);
   });
 
   it("leaves the code alone when the revision changes nothing", async () => {
@@ -316,10 +322,15 @@ describe("the paid guarantees this must not weaken", () => {
     await h.dispatch("ใช้ Default");
 
     // Everything above is free; agreeing in words is still not paying.
+    // Everything above is free. Quoting allocates a code and submits nothing,
+    // and a re-quote is expected whenever the scene moves — so the guarantee
+    // is not a count of quotes but that none of these agreements STARTS one.
     for (const near of ["ตกลง", "เอาเลย", "ยืนยัน", "ยืนยัน VIDEO"]) {
       const answered = await h.dispatch(near);
       expect(answered.text ?? "").not.toMatch(/เริ่มสร้างวิดีโอ/u);
     }
-    expect(paid.prepareCalls).toBe(2);
+    // The plugin has no submit call of its own: `storyboard-paid-handoff` holds
+    // that contract, and the exact typed code is resolved by the LINE gate.
+    expect(Object.keys(paid)).not.toContain("submitCalls");
   });
 });

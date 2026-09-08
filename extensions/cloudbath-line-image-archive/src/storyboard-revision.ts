@@ -79,6 +79,17 @@ function trimmed(value: string | undefined): string | undefined {
 export function parseStoryboardRevision(params: {
   content: string;
   knownCharacterNames: readonly string[];
+  /**
+   * Current length of the storyboard this turn is already bound to, when the
+   * caller has proven that binding.
+   *
+   * This is the second form of evidence `readRevisionDuration` documents. With
+   * the referent already settled, the replacement marker below adds nothing:
+   * a length that differs from the bound one IS the change being asked for,
+   * however it was phrased. Callers that cannot prove a binding omit it and
+   * keep the marker-gated reading.
+   */
+  activeDurationSeconds?: number;
 }): StoryboardDocumentRevision | StoryboardCastAddition | undefined {
   const text = normalizeStoryboardText(params.content);
   if (!text) {
@@ -106,7 +117,13 @@ export function parseStoryboardRevision(params: {
   // list of phrases: stripping them is the Thai equivalent of dropping a
   // trailing "?" before reading a number.
   const seconds = readRevisionDuration(text);
-  if (seconds !== undefined && DURATION_REVISION.test(text)) {
+  // The marker is one way to know a length is a REPLACEMENT; a proven binding
+  // to a storyboard of a different length is the other. Without the second,
+  // "15 วิได้ไหม" from an owner staring at a 7-second draft parsed as nothing
+  // at all and left the storyboard flow for a generic answer.
+  const replacesBoundLength =
+    params.activeDurationSeconds !== undefined && seconds !== params.activeDurationSeconds;
+  if (seconds !== undefined && (DURATION_REVISION.test(text) || replacesBoundLength)) {
     return { kind: "duration", durationSeconds: seconds };
   }
   const camera = trimmed(text.match(CAMERA_REVISION)?.[1] ?? text.match(CAMERA_REVISION)?.[2]);

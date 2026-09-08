@@ -104,6 +104,26 @@ export type StoryboardModelSelectionState = Readonly<{
   familyId?: string;
   /** Endpoint ids currently on screen, in the order they were numbered. */
   offeredModelIds?: readonly string[];
+  /**
+   * Set when a revision retired the step, so nothing about this model
+   * conversation is still on offer.
+   *
+   * The shared store has no delete, so "no open step" has to be representable
+   * — the director session carries the same flag for the same reason. Without
+   * it a retired step still read as `step: "default"`, and the conversation
+   * kept publishing a "ใช้ Default" question frozen to content the owner had
+   * already changed.
+   */
+  closed?: true;
+  /**
+   * Endpoint the owner ended up drafting against.
+   *
+   * Kept on the retired step so a later revision of the SAME storyboard can
+   * continue from the choice already made instead of asking for it again.
+   * Never authority to spend: the paid runtime re-checks it against the new
+   * version and displaces it when the new length cannot run there.
+   */
+  chosenModelId?: string;
   updatedAt: string;
 }>;
 

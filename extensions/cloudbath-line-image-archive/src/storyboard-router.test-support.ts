@@ -337,7 +337,11 @@ export function harness(
     if (characterResult) {
       return { source: "character", ...characterResult, conversation };
     }
-    let storyboardResult = await storyboardRouter.handleBeforeDispatch(routedEvent, ctx);
+    // Mirrors index.ts: how the owner produced the turn travels with it, so a
+    // claimed route can say whether a chip or typing arrived.
+    const routedCtx =
+      conversation.kind === "rewrite" ? { ...ctx, inputSource: conversation.source } : ctx;
+    let storyboardResult = await storyboardRouter.handleBeforeDispatch(routedEvent, routedCtx);
     // Mirrors index.ts: a rewrite the target handler declined must not swallow
     // the owner's own message.
     if (!storyboardResult && conversation.kind === "rewrite") {

@@ -616,6 +616,11 @@ describe("unauthorized LINE video operations fail closed", () => {
  * whether the old code can still submit — so these drive the real routers and
  * the real confirmation gate, with the retirement write throwing, and assert
  * that the code for the superseded version reaches no provider at all.
+ *
+ * A revision the owner had already priced now re-quotes, and ALLOCATING the new
+ * code supersedes the old one on its way in. So the old code is dead twice over
+ * here, by two independent mechanisms; the failed retirement write is what these
+ * prove it never depended on.
  */
 describe("a revised scene retires its code even when the retirement write fails", () => {
   it("refuses the old code, submits nothing, and keeps the revised storyboard", async () => {
@@ -626,12 +631,15 @@ describe("a revised scene retires its code even when the retirement write fails"
       storyboardVersionNumber: 1,
     });
 
-    // The scene changes. The retirement throws, so the old code is left
-    // exactly as it was: pending, unexpired, owner-bound, and confirmable.
+    // The scene changes. The proactive retirement throws, so nothing it would
+    // have written happened — but the re-quote allocates a new code for the
+    // 30-second scene, and allocation retires the old one on its way in.
     const revised = await flow.say("เอาเป็น 30 วิ");
     expect(revised?.text).toContain("Storyboard v2");
     expect(revised?.text).toContain("30");
-    expect(await flow.draftStore.lookup(code)).toMatchObject({ status: "pending" });
+    const replacement = /ยืนยัน VIDEO (\d{4})/u.exec(revised?.text ?? "")?.[1];
+    expect(replacement).toBeDefined();
+    expect(replacement).not.toBe(code);
 
     const refused = await flow.confirm(code);
 
@@ -639,13 +647,14 @@ describe("a revised scene retires its code even when the retirement write fails"
     expect(generateVideoMock).not.toHaveBeenCalled();
     expect(flow.background).toHaveLength(0);
     expect(await flow.jobStore.entries()).toEqual([]);
-    // A specific answer the owner can act on, not a silent drop or a retry.
+    // A specific answer the owner can act on, not a silent drop or a retry —
+    // and now the live code itself rather than the step that would mint one.
     expect(refused?.handled).toBe(true);
-    expect(refused?.text).toContain("storyboard นี้ถูกแก้ไขแล้ว");
-    expect(refused?.text).toContain("เวอร์ชัน 2");
-    expect(refused?.text).toContain("สร้างวิดีโอ");
-    // Refusing is not consuming: nothing was spent to reject a stale code.
-    expect(await flow.draftStore.lookup(code)).toMatchObject({ status: "pending" });
+    expect(refused?.text).toContain("ถูกแทนที่แล้ว");
+    expect(refused?.text).toContain(`ยืนยัน VIDEO ${replacement}`);
+    // Refusing is not consuming: nothing was spent to reject a stale code, and
+    // the old code stays a tombstone rather than becoming a confirmed one.
+    expect(await flow.draftStore.lookup(code)).toMatchObject({ status: "superseded" });
   });
 
   it("still refuses when the storyboard's current version cannot be read", async () => {
