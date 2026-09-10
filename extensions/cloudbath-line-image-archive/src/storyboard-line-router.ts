@@ -388,14 +388,33 @@ type StoryboardRetirement = Readonly<{
   retired?: StoryboardModelSelectionState;
 }>;
 
-/** Native LINE group id, or undefined for anything that is not a group. */
-function nativeGroupId(conversationId: string | undefined): string | undefined {
+/**
+ * The LINE conversation this turn belongs to, or undefined for anything that is
+ * not a LINE-native identity.
+ *
+ * A conversation is a user, group or room. LINE addresses a 1:1 chat by the
+ * peer's own `U…` id, and accepting only `C`/`R` locked every direct chat out of
+ * the flow: no claim could be built, so the dispatch path silently declined
+ * every turn and the agent tool answered "not accessible to this sender" for the
+ * owner's own work.
+ *
+ * The prefix set mirrors the LINE plugin's own `normalizeLineConversationId`
+ * (extensions/line/src/bindings.ts), because the two entry points deliver the
+ * same conversation in different notations: `before_dispatch` receives it
+ * already normalized (`C…`), while a tool factory receives the delivery address
+ * (`line:group:C…`, `line:U…`). Both must land on one value or the same owner
+ * would own two different scopes.
+ *
+ * Closed, not a fallback: only a LINE-native shape resolves, so an id from
+ * another channel or from OpenClaw's own chat can never mint a storyboard claim.
+ */
+function nativeConversationId(conversationId: string | undefined): string | undefined {
   const value = conversationId?.trim();
   if (!value) {
     return undefined;
   }
-  const native = value.includes(":") ? value.slice(value.lastIndexOf(":") + 1) : value;
-  return /^[CR][0-9a-f]{32}$|^C[0-9A-Za-z]{5,}$/u.test(native) ? native : undefined;
+  const native = value.match(/^line:(?:(?:user|group|room):)?(.+)$/iu)?.[1]?.trim() ?? value;
+  return /^[UCR][0-9A-Za-z]{5,}$/u.test(native) ? native : undefined;
 }
 
 /**
@@ -410,7 +429,7 @@ export function resolveStoryboardAccessClaim(
   event: StoryboardDispatchEvent,
   context: StoryboardDispatchContext,
 ): StoryboardAccessClaim | undefined {
-  const lineGroupId = nativeGroupId(context.conversationId);
+  const lineGroupId = nativeConversationId(context.conversationId);
   const accountId = context.accountId?.trim();
   const ownerSenderId = event.senderId?.trim();
   if (!lineGroupId || !accountId || !ownerSenderId || event.senderIsOwner !== true) {
@@ -452,6 +471,57 @@ function buildCast(
       }),
     ),
   );
+}
+
+/**
+ * Refuses a save that carries no story, before it can replace one that does.
+ *
+ * A model that has lost the thread — because a read failed, or because it never
+ * had the storyboard — still answers the schema perfectly: `framing`, `action`
+ * and `caption` are required non-empty strings, so one filler word in each
+ * satisfies every type and silently becomes the owner's storyboard. These are
+ * the three structural tells, and none of them is a word list: a phrase table
+ * would only move the problem to the next locale.
+ *
+ * The tool cannot check a scene COUNT it was never told — how many the owner
+ * asked for lives in the model's context, not in the payload — so it checks
+ * what it can see: that the panels differ from each other, that each one says
+ * something, and that a revision does not collapse a sequence into a stub.
+ */
+function assertPanelsDescribeShots(
+  panels: readonly Readonly<{ framing: string; action: string; caption: string }>[],
+  previousPanelCount: number,
+): void {
+  // A panel whose every descriptive field is the same string is a marker, not a
+  // shot: real framing, action and caption cannot coincide.
+  const placeholder = panels.findIndex((panel) => {
+    const [framing, action, caption] = [panel.framing, panel.action, panel.caption].map((value) =>
+      value.trim().toLocaleLowerCase(),
+    );
+    return framing === action && action === caption;
+  });
+  if (placeholder >= 0) {
+    throw new Error(
+      `Panel ${placeholder + 1} repeats one value as its framing, action and caption, so it describes no shot. Author each panel from the story, or ask the owner what happens in it.`,
+    );
+  }
+  // Padding to reach a count. The tool description already forbids it; a save
+  // is where it becomes the owner's storyboard, so it is refused here.
+  const shots = panels.map((panel) =>
+    [panel.framing, panel.action, panel.caption].map((value) => value.trim()).join("\u0000"),
+  );
+  if (new Set(shots).size !== shots.length) {
+    throw new Error(
+      "Two panels are identical. Author every panel from the story rather than padding to a count.",
+    );
+  }
+  // Collapsing a sequence into one panel is a rewrite, not an edit, and the
+  // payload has no way to say it was meant — so it must be asked for outright.
+  if (previousPanelCount > 1 && panels.length === 1) {
+    throw new Error(
+      `This storyboard has ${previousPanelCount} panels and the save carries 1. Send every panel to keep, or set newStoryboard when the owner asked to start over.`,
+    );
+  }
 }
 
 export class CloudbathStoryboardLineRouter {
@@ -786,6 +856,10 @@ export class CloudbathStoryboardLineRouter {
         "Panel characterIds must come from the saved cast; describe text-only characters in actions",
       );
     }
+    // Last of the save guards: a stale base version and an invented cast id are
+    // both more specific complaints, and answering those first tells the model
+    // the one thing to change rather than the shape of its whole payload.
+    assertPanelsDescribeShots(input.panels, previous?.document.beats.length ?? 0);
     const references =
       input.references === undefined
         ? (previous?.document.visualPresentation?.references ?? [])
@@ -1603,7 +1677,7 @@ export class CloudbathStoryboardLineRouter {
     ownerSenderId: string;
     storyboardId: string;
   }): Promise<number | undefined> {
-    const lineGroupId = nativeGroupId(request.conversationId);
+    const lineGroupId = nativeConversationId(request.conversationId);
     const accountId = request.accountId.trim();
     const ownerSenderId = request.ownerSenderId.trim();
     const storyboardId = request.storyboardId.trim();
@@ -1630,7 +1704,7 @@ export class CloudbathStoryboardLineRouter {
     ownerSenderId: string;
     overrides?: StoryboardRequoteOverrides;
   }): Promise<StoryboardRequoteResult> {
-    const lineGroupId = nativeGroupId(request.conversationId);
+    const lineGroupId = nativeConversationId(request.conversationId);
     const accountId = request.accountId.trim();
     const ownerSenderId = request.ownerSenderId.trim();
     if (!lineGroupId || !accountId || !ownerSenderId) {

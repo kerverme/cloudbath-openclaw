@@ -167,6 +167,12 @@ export function harness(
     resolverNames?: readonly string[];
     /** Models a 1:1 chat, where the session provably has one human sender. */
     directChat?: boolean;
+    /**
+     * The LINE conversation this harness runs in. Defaults to a group; a 1:1
+     * chat is addressed by the peer's own `U…` id, which is a different id
+     * SHAPE and therefore worth driving rather than assuming.
+     */
+    conversationId?: string;
     /** Enables authoritative per-shot visuals; absent, the flow has none. */
     visuals?: StoryboardVisualService;
     sendVisualImage?: StoryboardLineRouterDeps["sendVisualImage"];
@@ -176,6 +182,7 @@ export function harness(
     publicAssetBaseUrl?: string;
   } = {},
 ) {
+  const CONVERSATION = options.conversationId ?? GROUP;
   const shared =
     options.resolver ??
     resolver(
@@ -306,7 +313,7 @@ export function harness(
     const ctx = {
       channelId: "line",
       accountId: ACCOUNT,
-      conversationId: GROUP,
+      conversationId: CONVERSATION,
       sessionKey: SESSION_KEY,
       agentId: "main",
     };
@@ -371,26 +378,26 @@ export function harness(
   };
 
   const latest = async (): Promise<StoryboardVersion> => {
-    const context = await active.lookup(`storyboard-active:${ACCOUNT}:${GROUP}:${OWNER}`);
+    const context = await active.lookup(`storyboard-active:${ACCOUNT}:${CONVERSATION}:${OWNER}`);
     const version = await store.readLatest({
       storyboardId: context!.storyboardId,
-      claim: { accountId: ACCOUNT, lineGroupId: GROUP, ownerSenderId: OWNER },
+      claim: { accountId: ACCOUNT, lineGroupId: CONVERSATION, ownerSenderId: OWNER },
     });
     return version!;
   };
 
   const versionAt = async (n: number): Promise<StoryboardVersion | undefined> => {
-    const context = await active.lookup(`storyboard-active:${ACCOUNT}:${GROUP}:${OWNER}`);
+    const context = await active.lookup(`storyboard-active:${ACCOUNT}:${CONVERSATION}:${OWNER}`);
     return await store.readVersion({
       storyboardId: context!.storyboardId,
-      claim: { accountId: ACCOUNT, lineGroupId: GROUP, ownerSenderId: OWNER },
+      claim: { accountId: ACCOUNT, lineGroupId: CONVERSATION, ownerSenderId: OWNER },
       versionNumber: n,
     });
   };
 
   return {
     /** The trusted triple every store in this harness is scoped to. */
-    claim: { accountId: ACCOUNT, lineGroupId: GROUP, ownerSenderId: OWNER },
+    claim: { accountId: ACCOUNT, lineGroupId: CONVERSATION, ownerSenderId: OWNER },
     dedupe,
     dispatch,
     conversationRouter,

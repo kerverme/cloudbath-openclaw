@@ -2,7 +2,10 @@ import type { OpenClawPluginToolContext } from "openclaw/plugin-sdk/plugin-entry
 import { jsonResult } from "openclaw/plugin-sdk/tool-results";
 import { Value } from "typebox/value";
 import type { CloudbathConversationRouter } from "./conversation-router.js";
-import type { CloudbathStoryboardLineRouter } from "./storyboard-line-router.js";
+import {
+  resolveStoryboardAccessClaim,
+  type CloudbathStoryboardLineRouter,
+} from "./storyboard-line-router.js";
 import { storyboardToolSchema as schema } from "./storyboard-tool-schema.js";
 
 export const STORYBOARD_TOOL_NAME = "cloudbath_storyboard";
@@ -14,13 +17,27 @@ export function createStoryboardTool(
   conversation?: Pick<CloudbathConversationRouter, "observeHandledTurn">,
 ) {
   const conversationId = context.nativeChannelId ?? context.deliveryContext?.to;
+  const event = {
+    content: "",
+    senderId: context.requesterSenderId ?? "",
+    senderIsOwner: context.senderIsOwner === true,
+  };
+  const dispatchContext = {
+    channelId: "line",
+    accountId: context.agentAccountId ?? "",
+    conversationId: conversationId ?? "",
+    sessionKey: context.sessionKey,
+  };
+  // The SAME resolver the dispatch path uses, rather than a second set of
+  // presence checks. The two gates had drifted: this factory asked only that a
+  // conversation id be non-empty, while the router required a group-shaped one,
+  // so in a 1:1 chat the model was handed a tool that could only ever answer
+  // "not accessible to this sender". Offering it exactly where a claim resolves
+  // keeps the advertised surface equal to the reachable one.
   if (
     !router ||
     context.messageChannel !== "line" ||
-    context.senderIsOwner !== true ||
-    !context.requesterSenderId ||
-    !context.agentAccountId ||
-    !conversationId
+    !resolveStoryboardAccessClaim(event, dispatchContext)
   ) {
     return null;
   }
@@ -47,13 +64,6 @@ export function createStoryboardTool(
       if (input.references?.length && (context.sandboxed || context.fsPolicy?.workspaceOnly)) {
         throw new Error("Storyboard reference imports require an unconfined media-capable session");
       }
-      const event = { content: "", senderId: context.requesterSenderId, senderIsOwner: true };
-      const dispatchContext = {
-        channelId: "line",
-        accountId: context.agentAccountId,
-        conversationId,
-        sessionKey: context.sessionKey,
-      };
       const result = await router.handleAgentTool(input, event, dispatchContext);
       if (input.action !== "read") {
         await conversation?.observeHandledTurn(event, dispatchContext);
