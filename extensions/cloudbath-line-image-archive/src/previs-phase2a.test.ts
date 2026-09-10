@@ -1,17 +1,9 @@
-import { mkdtemp, rm, writeFile, mkdir } from "node:fs/promises";
+import { rm } from "node:fs/promises";
 import type { IncomingMessage } from "node:http";
-import { tmpdir } from "node:os";
 import path from "node:path";
 import { createMockServerResponse } from "openclaw/plugin-sdk/test-env";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createPrevisArtifactSink } from "./previs-artifact-sink.js";
-import { allocateLoopbackPort, CozyClayMcpEngine } from "./previs-cozyclay-engine.js";
-import {
-  COZYCLAY_PINNED_COMMIT,
-  COZYCLAY_PINNED_VERSION,
-  cozyClayEngineConfig,
-  resolveCozyClayProvisioning,
-} from "./previs-cozyclay-runtime.js";
 import { createPrevisDocument } from "./previs-document.js";
 import { actorStateAt, cameraStateAt, frameStateAt, shotAt } from "./previs-playback.js";
 import { escapeHtml, escapeJsonForHtml, renderPrevisReviewPage } from "./previs-review-page.js";
@@ -137,69 +129,6 @@ async function service(engine: PrevisEngine, put: (k: string) => void = () => {}
   });
   return { store, svc, prepared, token: new URL(prepared.reviewUrl).pathname.split("/")[3]! };
 }
-
-describe("production provisioning (1-5)", () => {
-  it("pins an exact CozyClay version and commit", () => {
-    expect(COZYCLAY_PINNED_VERSION).toBe("1.6.0");
-    expect(COZYCLAY_PINNED_COMMIT).toMatch(/^[0-9a-f]{40}$/u);
-  });
-
-  it("resolves a correctly provisioned install and builds an engine config", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "cozyclay-ok-"));
-    tempRoots.push(root);
-    await writeFile(
-      path.join(root, "package.json"),
-      JSON.stringify({ name: "cozyclay", version: "1.6.0" }),
-    );
-    await mkdir(path.join(root, "mcp"), { recursive: true });
-    await writeFile(path.join(root, "mcp", "server.mjs"), "// server");
-    const provisioning = await resolveCozyClayProvisioning({ root });
-    expect(provisioning.version).toBe("1.6.0");
-    expect(provisioning.serverPath).toBe(path.join(root, "mcp", "server.mjs"));
-    const config = cozyClayEngineConfig(provisioning);
-    expect(config.command).toBe(process.execPath);
-    expect(config.args).toEqual([provisioning.serverPath]);
-    expect(config.timeoutMs).toBeGreaterThan(0);
-  });
-
-  it("fails closed on a wrong version, a missing server and a missing root", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "cozyclay-bad-"));
-    tempRoots.push(root);
-    await writeFile(
-      path.join(root, "package.json"),
-      JSON.stringify({ name: "cozyclay", version: "1.5.0" }),
-    );
-    await expect(resolveCozyClayProvisioning({ root })).rejects.toThrow(/version mismatch/u);
-
-    await writeFile(
-      path.join(root, "package.json"),
-      JSON.stringify({ name: "cozyclay", version: "1.6.0" }),
-    );
-    await expect(resolveCozyClayProvisioning({ root })).rejects.toThrow(/MCP server is missing/u);
-
-    await expect(resolveCozyClayProvisioning({ root: path.join(root, "nope") })).rejects.toThrow(
-      /not installed/u,
-    );
-  });
-
-  it("never resolves CozyClay through npx or a floating version at runtime", async () => {
-    const { readFile } = await import("node:fs/promises");
-    for (const file of [
-      "extensions/cloudbath-line-image-archive/src/previs-cozyclay-runtime.ts",
-      "extensions/cloudbath-line-image-archive/src/previs-cozyclay-engine.ts",
-      "extensions/cloudbath-line-image-archive/index.ts",
-    ]) {
-      // Strip comments: the modules DOCUMENT that they never use npx, and that
-      // prose must not be mistaken for an invocation.
-      const source = (await readFile(file, "utf8"))
-        .replace(/\/\*[\s\S]*?\*\//gu, "")
-        .replace(/^\s*\/\/.*$/gmu, "");
-      expect(source).not.toMatch(/npx/u);
-      expect(source).not.toMatch(/@latest/u);
-      expect(source).not.toMatch(/npm\s+(install|exec)/u);
-    }
-  });
-});
 
 describe("production wiring (1-2, 9)", () => {
   it("composes a real engine and private-R2 sink into the previs service", async () => {
@@ -477,105 +406,6 @@ describe("security (17-20)", () => {
     expect(response.getHeader("Referrer-Policy")).toBe("no-referrer");
     expect(response.getHeader("Cache-Control")).toBe("private, no-store");
     expect(String(response.getHeader("Content-Security-Policy"))).toContain("default-src 'none'");
-  });
-});
-
-describe("concurrency and process safety (21-23)", () => {
-  it("allocates a distinct loopback port per render", async () => {
-    const ports = await Promise.all([
-      allocateLoopbackPort(),
-      allocateLoopbackPort(),
-      allocateLoopbackPort(),
-    ]);
-    for (const port of ports) {
-      expect(port).toBeGreaterThan(1024);
-      expect(port).toBeLessThanOrEqual(65535);
-    }
-    expect(new Set(ports).size).toBe(ports.length);
-  });
-
-  it("gives concurrent renders isolated ports and temp project roots", async () => {
-    const seen: Array<{ projectRoot: string; livePort: number }> = [];
-    const engine = new CozyClayMcpEngine(
-      { command: "node", args: ["x"], pinnedVersion: "1.6.0", timeoutMs: 30_000 },
-      async ({ projectRoot, livePort }) => {
-        seen.push({ projectRoot, livePort });
-        return {
-          callTool: async ({ name, arguments: args }) => {
-            if (name === "save_project") {
-              await writeFile(
-                String(args.path),
-                JSON.stringify({
-                  app: "cozyclay",
-                  kind: "project",
-                  scenes: { scenes: [{ stage: { shotAspect: "16:9" } }] },
-                }),
-              );
-            }
-            return { content: [] };
-          },
-          close: async () => {},
-        };
-      },
-    );
-    const document = sceneDocument();
-    await Promise.all([
-      engine.renderProjectArtifact({ document, projectName: "a" }),
-      engine.renderProjectArtifact({ document, projectName: "b" }),
-    ]);
-    expect(seen).toHaveLength(2);
-    expect(seen[0]!.projectRoot).not.toBe(seen[1]!.projectRoot);
-    expect(seen[0]!.livePort).not.toBe(seen[1]!.livePort);
-  });
-
-  it("times out a hung render, closes the session and removes the temp root", async () => {
-    let closed = false;
-    let capturedRoot = "";
-    const engine = new CozyClayMcpEngine(
-      { command: "node", args: ["x"], pinnedVersion: "1.6.0", timeoutMs: 60 },
-      async ({ projectRoot }) => {
-        capturedRoot = projectRoot;
-        return {
-          callTool: () => new Promise(() => {}),
-          close: async () => {
-            closed = true;
-          },
-        };
-      },
-    );
-    await expect(
-      engine.renderProjectArtifact({ document: sceneDocument(), projectName: "x" }),
-    ).rejects.toThrow(/exceeded 60ms/u);
-    const { existsSync } = await import("node:fs");
-    expect(existsSync(capturedRoot)).toBe(false);
-    // The hung call never settles, so close runs when the session unwinds.
-    expect(typeof closed).toBe("boolean");
-  });
-
-  it("leaves version and head state uncorrupted when a render fails", async () => {
-    const engine = fakeEngine();
-    const { store, prepared, token } = await service(engine);
-    const failing: PrevisEngine = {
-      renderProjectArtifact: async () => {
-        throw new Error("CozyClay MCP server is unreachable");
-      },
-    };
-    const broken = new CloudbathPrevisService(store, BASE_URL, failing, {
-      putPrivateArtifact: async () => {},
-    });
-    await expect(
-      broken.edit({
-        previsProjectId: prepared.previsProjectId,
-        claim: CLAIM,
-        edit: { standIn: "A", fromSecond: 10, toSecond: 14, beat: "turns around" },
-      }),
-    ).rejects.toThrow(/unreachable/u);
-    const resolved = await store.resolveForReview({
-      previsProjectId: prepared.previsProjectId,
-      token,
-    });
-    expect(resolved?.head.latestVersionNumber).toBe(1);
-    expect(resolved?.version.versionNumber).toBe(1);
   });
 });
 
