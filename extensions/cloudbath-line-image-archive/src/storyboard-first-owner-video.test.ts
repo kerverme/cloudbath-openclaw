@@ -138,6 +138,12 @@ function visualService() {
     artifacts,
     now: () => Date.parse("2026-09-04T00:00:00.000Z"),
     generate,
+    composeSheet: async ({ panels, columns }) => ({
+      bytes: Buffer.from(`sheet:${panels.map((panel) => panel.label).join(",")}`),
+      mimeType: "image/png" as const,
+      width: columns * 512,
+      height: Math.ceil(panels.length / columns) * 368,
+    }),
     normalize: async ({ bytes }) => ({
       bytes,
       mimeType: "image/png" as const,

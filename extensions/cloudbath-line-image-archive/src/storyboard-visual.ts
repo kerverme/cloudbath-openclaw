@@ -139,6 +139,20 @@ export type StoryboardVisualServiceDeps = Readonly<{
     sha256: string;
   }): Promise<void>;
   read?(params: { objectKey: string }): Promise<Readonly<{ bytes: Uint8Array; mimeType: string }>>;
+  /**
+   * Composes already-encoded shot images into ONE grid image.
+   *
+   * Injected rather than built here because compositing needs a pixel decoder,
+   * which lives in the host runtime. The previous implementation described the
+   * sheet as SVG and handed it to a raster-only backend, so the sheet could
+   * never be produced at all.
+   */
+  composeSheet?(params: {
+    panels: readonly Readonly<{ bytes: Uint8Array; label: string }>[];
+    columns: number;
+  }): Promise<
+    Readonly<{ bytes: Uint8Array; mimeType: "image/png"; width: number; height: number }>
+  >;
   now: () => number;
   randomId?: () => string;
   concurrency?: number;
@@ -214,36 +228,18 @@ function contactSheetObjectKey(params: {
   return `storyboards/${params.storyboardId}/v${params.versionNumber}/contact-sheet/${params.variant}-${params.sha256}.jpg`;
 }
 
-function escapeXml(value: string): string {
-  return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
-}
-
-function composeContactSheetSvg(params: {
-  panels: readonly Readonly<{ bytes: Uint8Array; mimeType: string; caption: string }>[];
-  columns?: number;
-}): Uint8Array {
-  const columns = params.columns ?? 3;
-  const panelWidth = 512;
-  const imageHeight = 320;
-  const captionHeight = 96;
-  const rows = Math.ceil(params.panels.length / columns);
-  const cells = params.panels
-    .map((panel, index) => {
-      const x = (index % columns) * panelWidth;
-      const y = Math.floor(index / columns) * (imageHeight + captionHeight);
-      const data = Buffer.from(panel.bytes).toString("base64");
-      const caption = escapeXml(panel.caption.slice(0, 80));
-      return [
-        `<rect x="${x}" y="${y}" width="${panelWidth}" height="${imageHeight + captionHeight}" fill="#111827"/>`,
-        `<image x="${x}" y="${y}" width="${panelWidth}" height="${imageHeight}" preserveAspectRatio="xMidYMid slice" href="data:${panel.mimeType};base64,${data}"/>`,
-        `<text x="${x + 20}" y="${y + imageHeight + 34}" fill="#ffffff" font-size="22" font-family="sans-serif">Shot ${index + 1}</text>`,
-        `<text x="${x + 20}" y="${y + imageHeight + 68}" fill="#e5e7eb" font-size="18" font-family="sans-serif">${caption}</text>`,
-      ].join("");
-    })
-    .join("");
-  return Buffer.from(
-    `<svg xmlns="http://www.w3.org/2000/svg" width="${columns * panelWidth}" height="${rows * (imageHeight + captionHeight)}" viewBox="0 0 ${columns * panelWidth} ${rows * (imageHeight + captionHeight)}">${cells}</svg>`,
-  );
+/**
+ * Columns for a sheet of `panelCount` shots.
+ *
+ * Two columns is the storyboard reading shape the owner works from: six scenes
+ * become 2x3 (1,2 / 3,4 / 5,6), not 3x2. An explicit `visualPresentation`
+ * choice still wins, so this is the default rather than a rule.
+ */
+export function storyboardSheetColumns(panelCount: number, requested?: number): number {
+  if (requested && requested > 0) {
+    return Math.floor(requested);
+  }
+  return panelCount <= 1 ? 1 : 2;
 }
 
 /**
@@ -325,8 +321,8 @@ export class StoryboardVisualService {
       )
       .toSorted((a, b) => a - b);
     if (jobs.length === 0) {
-      if (existing.kind === "ready" && !existing.contactSheet && this.deps.read) {
-        await this.generateContactSheet(params.version, existing.artifacts);
+      if (existing.kind === "ready" && !existing.contactSheet) {
+        await this.tryComposeSheet(params.version, existing.artifacts);
         return await this.status(params);
       }
       return existing;
@@ -357,8 +353,8 @@ export class StoryboardVisualService {
     });
     await Promise.all(workers);
     let status = await this.status(params);
-    if (status.kind === "ready" && !status.contactSheet && this.deps.read) {
-      await this.generateContactSheet(params.version, status.artifacts);
+    if (status.kind === "ready" && !status.contactSheet) {
+      await this.tryComposeSheet(params.version, status.artifacts);
       status = await this.status(params);
     }
     this.deps.logger?.info?.("storyboard_visual_generation_completed", {
@@ -371,34 +367,86 @@ export class StoryboardVisualService {
     return status;
   }
 
+  /**
+   * Rebuilds ONLY the sheet, from shot artifacts already persisted.
+   *
+   * The sheet is derived, so a composition failure must never cost the shots
+   * that produced it — those are the expensive, provider-billed artifacts and
+   * the per-shot first frames a video still needs. This is the retry an owner
+   * gets after a composition failure: it re-reads stored shots and calls no
+   * image provider, so it cannot redraw a scene that already succeeded.
+   */
+  async rebuildContactSheet(params: {
+    version: StoryboardVersion;
+    claim: StoryboardAccessClaim;
+  }): Promise<StoryboardVisualStatus> {
+    requireAccess(params.version, params.claim);
+    const status = await this.status(params);
+    if (status.kind !== "ready") {
+      return status;
+    }
+    await this.tryComposeSheet(params.version, status.artifacts);
+    return await this.status(params);
+  }
+
+  /**
+   * Composes the sheet, absorbing failure.
+   *
+   * Returns whether a sheet now exists rather than throwing: callers deliver
+   * the individual shots either way, and storyboard state stays intact.
+   */
+  private async tryComposeSheet(
+    version: StoryboardVersion,
+    artifacts: readonly StoryboardShotVisualArtifact[],
+  ): Promise<boolean> {
+    if (!this.deps.read || !this.deps.composeSheet) {
+      return false;
+    }
+    try {
+      await this.generateContactSheet(version, artifacts);
+      return true;
+    } catch (error) {
+      this.deps.logger?.warn("storyboard_contact_sheet_failed", {
+        storyboardId: version.storyboardId,
+        storyboardVersion: version.versionNumber,
+        shotCount: artifacts.length,
+        reason: error instanceof Error ? error.message : "unknown",
+      });
+      return false;
+    }
+  }
+
   private async generateContactSheet(
     version: StoryboardVersion,
     artifacts: readonly StoryboardShotVisualArtifact[],
   ): Promise<void> {
+    // Ordered by shot index, so the sheet reads 1..N regardless of the order
+    // the shots happened to finish generating in.
+    const ordered = artifacts.toSorted((left, right) => left.shotIndex - right.shotIndex);
     const panels = await Promise.all(
-      artifacts.map(async (artifact) => {
-        const media = await this.deps.read!({ objectKey: artifact.previewObjectKey });
-        const beat = version.document.beats[artifact.shotIndex - 1]!;
-        return {
-          bytes: media.bytes,
-          mimeType: media.mimeType,
-          caption: beat.caption?.trim() || beat.action.slice(0, 80),
-        };
+      ordered.map(async (artifact) => {
+        // The ORIGINAL, not the 240px preview: the sheet is the reference
+        // artifact an owner reads scenes from, and a thumbnail cannot carry that.
+        const media = await this.deps.read!({ objectKey: artifact.originalObjectKey });
+        // Label only — a panel index. Captions are storyboard prose and stay in
+        // the document, where they can be read in any script; bitmap labels and
+        // image models both render Thai unreliably.
+        return { bytes: media.bytes, label: String(artifact.shotIndex) };
       }),
     );
-    const svg = composeContactSheetSvg({
+    const sheet = await this.deps.composeSheet!({
       panels,
-      columns: version.document.visualPresentation?.columns,
+      columns: storyboardSheetColumns(ordered.length, version.document.visualPresentation?.columns),
     });
     const original = await this.deps.normalize({
-      bytes: svg,
-      mimeType: "image/svg+xml",
+      bytes: sheet.bytes,
+      mimeType: sheet.mimeType,
       maxWidth: 2048,
       maxHeight: 2048,
     });
     const preview = await this.deps.normalize({
-      bytes: svg,
-      mimeType: "image/svg+xml",
+      bytes: sheet.bytes,
+      mimeType: sheet.mimeType,
       maxWidth: 240,
       maxHeight: 240,
     });
@@ -447,20 +495,21 @@ export class StoryboardVisualService {
       height: original.height,
       byteSize: original.bytes.byteLength,
       generationProvider: "derived",
-      generationModel: "contact-sheet-svg-v1",
+      generationModel: "storyboard-sheet-raster-v1",
       generationPurpose: "storyboard-contact-sheet",
       status: "completed",
       panels: Object.freeze(
-        artifacts.map((shot, index) =>
-          Object.freeze({
+        ordered.map((shot) => {
+          // Keyed by the shot's OWN index, not its position in this array: a
+          // sheet rebuilt from a partial set would otherwise caption each panel
+          // with whichever beat happened to sit at that offset.
+          const beat = version.document.beats[shot.shotIndex - 1];
+          return Object.freeze({
             shotIndex: shot.shotIndex,
             shotArtifactId: shot.artifactId,
-            caption:
-              version.document.beats[index]?.caption?.trim() ||
-              version.document.beats[index]?.action.slice(0, 80) ||
-              `Shot ${shot.shotIndex}`,
-          }),
-        ),
+            caption: beat?.caption?.trim() || beat?.action.slice(0, 80) || `Shot ${shot.shotIndex}`,
+          });
+        }),
       ),
       createdAt: new Date(this.deps.now()).toISOString(),
     });

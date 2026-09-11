@@ -340,6 +340,7 @@ export type PluginRuntimeCore = {
     isVoiceCompatibleAudio: typeof import("../../media/audio.js").isVoiceCompatibleAudio;
     getImageMetadata: typeof import("../../media/media-services.js").getImageMetadata;
     resizeToJpeg: typeof import("../../media/media-services.js").resizeToJpeg;
+    composeImageGrid: typeof import("../../media/image-grid.js").composeImageGrid;
   };
   tts: {
     textToSpeech: TextToSpeech;

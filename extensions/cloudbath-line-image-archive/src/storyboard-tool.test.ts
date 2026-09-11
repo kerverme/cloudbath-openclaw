@@ -44,9 +44,24 @@ function setup() {
     width: 1024,
     height: 1664,
   }));
+  const composeSheet = vi.fn(
+    async ({
+      panels,
+      columns,
+    }: {
+      panels: readonly Readonly<{ bytes: Uint8Array; label: string }>[];
+      columns: number;
+    }) => ({
+      bytes: Buffer.from(`sheet:${panels.map((panel) => panel.label).join(",")}`),
+      mimeType: "image/png" as const,
+      width: columns * 512,
+      height: Math.ceil(panels.length / columns) * 368,
+    }),
+  );
   const visuals = new StoryboardVisualService({
     artifacts,
     generate,
+    composeSheet,
     normalize,
     now: () => 1,
     persist: async ({ objectKey, bytes, contentType }) => {
@@ -105,6 +120,7 @@ function setup() {
     context,
     generate,
     normalize,
+    composeSheet,
     complete,
     artifacts,
     sendVisualImage,
@@ -216,9 +232,16 @@ describe("LLM storyboard tool handoff", () => {
     expect(sheet).toMatchObject({
       panels: revised.map((panel, index) => ({ shotIndex: index + 1, caption: panel.caption })),
     });
-    const svg = g.normalize.mock.calls.find(([call]) => call.mimeType === "image/svg+xml")![0]
-      .bytes;
-    expect(Buffer.from(svg).toString()).toContain('width="1024" height="1664"');
+    // Seven shots compose as 2 columns x 4 rows, panels labelled 1..7 in order.
+    expect(g.composeSheet).toHaveBeenCalledWith(
+      expect.objectContaining({
+        columns: 2,
+        panels: Array.from({ length: 7 }, (_, index) => ({
+          bytes: expect.anything(),
+          label: String(index + 1),
+        })),
+      }),
+    );
     expect(g.sendVisualImage).toHaveBeenCalledOnce();
     await g.tool.execute("render-again", { action: "render" });
     expect(g.generate).toHaveBeenCalledTimes(7);
@@ -236,13 +259,11 @@ describe("LLM storyboard tool handoff", () => {
       activeStoryboardId: latest.storyboardId,
       activeStoryboardVersion: 3,
     });
-    expect(
-      g.normalize.mock.calls.some(
-        ([call]) =>
-          call.mimeType === "image/svg+xml" &&
-          Buffer.from(call.bytes).toString().includes('width="1536" height="1248"'),
-      ),
-    ).toBe(true);
+    // An explicit presentation choice still wins over the 2-column default.
+    expect(g.composeSheet.mock.calls.at(-1)![0]).toMatchObject({
+      columns: 3,
+      panels: Array.from({ length: 7 }, (_, index) => ({ label: String(index + 1) })),
+    });
     expect(g.resolveProject).not.toHaveBeenCalled();
     expect(g.prepareStoryboardVideoDraft).not.toHaveBeenCalled();
     expect(await g.h.drafts.entries()).toEqual([]);
