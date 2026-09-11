@@ -32,26 +32,13 @@ import {
 import { CLOUDBATH_NOTION_TOOL_NAMES, createCloudbathNotionTools } from "./src/notion-tools.js";
 import { NotionArchiveClient } from "./src/notion.js";
 import { ArchivePipeline } from "./src/pipeline.js";
-import { createPrevisArtifactSink } from "./src/previs-artifact-sink.js";
-import { CozyClayMcpEngine } from "./src/previs-cozyclay-engine.js";
-import {
-  cozyClayEngineConfig,
-  resolveCozyClayProvisioning,
-} from "./src/previs-cozyclay-runtime.js";
-import {
-  CLOUDBATH_PREVIS_ACTIVE_MAX_ENTRIES,
-  CLOUDBATH_PREVIS_ACTIVE_NAMESPACE,
-  CLOUDBATH_PREVIS_DEDUPE_NAMESPACE,
-  CloudbathPrevisLineRouter,
-  type ActivePrevisContext,
-} from "./src/previs-line-router.js";
+import { CLOUDBATH_PREVIS_ACTIVE_MAX_ENTRIES } from "./src/previs-line-router.js";
 import {
   CLOUDBATH_PREVIS_DISPLAY_NAMES_NAMESPACE,
   createPrevisProjectResolver,
   type PrevisDisplayNameRecord,
 } from "./src/previs-project-resolver.js";
 import { createPrevisReviewRouteHandler, type PrevisReviewRuntime } from "./src/previs-route.js";
-import { CloudbathPrevisService } from "./src/previs-service.js";
 import {
   CLOUDBATH_PREVIS_HEAD_NAMESPACE,
   CLOUDBATH_PREVIS_MAX_ENTRIES,
@@ -62,7 +49,6 @@ import type { PrevisProjectHead, PrevisVersion } from "./src/previs-types.js";
 import { CLOUDBATH_PREVIS_VIEW_ROUTE } from "./src/previs-url.js";
 import { resolveSchemaForAgent } from "./src/profiles.js";
 import { R2ArchiveClient } from "./src/r2.js";
-import { isExplicitPrevisRequest } from "./src/storyboard-intent.js";
 import type { CloudbathStoryboardLineRouter } from "./src/storyboard-line-router.js";
 import { StoryboardLlmPlanner } from "./src/storyboard-planner.js";
 import {
@@ -177,8 +163,6 @@ export default definePluginEntry({
     let ugcCharacterWorkflow: UgcCharacterImageWorkflow | undefined;
     let characterAssetView: CharacterAssetViewRuntime | undefined;
     let previsReview: PrevisReviewRuntime | undefined;
-    let previsService: CloudbathPrevisService | undefined;
-    let previsLineRouter: CloudbathPrevisLineRouter | undefined;
     let storyboardLineRouter: CloudbathStoryboardLineRouter | undefined;
     let storyboardVisualRoute: StoryboardVisualRouteRuntime | undefined;
     let conversationRouter: CloudbathConversationRouter | undefined;
@@ -701,61 +685,18 @@ export default definePluginEntry({
                 overflowPolicy: "reject-new",
               }),
               now: Date.now,
+              // Storage identity of artifacts ALREADY in R2, not a live
+              // dependency. Renaming it would orphan every previs version an
+              // owner can still open behind its stable review URL.
               artifactKeyPrefix: "previs/cozyclay",
             });
+            // Read-only from here on. The render engine was CozyClay, which is
+            // no longer part of the product, so nothing constructs a
+            // `previsService`/`previsLineRouter` and no new version is ever
+            // written. The store stays wired because previs history is
+            // immutable and already-approved versions are still addressable
+            // behind their stable review URLs.
             previsReview = { store: previsStore };
-            // The engine is verified at startup, not per request: a wrong path
-            // or an unexpected CozyClay version must stop the service rather
-            // than surface as a confusing render failure much later. Previs is
-            // optional, so a missing install disables it instead of taking the
-            // whole plugin down with it.
-            try {
-              const provisioning = await resolveCozyClayProvisioning({
-                root: config.previs.cozyClayRoot,
-                expectedVersion: config.previs.cozyClayVersion,
-              });
-              previsService = new CloudbathPrevisService(
-                previsStore,
-                config.publicAssetBaseUrl,
-                new CozyClayMcpEngine(cozyClayEngineConfig(provisioning)),
-                createPrevisArtifactSink({ r2, bucketName: config.r2.bucketName }),
-              );
-              // Deterministic LINE routing: a recognised previs request is
-              // handled in before_dispatch, so the model never gets the turn
-              // and can no longer answer with a generic confirmation.
-              previsLineRouter = new CloudbathPrevisLineRouter({
-                service: previsService,
-                // The SAME resolver the storyboard flow uses, so previs attaches
-                // to a real UGC project and shot rather than a shadow identity.
-                resolver: storyboardResolver,
-                active: api.runtime.state.openKeyedStore<ActivePrevisContext>({
-                  namespace: CLOUDBATH_PREVIS_ACTIVE_NAMESPACE,
-                  maxEntries: CLOUDBATH_PREVIS_ACTIVE_MAX_ENTRIES,
-                  overflowPolicy: "evict-oldest",
-                }),
-                dedupe: api.runtime.state.openKeyedStore<{ reply: string }>({
-                  namespace: CLOUDBATH_PREVIS_DEDUPE_NAMESPACE,
-                  maxEntries: CLOUDBATH_PREVIS_ACTIVE_MAX_ENTRIES,
-                  overflowPolicy: "evict-oldest",
-                }),
-                registry: {
-                  lookup: async (accountId, groupId) =>
-                    await workspaceRegistry!.lookup(accountId, groupId),
-                },
-                now: Date.now,
-                logger,
-              });
-              logger.info("previs_engine_ready", {
-                cozyClayVersion: provisioning.version,
-                cozyClayRoot: provisioning.root,
-              });
-            } catch (error) {
-              previsService = undefined;
-              previsLineRouter = undefined;
-              logger.warn("previs_engine_unavailable", {
-                reason: error instanceof Error ? error.message : "unknown",
-              });
-            }
           }
           await ugcCharacterWorkflow.cleanupExpiredPendingImages();
         }
@@ -805,8 +746,6 @@ export default definePluginEntry({
             ...(ugcCharacterWorkflow ? { ugcCharacterWorkflow } : {}),
             ...(characterAssetView ? { characterAssetView } : {}),
             ...(previsReview ? { previsReview } : {}),
-            ...(previsService ? { previsService } : {}),
-            ...(previsLineRouter ? { previsLineRouter } : {}),
             ...(storyboardLineRouter ? { storyboardLineRouter } : {}),
             ...(conversationRouter ? { conversationRouter } : {}),
             ...(keepWatchingPipeline ? { keepWatchingPipeline } : {}),
@@ -988,24 +927,6 @@ export default definePluginEntry({
         // with the reply as portable actions the channel maps.
         const presentation = await runtime.conversationRouter?.observeHandledTurn(routedEvent, ctx);
         return presentation ? { ...storyboardResult, presentation } : storyboardResult;
-      }
-      // Previs is now LEGACY. It still sees an explicit request, and it still
-      // sees everything else when this owner has NO active storyboard -- which
-      // keeps its shipped behaviour, including the documented bare
-      // `วิ 10-14 ...` edit that follows an explicit previs create.
-      //
-      // Once a storyboard IS active, previs is skipped: otherwise every message
-      // the storyboard router deliberately declines fell through to previs,
-      // whose classifier is much looser, so a decline meant a CozyClay render,
-      // an R2 artifact and a real Notion scene.
-      const previsMayAnswer =
-        isExplicitPrevisRequest(event.content ?? "") ||
-        !(await runtime.storyboardLineRouter?.hasActiveStoryboard(event, ctx));
-      const previsResult = previsMayAnswer
-        ? await runtime.previsLineRouter?.handleBeforeDispatch(event, ctx)
-        : undefined;
-      if (previsResult) {
-        return previsResult;
       }
       await runtime.ugcWorkflow?.observeTurn({
         channelId: ctx.channelId,

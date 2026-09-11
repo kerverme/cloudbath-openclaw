@@ -363,9 +363,12 @@ export function harness(
         ...(presentation ? { presentation } : {}),
       };
     }
-    // Mirrors index.ts: previs answers an explicit request, or anything at all
-    // while no storyboard is active. Calling it unconditionally would let the
-    // harness pass while production sent declined messages into CozyClay.
+    // Previs kept its own routing here after CozyClay left the product: with
+    // no engine, index.ts constructs no previs router and dispatches nothing to
+    // one, so this chain no longer mirrors production. It stays because it is
+    // the only place the "a storyboard DECLINE must not fall through into a
+    // previs render" rule is still executed, which is the guarantee whoever
+    // wires a replacement engine has to preserve.
     const previsMayAnswer =
       isExplicitPrevisRequest(content) || !(await storyboardRouter.hasActiveStoryboard(event, ctx));
     const previsResult = previsMayAnswer

@@ -4,9 +4,7 @@ import type { CloudbathConversationRouter } from "./conversation-router.js";
 import type { LineGroupWorkspacePolicyRegistry } from "./group-workspace-policy.js";
 import type { KeepWatchingPipeline } from "./keep-watching.js";
 import type { ArchivePipeline } from "./pipeline.js";
-import type { CloudbathPrevisLineRouter } from "./previs-line-router.js";
 import type { PrevisReviewRuntime } from "./previs-route.js";
-import type { CloudbathPrevisService } from "./previs-service.js";
 import type { CloudbathStoryboardLineRouter } from "./storyboard-line-router.js";
 import type { ArchiveConfig } from "./types.js";
 import type { UgcCharacterImageWorkflow } from "./ugc-character-image.js";
@@ -22,14 +20,7 @@ export type CloudbathWorkspacePolicyRuntime = {
   ugcCharacterWorkflow?: UgcCharacterImageWorkflow;
   characterAssetView?: CharacterAssetViewRuntime;
   previsReview?: PrevisReviewRuntime;
-  /** Bound engine + private-R2 sink. Phase 2B LINE routing calls this. */
-  previsService?: CloudbathPrevisService;
-  /** Deterministic LINE create/edit/approve routing for previs. */
-  previsLineRouter?: CloudbathPrevisLineRouter;
-  /**
-   * Deterministic LINE routing for the DEFAULT storyboard video flow. Runs
-   * ahead of `previsLineRouter`, which now serves explicit legacy requests.
-   */
+  /** Deterministic LINE routing for the DEFAULT storyboard video flow. */
   storyboardLineRouter?: CloudbathStoryboardLineRouter;
   /** Referent arbitration; runs ahead of every handler in before_dispatch. */
   conversationRouter?: CloudbathConversationRouter;

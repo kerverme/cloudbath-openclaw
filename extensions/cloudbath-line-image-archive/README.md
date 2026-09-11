@@ -728,7 +728,17 @@ exists in production; nothing further needs to be added for the current flow.
 `Characters` and `Previous Scene` relations on UGC_SHOTS are **not** written —
 cast and continuity live in the frozen scope, which is what execution reads.
 
-## CozyClay previs (Phase 1)
+## CozyClay previs (Phase 1) — RETIRED
+
+> **Status: removed from production.** CozyClay is no longer part of the
+> product. The production image no longer builds or ships it, the runtime no
+> longer constructs an engine, and `CLOUDBATH_COZYCLAY_ROOT` /
+> `CLOUDBATH_COZYCLAY_VERSION` no longer exist. Storyboard is the supported
+> path for scene work.
+>
+> The rest of this section is kept as the design record for the previs data
+> model, review page and stored artifacts, which are still readable behind
+> their stable URLs. No engine renders new versions.
 
 Previs is a **staging** layer between a scene request and the existing paid
 video pipeline. It produces reviewable blocking, camera and timeline intent so
@@ -790,30 +800,21 @@ Aspect ratio is the one field written directly into the artifact:
 `stage.shotAspect` accepts `9:16` in CozyClay's scene normaliser, but no MCP
 tool sets it headlessly. CozyClay honours the written value on `open_project`.
 
-### Production engine and provisioning (Phase 2A)
+### Production engine and provisioning (Phase 2A) — REMOVED
 
-The engine is wired for real. At service start the plugin resolves a **pinned**
-CozyClay install and verifies its version against that package's own
-`package.json`; a wrong path or version disables previs and logs
-`previs_engine_unavailable` rather than rendering with an unverified engine.
-Nothing resolves CozyClay at request time — no `npx`, no `@latest`, no download.
+The engine, its provisioning and its Docker build stage were removed when
+CozyClay left the product. `previs-cozyclay-engine.ts`,
+`previs-cozyclay-runtime.ts` and the `FROM ... AS cozyclay` stage in both the
+root and Railway Dockerfiles are gone, and no environment variable points at an
+install.
 
-The production image installs CozyClay 1.6.0 in its own build stage
-(`FROM ... AS cozyclay`), verifies the version, installs the pinned MCP runtime
-dependencies and boots the server once, so a missing dependency fails the build
-instead of the first render. `CLOUDBATH_COZYCLAY_ROOT` and
-`CLOUDBATH_COZYCLAY_VERSION` point the runtime at that install.
+`PrevisEngine` (`previs-store.ts`) remains as a generic, engine-agnostic seam,
+but nothing implements it in production, so `CloudbathPrevisService` and
+`CloudbathPrevisLineRouter` are never constructed. Previs answers no request.
 
-`CloudbathPrevisService` binds the engine and the private-R2 artifact sink once
-and is the seam Phase 2B's LINE routing will call. It is deliberately **not**
-registered as a model-facing tool yet.
-
-**Concurrency and process safety.** CozyClay's stdio server always starts its
-live hub and rejects port 0, so each render allocates its own ephemeral loopback
-port and its own `mkdtemp` project root. Renders are bounded by a timeout, the
-MCP client is closed on every path, and the temp root is removed on success,
-failure and timeout — so a failed render leaves no orphan process and no
-partial version.
+`scripts/cloudbath/docker-cozyclay-removal.test.ts` fails CI if a CozyClay
+stage, install, `/opt/cozyclay` path or `CLOUDBATH_COZYCLAY_*` variable is
+reintroduced into either Dockerfile or the runtime config.
 
 ### The review page
 
