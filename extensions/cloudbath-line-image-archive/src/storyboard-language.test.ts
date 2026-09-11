@@ -7,12 +7,8 @@
  * itself declares it (a cast name) or it reads as a technical identifier.
  */
 import { describe, expect, it } from "vitest";
-import {
-  buildThaiStoryboardSummary,
-  repairThaiFragment,
-  stripForeignFragments,
-  validateThaiText,
-} from "./storyboard-language.js";
+import { stripForeignFragments, validateThaiText } from "./line-language.js";
+import { buildThaiStoryboardSummary, repairThaiFragment } from "./storyboard-language.js";
 
 describe("Thai output rejects accidental mixed-script contamination", () => {
   it("accepts ordinary Thai with numerals and punctuation", () => {
