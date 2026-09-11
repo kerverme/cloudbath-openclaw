@@ -13,6 +13,7 @@ import type { ChannelPlugin, ResolvedLineAccount } from "./channel-api.js";
 import { lineChannelPluginCommon } from "./channel-shared.js";
 import { lineGatewayAdapter } from "./gateway.js";
 import { resolveLineGroupRequireMention } from "./group-policy.js";
+import { resolveLineGroupToolPolicy } from "./group-tool-policy.js";
 import { inferLineTargetChatType, normalizeLineMessagingTarget } from "./messaging-target.js";
 import { lineMessageAdapter, lineOutboundAdapter } from "./outbound.js";
 import { applyLinePresentationQuickReplies } from "./presentation-quick-reply.js";
@@ -46,6 +47,9 @@ export const linePlugin: ChannelPlugin<ResolvedLineAccount> = createChatChannelP
     setupWizard: lineSetupWizard,
     groups: {
       resolveRequireMention: resolveLineGroupRequireMention,
+      // LINE groups are created by whoever adds the bot, so an unconfigured
+      // group must not start from the agent's full tool surface.
+      resolveToolPolicy: resolveLineGroupToolPolicy,
     },
     messaging: {
       targetPrefixes: ["line"],

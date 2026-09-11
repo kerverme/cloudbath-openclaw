@@ -8,12 +8,9 @@
  * corrupted prose, and assert what LINE actually sends.
  */
 import { describe, expect, it, vi } from "vitest";
+import { guardLineOutboundText, LINE_SAFE_THAI_FALLBACK } from "./line-language.js";
+import { createLineOutboundRelay } from "./line-outbound-relay.js";
 import { storyboardAllowedTerms, thaiSummaryForVersion } from "./storyboard-language.js";
-import {
-  guardThaiOutboundText,
-  STORYBOARD_SAFE_THAI_FALLBACK,
-} from "./storyboard-outbound-language.js";
-import { createStoryboardOutboundRelay } from "./storyboard-outbound-relay.js";
 
 /** A clean six-scene Thai storyboard, as the document holds it after saving. */
 const VERSION = {
@@ -45,7 +42,7 @@ function relay(options: { storyboard?: boolean } = {}) {
   return {
     logger,
     resolve,
-    relay: createStoryboardOutboundRelay({ resolve, logger }),
+    relay: createLineOutboundRelay({ resolve, logger }),
     ctx: {
       channelId: "line",
       accountId: "acct-1",
@@ -150,7 +147,7 @@ describe("clean and unrelated replies are passed through untouched", () => {
     // be silently mangled: it falls back to safe deterministic Thai.
     const result = await h.relay.messageSending({ content: "ไม่มีตัวอักษรp" }, h.ctx);
 
-    expect(result?.content).toBe(STORYBOARD_SAFE_THAI_FALLBACK);
+    expect(result?.content).toBe(LINE_SAFE_THAI_FALLBACK);
   });
 
   it("does not judge an English reply", async () => {
@@ -164,14 +161,14 @@ describe("clean and unrelated replies are passed through untouched", () => {
 
 describe("paid video confirmation is never rewritten", () => {
   it("passes a VIDEO code through even when the surrounding text is contaminated", () => {
-    const decision = guardThaiOutboundText({
+    const decision = guardLineOutboundText({
       text: "ยืนยัน VIDEO 4821 เพื่อสร้างวิดีโอ forest",
       allowedTerms: ALLOWED,
       rebuild: () => SUMMARY,
     });
 
     // Replacing this message would drop the owner's only authorisation code.
-    expect(decision.kind).toBe("skipped_paid_confirmation");
+    expect(decision.kind).toBe("skipped_exact");
   });
 
   it("leaves the confirmation text byte-identical on the wire", async () => {
@@ -184,13 +181,13 @@ describe("paid video confirmation is never rewritten", () => {
 
 describe("the fallback is used only when a rebuild cannot be trusted", () => {
   it("falls back when there is no structured summary", () => {
-    const decision = guardThaiOutboundText({ text: "ไม่มีตัวอักษรp", allowedTerms: ALLOWED });
+    const decision = guardLineOutboundText({ text: "ไม่มีตัวอักษรp", allowedTerms: ALLOWED });
 
-    expect(decision).toMatchObject({ kind: "fallback", text: STORYBOARD_SAFE_THAI_FALLBACK });
+    expect(decision).toMatchObject({ kind: "fallback", text: LINE_SAFE_THAI_FALLBACK });
   });
 
   it("falls back when the rebuild itself would be contaminated", () => {
-    const decision = guardThaiOutboundText({
+    const decision = guardLineOutboundText({
       text: "ไม่มีตัวอักษรp",
       allowedTerms: ALLOWED,
       rebuild: () => "สรุป zzz ฉาก",
@@ -205,7 +202,7 @@ describe("the fallback is used only when a rebuild cannot be trusted", () => {
     await h.relay.messageSending({ content: "ไม่มีตัวอักษรp" }, h.ctx);
 
     expect(h.logger.warn).toHaveBeenCalledWith(
-      "storyboard_outbound_language_repaired",
+      "line_outbound_language_repaired",
       expect.objectContaining({ outcome: "rebuilt", conversationId: "C1234567890abcdef" }),
     );
   });
@@ -244,5 +241,133 @@ describe("the visual delivery is unaffected by the language gate", () => {
 
     expect(replaced).toMatchObject({ content: expect.any(String) });
     expect(replaced).not.toHaveProperty("cancel");
+  });
+});
+
+describe("the guard protects ordinary LINE chat, not only storyboard replies", () => {
+  /** A group with no storyboard at all — the ordinary conversational case. */
+  const chat = () => relay({ storyboard: false });
+
+  it("repairs Cyrillic contamination in a generic Thai reply", async () => {
+    const h = chat();
+
+    const result = await h.relay.messageSending(
+      { content: "แมวเป็นสัตว์เลี้ยงที่น่ารักครับ. привет และชอบนอนกลางวัน." },
+      h.ctx,
+    );
+
+    expect(result?.content).not.toContain("привет");
+    expect(result?.content).toContain("แมวเป็นสัตว์เลี้ยงที่น่ารักครับ.");
+  });
+
+  it("keeps the clean sentences rather than stripping the bad word out of one", async () => {
+    const h = chat();
+
+    const result = await h.relay.messageSending(
+      { content: "วันนี้อากาศดีครับ. ผมกำลังทำงาน zzzyx อยู่. พรุ่งนี้ค่อยคุยกันนะครับ." },
+      h.ctx,
+    );
+
+    // The contaminated sentence goes whole; the others survive verbatim.
+    expect(result?.content).toBe("วันนี้อากาศดีครับ.\nพรุ่งนี้ค่อยคุยกันนะครับ.");
+    expect(result?.content).not.toContain("ผมกำลังทำงาน อยู่");
+  });
+
+  it("falls back to generic Thai, never to storyboard wording, for a chat turn", async () => {
+    const h = chat();
+
+    // A single contaminated sentence has nothing clean to keep.
+    const result = await h.relay.messageSending({ content: "แมวลูกพี่ zzzyx" }, h.ctx);
+
+    expect(result?.content).toBe(LINE_SAFE_THAI_FALLBACK);
+    expect(result?.content).not.toContain("Storyboard");
+  });
+
+  it("leaves a clean Thai chat reply untouched", async () => {
+    const h = chat();
+
+    for (const clean of [
+      "แมวเป็นสัตว์เลี้ยงที่น่ารักครับ",
+      "อยากให้ผมจดอะไรไว้ครับ",
+      "หมายถึงโดเมนไหนครับ",
+      "เล่าเรื่องที่อยากทำเป็น Storyboard ให้ฟังหน่อยครับ",
+    ]) {
+      expect(await h.relay.messageSending({ content: clean }, h.ctx)).toBeUndefined();
+    }
+  });
+
+  it("leaves legitimate product and model names Latin", async () => {
+    const h = chat();
+
+    for (const clean of [
+      "ส่งผ่าน LINE แล้วครับ",
+      "ตอนนี้ใช้ GPT อยู่ครับ",
+      "โมเดลปัจจุบันคือ gpt-5.6-luna ครับ",
+      "เปลี่ยนเป็น sonnet-4.6 ให้แล้วครับ",
+    ]) {
+      expect(await h.relay.messageSending({ content: clean }, h.ctx)).toBeUndefined();
+    }
+  });
+
+  it("leaves URLs byte-identical inside Thai prose", async () => {
+    const h = chat();
+
+    for (const clean of [
+      "ดูได้ที่ https://docs.openclaw.ai/plugins/codex-harness ครับ",
+      "เปิดลิงก์นี้ครับ http://example.com/a/b?c=1",
+      "เว็บไซต์ www.example.com ครับ",
+    ]) {
+      expect(await h.relay.messageSending({ content: clean }, h.ctx)).toBeUndefined();
+    }
+  });
+
+  it("keeps a URL even when the same message needs repair elsewhere", async () => {
+    const h = chat();
+
+    const result = await h.relay.messageSending(
+      { content: "ลิงก์อยู่ที่ https://example.com/x ครับ. ส่วนนี้ zzzyx เสียครับ." },
+      h.ctx,
+    );
+
+    expect(result?.content).toContain("https://example.com/x");
+  });
+
+  it("never rewrites a paid VIDEO confirmation, storyboard or not", async () => {
+    const h = chat();
+    const confirmation = "ยืนยัน VIDEO 4821 เพื่อสร้างวิดีโอ zzzyx";
+
+    expect(await h.relay.messageSending({ content: confirmation }, h.ctx)).toBeUndefined();
+  });
+});
+
+describe("repair order is most faithful first", () => {
+  it("prefers a structured rebuild over dropping sentences", () => {
+    const decision = guardLineOutboundText({
+      text: "ฉากแรกสวยครับ. แต่ zzzyx พังครับ.",
+      allowedTerms: ALLOWED,
+      rebuild: () => SUMMARY,
+    });
+
+    expect(decision).toMatchObject({ kind: "rebuilt", text: SUMMARY });
+  });
+
+  it("drops sentences only when no structured rebuild exists", () => {
+    const decision = guardLineOutboundText({
+      text: "ฉากแรกสวยครับ. แต่ zzzyx พังครับ.",
+      allowedTerms: ALLOWED,
+    });
+
+    expect(decision).toMatchObject({ kind: "rewritten", text: "ฉากแรกสวยครับ." });
+  });
+
+  it("reports the rewrite outcome so the corruption stays visible in logs", async () => {
+    const h = relay({ storyboard: false });
+
+    await h.relay.messageSending({ content: "ดีครับ. zzzyx ครับ." }, h.ctx);
+
+    expect(h.logger.warn).toHaveBeenCalledWith(
+      "line_outbound_language_repaired",
+      expect.objectContaining({ outcome: "rewritten" }),
+    );
   });
 });

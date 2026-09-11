@@ -1,20 +1,26 @@
 /**
- * Applies the outbound language guard to the two hooks LINE actually sends
- * through.
+ * Applies the language guard to the two hooks LINE actually sends through.
  *
  * Both are needed, and neither is optional: LINE's reply-token delivery stays
  * on the provider-native reply path and reaches `reply_payload_sending`
  * WITHOUT reaching `message_sending`, while durable and message-tool delivery
- * reaches `message_sending`. Hooking only one leaves the model's paraphrase
+ * reaches `message_sending`. Hooking only one leaves a corrupted reply
  * reaching the owner by the other. This mirrors the arrangement
  * `video-draft-reply-relay.ts` already uses for the same class of problem.
+ *
+ * The guard runs on EVERY assistant-authored LINE message, not just storyboard
+ * replies: the model composes the visible reply after any tool returns, and
+ * ordinary chat turns produced the same mixed-script corruption. A storyboard
+ * conversation additionally offers a structured rebuild; a plain chat turn has
+ * none, so it repairs by keeping its clean sentences or falls back.
  */
-import { STORYBOARD_PRODUCT_TERMS, validateThaiText } from "./storyboard-language.js";
 import {
-  guardThaiOutboundText,
+  guardLineOutboundText,
+  LINE_PRODUCT_TERMS,
   outboundReplacementText,
+  validateThaiText,
   type OutboundLanguageDecision,
-} from "./storyboard-outbound-language.js";
+} from "./line-language.js";
 
 export type OutboundRelayContext = Readonly<{
   channelId?: string;
@@ -30,11 +36,11 @@ type ReplyPayloadSendingEvent = Readonly<{
   sessionKey?: string;
 }>;
 
-export type StoryboardOutboundRelayDeps = Readonly<{
+export type LineOutboundRelayDeps = Readonly<{
   /**
-   * The deterministic Thai summary and allowed proper nouns for this
-   * conversation, or undefined when it owns no storyboard. Resolved per send so
-   * a rebuild always reflects the CURRENT version.
+   * The deterministic summary and allowed proper nouns for this conversation's
+   * structured state, or undefined when it owns none. Resolved per send so a
+   * rebuild always reflects the CURRENT version.
    */
   resolve(
     ctx: OutboundRelayContext,
@@ -47,7 +53,7 @@ export type StoryboardOutboundRelayDeps = Readonly<{
   }>;
 }>;
 
-export type StoryboardOutboundRelay = Readonly<{
+export type LineOutboundRelay = Readonly<{
   messageSending(
     event: MessageSendingEvent,
     ctx: OutboundRelayContext,
@@ -58,9 +64,7 @@ export type StoryboardOutboundRelay = Readonly<{
   ): Promise<{ payload: Record<string, unknown> } | undefined>;
 }>;
 
-export function createStoryboardOutboundRelay(
-  deps: StoryboardOutboundRelayDeps,
-): StoryboardOutboundRelay {
+export function createLineOutboundRelay(deps: LineOutboundRelayDeps): LineOutboundRelay {
   /**
    * Decides the replacement text for one outbound string, or undefined to send
    * it unchanged. Every early return is a case this layer refuses to judge.
@@ -79,14 +83,14 @@ export function createStoryboardOutboundRelay(
     // product terms need no store read, so ordinary replies — including the
     // shipped Thai copy that names Storyboard, Model or draft — settle here and
     // this gate costs a read only when something actually looks wrong.
-    if (validateThaiText(value, { allowedTerms: STORYBOARD_PRODUCT_TERMS }).kind === "clean") {
+    if (validateThaiText(value, { allowedTerms: LINE_PRODUCT_TERMS }).kind === "clean") {
       return undefined;
     }
-    const storyboard = await deps.resolve(ctx).catch(() => undefined);
-    const decision = guardThaiOutboundText({
+    const structured = await deps.resolve(ctx).catch(() => undefined);
+    const decision = guardLineOutboundText({
       text: value,
-      ...(storyboard?.allowedTerms ? { allowedTerms: storyboard.allowedTerms } : {}),
-      ...(storyboard ? { rebuild: () => storyboard.summary } : {}),
+      ...(structured?.allowedTerms ? { allowedTerms: structured.allowedTerms } : {}),
+      ...(structured ? { rebuild: () => structured.summary } : {}),
     });
     report(decision, ctx);
     return outboundReplacementText(decision);
@@ -96,7 +100,7 @@ export function createStoryboardOutboundRelay(
     if (decision.kind === "pass") {
       return;
     }
-    deps.logger?.warn("storyboard_outbound_language_repaired", {
+    deps.logger?.warn("line_outbound_language_repaired", {
       outcome: decision.kind,
       fragments: decision.fragments,
       conversationId: ctx.conversationId,

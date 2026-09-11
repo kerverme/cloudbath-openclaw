@@ -25,6 +25,7 @@ import {
 } from "./src/group-workspace-policy.js";
 import { extractInboundLineImage } from "./src/inbound.js";
 import { KeepWatchingNotionWriter, KeepWatchingPipeline } from "./src/keep-watching.js";
+import { createLineOutboundRelay } from "./src/line-outbound-relay.js";
 import {
   clearCloudbathLineVideoWorkspaceRuntime,
   installCloudbathLineVideoWorkspaceRuntime,
@@ -50,7 +51,6 @@ import { CLOUDBATH_PREVIS_VIEW_ROUTE } from "./src/previs-url.js";
 import { resolveSchemaForAgent } from "./src/profiles.js";
 import { R2ArchiveClient } from "./src/r2.js";
 import type { CloudbathStoryboardLineRouter } from "./src/storyboard-line-router.js";
-import { createStoryboardOutboundRelay } from "./src/storyboard-outbound-relay.js";
 import { StoryboardLlmPlanner } from "./src/storyboard-planner.js";
 import {
   createCloudbathStoryboardLineRouter,
@@ -954,13 +954,14 @@ export default definePluginEntry({
       return await registry.handleBeforeDispatch(event, ctx);
     });
 
-    // The visible reply is composed by the agent AFTER cloudbath_storyboard
-    // returns, so the clean structured summary in the tool result is only
-    // advice to the model. These two hooks are where LINE actually sends:
+    // The visible reply is composed by the agent after any tool returns, so
+    // a clean structured summary in a tool result is only advice to the model
+    // and an ordinary chat turn has no summary at all. These two hooks are
+    // where LINE actually sends, and they guard every assistant message:
     // reply-token delivery reaches `reply_payload_sending` and never
     // `message_sending`, while durable and message-tool delivery reaches
     // `message_sending`. Guarding one alone leaves the other path open.
-    const outboundLanguageRelay = createStoryboardOutboundRelay({
+    const outboundLanguageRelay = createLineOutboundRelay({
       resolve: async (outboundCtx) =>
         await tryGetCloudbathWorkspacePolicyRuntime()?.storyboardLineRouter?.readOutboundStoryboardLanguage(
           {

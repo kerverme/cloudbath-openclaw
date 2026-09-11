@@ -151,6 +151,48 @@ LINE IDs are case-sensitive. Valid IDs look like:
 - Group: `C` + 32 hex chars
 - Room: `R` + 32 hex chars
 
+## Group tool surface
+
+A LINE group that has no `tools` entry in config runs with a restricted tool
+surface. Groups are created by whoever adds the bot, so an unconfigured group
+starts from a safe baseline rather than from the agent's full tool set.
+
+Denied by default in an unconfigured group:
+
+- Host access: `exec`, `process`, `code_execution`, `read`, `write`, `edit`,
+  `apply_patch`
+- Other conversations: `sessions_list`, `sessions_history`, `sessions_send`,
+  `sessions_spawn`, `sessions_yield`, `subagents`, `spawn_task`
+- Agent-wide state: `memory_search`, `memory_get`, `get_goal`, `create_goal`,
+  `update_goal`, `update_plan`
+- Operator surfaces: `session_status`, `cron`, `gateway`, `nodes`,
+  `agents_list`, `skill_workshop`
+- Remote control: `browser`, `canvas`, `computer`
+
+Conversation, media and plugin tools (`message`, `image`, `image_generate`,
+`video_generate`, `tts`, `web_search`, plugin-provided tools) stay available.
+
+Direct messages are unaffected — the baseline applies to group and room
+sessions only.
+
+To grant a privileged tool in a specific group, say so explicitly; a configured
+`tools` policy replaces the baseline entirely:
+
+```json
+{
+  "channels": {
+    "line": {
+      "groups": {
+        "C<32 hex chars>": { "tools": { "alsoAllow": ["exec"] } }
+      }
+    }
+  }
+}
+```
+
+The same applies to a `"*"` entry and to `toolsBySender`: once config states a
+tools policy for a group, that policy is what the group gets.
+
 ## Message behavior
 
 - Text is chunked at 5000 characters.
