@@ -18,6 +18,7 @@ import {
   guardLineOutboundText,
   LINE_PRODUCT_TERMS,
   outboundReplacementText,
+  summarizeFragmentScripts,
   validateThaiText,
   type OutboundLanguageDecision,
 } from "./line-language.js";
@@ -96,13 +97,22 @@ export function createLineOutboundRelay(deps: LineOutboundRelayDeps): LineOutbou
     return outboundReplacementText(decision);
   };
 
+  /**
+   * Reports a repair WITHOUT reprinting the text that caused it.
+   *
+   * Logging raw fragments turned this line into a disclosure sink of its own:
+   * a contaminated reply that recited the container hostname and kernel string
+   * put both into the deploy log verbatim. Script names and counts identify
+   * the defect just as well and carry none of the content.
+   */
   const report = (decision: OutboundLanguageDecision, ctx: OutboundRelayContext): void => {
     if (decision.kind === "pass") {
       return;
     }
     deps.logger?.warn("line_outbound_language_repaired", {
       outcome: decision.kind,
-      fragments: decision.fragments,
+      fragmentCount: decision.fragments.length,
+      fragmentScripts: summarizeFragmentScripts(decision.fragments),
       conversationId: ctx.conversationId,
       sessionKey: ctx.sessionKey,
     });

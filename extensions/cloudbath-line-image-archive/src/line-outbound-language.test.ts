@@ -371,3 +371,32 @@ describe("repair order is most faithful first", () => {
     );
   });
 });
+
+describe("the repair log does not republish what the guard withheld", () => {
+  it("reports scripts and counts, never the contaminated text", async () => {
+    const h = relay({ storyboard: false });
+    // The production shape: a contaminated reply that recited the container
+    // hostname and kernel string put both into the deploy log verbatim.
+    const leaked = "ทำงานบน host 098421575cd6 Linux 6.12.12+bpo-cloud-amd64 ครับ";
+
+    await h.relay.messageSending({ content: leaked }, h.ctx);
+
+    const [, fields] = h.logger.warn.mock.calls.at(-1) ?? [];
+    const serialized = JSON.stringify(fields);
+    expect(serialized).not.toContain("098421575cd6");
+    expect(serialized).not.toContain("6.12.12");
+    expect(fields).not.toHaveProperty("fragments");
+  });
+
+  it("still says enough to diagnose the defect", async () => {
+    const h = relay({ storyboard: false });
+
+    await h.relay.messageSending({ content: "สวัสดีครับ. привет ಮೈ ครับ." }, h.ctx);
+
+    const [, fields] = h.logger.warn.mock.calls.at(-1) ?? [];
+    expect(fields).toMatchObject({
+      fragmentScripts: expect.objectContaining({ cyrillic: 1, kannada: 1 }),
+    });
+    expect((fields as { fragmentCount: number }).fragmentCount).toBeGreaterThan(0);
+  });
+});
