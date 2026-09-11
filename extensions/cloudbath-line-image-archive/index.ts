@@ -446,6 +446,20 @@ export default definePluginEntry({
                     height: metadata.height,
                   };
                 },
+                composeSheet: async ({ panels, columns }) => {
+                  const grid = await api.runtime.media.composeImageGrid(panels, {
+                    columns,
+                    cellWidth: 512,
+                    cellHeight: 320,
+                    labelHeight: 48,
+                  });
+                  return {
+                    bytes: grid.bytes,
+                    mimeType: grid.mimeType,
+                    width: grid.width,
+                    height: grid.height,
+                  };
+                },
                 persist: async ({ objectKey, bytes, contentType, sha256 }) => {
                   await r2.ensureObject({
                     body: bytes,

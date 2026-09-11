@@ -92,7 +92,7 @@ function harness(failShot?: number) {
   const artifacts = new MemoryStore<StoryboardVisualArtifact>();
   const persisted: string[] = [];
   const media = new Map<string, { bytes: Uint8Array; mimeType: string }>();
-  const composedSheets: string[] = [];
+  const composedSheets: { columns: number; labels: readonly string[] }[] = [];
   let counter = 0;
   const generate = vi.fn(async ({ shotIndex, identityReferences }) => {
     expect(identityReferences.map((reference) => reference.locator)).toEqual([
@@ -117,10 +117,16 @@ function harness(failShot?: number) {
     now: () => Date.parse("2026-09-04T00:00:00.000Z"),
     randomId: () => String(++counter).padStart(36, "0"),
     generate,
-    normalize: vi.fn(async ({ bytes, mimeType, maxWidth }) => {
-      if (mimeType === "image/svg+xml") {
-        composedSheets.push(Buffer.from(bytes).toString("utf8"));
-      }
+    composeSheet: vi.fn(async ({ panels, columns }) => {
+      composedSheets.push({ columns, labels: panels.map((panel) => panel.label) });
+      return {
+        bytes: Buffer.from(`sheet:${columns}:${panels.map((panel) => panel.label).join(",")}`),
+        mimeType: "image/png" as const,
+        width: columns * 512,
+        height: Math.ceil(panels.length / columns) * 368,
+      };
+    }),
+    normalize: vi.fn(async ({ bytes, maxWidth }) => {
       return {
         bytes: Buffer.concat([Buffer.from(maxWidth === 240 ? "preview:" : "original:"), bytes]),
         mimeType: "image/jpeg" as const,
@@ -184,11 +190,9 @@ describe("storyboard visual artifacts", () => {
       generationPurpose: "storyboard-contact-sheet",
       panels: beats.map((beat, index) => ({ shotIndex: index + 1, caption: beat.caption })),
     });
-    const svg = h.composedSheets[0]!;
-    expect(svg.match(/<image /gu)).toHaveLength(6);
-    for (let index = 1; index <= 6; index += 1) {
-      expect(svg.indexOf(`Caption ${index}`)).toBeGreaterThan(svg.indexOf(`Shot ${index}`));
-    }
+    // Six scenes compose as 2x3 in shot order, and the compositor is handed
+    // panel NUMBERS only -- storyboard prose stays in the document.
+    expect(h.composedSheets).toEqual([{ columns: 2, labels: ["1", "2", "3", "4", "5", "6"] }]);
   });
 
   it("does not treat a derived sheet as authoritative visual readiness", async () => {

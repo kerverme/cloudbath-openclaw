@@ -1,3 +1,4 @@
+import { repairThaiFragment } from "./storyboard-language.js";
 import type {
   StoryboardBeat,
   StoryboardBeatKind,
@@ -45,7 +46,10 @@ function parseJson(text: string): unknown {
   return JSON.parse(raw);
 }
 
-function readCreate(value: unknown): PlannerCreateResult | undefined {
+function readCreate(
+  value: unknown,
+  allowedNames: readonly string[] = [],
+): PlannerCreateResult | undefined {
   if (!value || typeof value !== "object" || !Array.isArray((value as { beats?: unknown }).beats)) {
     return undefined;
   }
@@ -71,13 +75,22 @@ function readCreate(value: unknown): PlannerCreateResult | undefined {
     }
     const startSeconds = typeof beat.startSeconds === "number" ? beat.startSeconds : undefined;
     const endSeconds = typeof beat.endSeconds === "number" ? beat.endSeconds : undefined;
+    // Repaired HERE rather than at send time: this is the boundary the
+    // document is written from, and a contaminated field persisted once is
+    // read back by every later render, edit and summary.
+    const clean = (field: string) => repairThaiFragment(field, { allowedTerms: allowedNames });
+    const action = clean(beat.action.trim());
+    const caption =
+      typeof beat.caption === "string" && beat.caption.trim()
+        ? clean(beat.caption.trim().slice(0, 80))
+        : "";
     beats.push({
       kind: beat.kind as StoryboardBeatKind,
-      framing: beat.framing.trim(),
-      action: beat.action.trim(),
-      ...(typeof beat.caption === "string" && beat.caption.trim()
-        ? { caption: beat.caption.trim().slice(0, 80) }
-        : {}),
+      framing: clean(beat.framing.trim()) || beat.framing.trim(),
+      // Repair must never empty a required field; the original stands if
+      // stripping left nothing, and validation still reports it upstream.
+      action: action || beat.action.trim(),
+      ...(caption ? { caption } : {}),
       camera: beat.camera.trim(),
       characterNames: beat.characterNames,
       ...(startSeconds === undefined ? {} : { startSeconds }),
@@ -224,6 +237,11 @@ export class StoryboardLlmPlanner {
       purpose: "cloudbath-storyboard-create",
       prompt: [
         `Plan a ${params.durationSeconds}-second storyboard from the user's request.`,
+        // The instruction frame is English but the OUTPUT must follow the
+        // owner. Left unstated, a Thai request came back as Thai carrying
+        // stray Latin fragments, which persisted into the document.
+        "Write framing, action and caption in the SAME language the user wrote their request in.",
+        "Do not mix scripts inside a sentence. Keep proper nouns and model/product names as given; never transliterate.",
         `Allowed characterNames: ${JSON.stringify(names)}.`,
         `Return at least ${minimumShotCount} beats unless the user explicitly requested fewer.`,
         'Return {"beats":[{"startSeconds":number,"endSeconds":number,"kind":"establishing|locomotion|transition|dialogue|action","framing":string,"action":string,"caption":string,"camera":string,"characterNames":string[]}]}',
@@ -231,7 +249,7 @@ export class StoryboardLlmPlanner {
         `USER_REQUEST: ${params.request}`,
       ].join("\n"),
       read: (value) => {
-        const plan = readCreate(value);
+        const plan = readCreate(value, names);
         if (!plan) {
           return undefined;
         }

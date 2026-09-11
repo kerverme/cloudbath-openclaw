@@ -49,6 +49,7 @@ import {
   parseStoryboardMediaIntent,
   type StoryboardIntent,
 } from "./storyboard-intent.js";
+import { buildThaiStoryboardSummary, isThaiText } from "./storyboard-language.js";
 import {
   formatStoryboardModelCandidates,
   formatStoryboardModelDefault,
@@ -312,6 +313,39 @@ function storyboardVideoRequirements(version: StoryboardVersion): StoryboardVide
     ),
     inputMode: resolveStoryboardInputMode(version),
   });
+}
+
+/**
+ * The owner-facing Thai scene list for a version, or undefined when the
+ * storyboard is not Thai.
+ *
+ * Built from structured fields rather than model prose so scene numbers,
+ * timings and kinds are fixed Thai templates; only the scene description comes
+ * from the document, and that is script-validated. Cast display names are
+ * passed as legitimate proper nouns so a name is never stripped as foreign.
+ */
+function thaiStoryboardSummary(version: StoryboardVersion): string | undefined {
+  const beats = version.document.beats;
+  if (!beats.some((beat) => isThaiText(beat.caption ?? beat.action))) {
+    return undefined;
+  }
+  // The document's OWN cast is the authoritative list of legitimate proper
+  // nouns; codes stay valid too so a frozen identity is never stripped.
+  const castNames = [
+    ...version.document.cast.map((member) => member.displayName),
+    ...version.characterLocks.map((lock) => lock.code),
+  ].filter(Boolean);
+  return buildThaiStoryboardSummary(
+    beats.map((beat, index) => ({
+      shotIndex: index + 1,
+      startSeconds: beat.startSeconds,
+      endSeconds: beat.endSeconds,
+      kind: beat.kind,
+      action: beat.action,
+      caption: beat.caption ?? "",
+    })),
+    { allowedTerms: castNames },
+  );
 }
 
 const REPLY = {
@@ -827,8 +861,13 @@ export class CloudbathStoryboardLineRouter {
             storyboardId: current.storyboardId,
             versionNumber: current.versionNumber,
             document: current.document,
+            // Built from structured fields and script-validated, so the model
+            // relays a clean Thai scene list instead of improvising prose that
+            // mixes scripts. It renames nothing: scene numbers, timings and
+            // cast come straight from the document.
+            ...(thaiStoryboardSummary(current) ? { summary: thaiStoryboardSummary(current) } : {}),
             instruction:
-              "Use render for the existing panels. Save only when creating or changing the story/layout.",
+              "Relay `summary` verbatim when replying in Thai. Use render for the existing panels. Save only when creating or changing the story/layout.",
           }
         : {
             status: "no_saved_storyboard",
@@ -948,7 +987,9 @@ export class CloudbathStoryboardLineRouter {
       storyboardId: version.storyboardId,
       versionNumber: version.versionNumber,
       panelCount: version.document.beats.length,
-      instruction: "Call render to generate and deliver all panels as a contact sheet.",
+      ...(thaiStoryboardSummary(version) ? { summary: thaiStoryboardSummary(version) } : {}),
+      instruction:
+        "Relay `summary` verbatim when replying in Thai. Call render to generate and deliver the storyboard sheet plus per-shot images.",
     };
   }
 
