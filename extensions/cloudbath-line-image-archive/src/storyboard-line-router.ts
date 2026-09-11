@@ -49,7 +49,7 @@ import {
   parseStoryboardMediaIntent,
   type StoryboardIntent,
 } from "./storyboard-intent.js";
-import { buildThaiStoryboardSummary, isThaiText } from "./storyboard-language.js";
+import { storyboardAllowedTerms, thaiSummaryForVersion } from "./storyboard-language.js";
 import {
   formatStoryboardModelCandidates,
   formatStoryboardModelDefault,
@@ -324,30 +324,6 @@ function storyboardVideoRequirements(version: StoryboardVersion): StoryboardVide
  * from the document, and that is script-validated. Cast display names are
  * passed as legitimate proper nouns so a name is never stripped as foreign.
  */
-function thaiStoryboardSummary(version: StoryboardVersion): string | undefined {
-  const beats = version.document.beats;
-  if (!beats.some((beat) => isThaiText(beat.caption ?? beat.action))) {
-    return undefined;
-  }
-  // The document's OWN cast is the authoritative list of legitimate proper
-  // nouns; codes stay valid too so a frozen identity is never stripped.
-  const castNames = [
-    ...version.document.cast.map((member) => member.displayName),
-    ...version.characterLocks.map((lock) => lock.code),
-  ].filter(Boolean);
-  return buildThaiStoryboardSummary(
-    beats.map((beat, index) => ({
-      shotIndex: index + 1,
-      startSeconds: beat.startSeconds,
-      endSeconds: beat.endSeconds,
-      kind: beat.kind,
-      action: beat.action,
-      caption: beat.caption ?? "",
-    })),
-    { allowedTerms: castNames },
-  );
-}
-
 const REPLY = {
   engineDown: "สร้าง Storyboard ไม่สำเร็จ กรุณาลองอีกครั้ง",
   emptyAction: "กรุณาระบุสิ่งที่ต้องการให้เกิดขึ้นในช่วงเวลานั้น",
@@ -865,7 +841,7 @@ export class CloudbathStoryboardLineRouter {
             // relays a clean Thai scene list instead of improvising prose that
             // mixes scripts. It renames nothing: scene numbers, timings and
             // cast come straight from the document.
-            ...(thaiStoryboardSummary(current) ? { summary: thaiStoryboardSummary(current) } : {}),
+            ...(thaiSummaryForVersion(current) ? { summary: thaiSummaryForVersion(current) } : {}),
             instruction:
               "Relay `summary` verbatim when replying in Thai. Use render for the existing panels. Save only when creating or changing the story/layout.",
           }
@@ -987,7 +963,7 @@ export class CloudbathStoryboardLineRouter {
       storyboardId: version.storyboardId,
       versionNumber: version.versionNumber,
       panelCount: version.document.beats.length,
-      ...(thaiStoryboardSummary(version) ? { summary: thaiStoryboardSummary(version) } : {}),
+      ...(thaiSummaryForVersion(version) ? { summary: thaiSummaryForVersion(version) } : {}),
       instruction:
         "Relay `summary` verbatim when replying in Thai. Call render to generate and deliver the storyboard sheet plus per-shot images.",
     };
@@ -2235,6 +2211,49 @@ export class CloudbathStoryboardLineRouter {
    * storyboard active, previs keeps its shipped behaviour, including the
    * documented bare `วิ 10-14 ...` edit that follows an explicit previs create.
    */
+  /**
+   * The deterministic Thai summary and allowed proper nouns for the
+   * conversation an outbound message is going to, or undefined when it owns no
+   * storyboard.
+   *
+   * Read-only and claim-scoped: the outbound guard runs on every LINE send, so
+   * it must never mutate state or reach another owner's storyboard. A
+   * conversation with nothing active returns undefined and its replies are
+   * passed through untouched.
+   */
+  async readOutboundStoryboardLanguage(
+    context: StoryboardDispatchContext,
+  ): Promise<
+    Readonly<{ summary: string | undefined; allowedTerms: readonly string[] }> | undefined
+  > {
+    if (context.channelId?.trim().toLowerCase() !== "line") {
+      return undefined;
+    }
+    // An outbound send carries no inbound event, so the claim is built from the
+    // conversation itself; ownership is re-checked by the store read below.
+    const claim = resolveStoryboardAccessClaim(
+      { content: "", senderId: "", senderIsOwner: true },
+      context,
+    );
+    if (!claim) {
+      return undefined;
+    }
+    const active = await this.readActive(claim).catch(() => undefined);
+    if (!active) {
+      return undefined;
+    }
+    const version = await this.deps.store
+      .readLatest({ storyboardId: active.storyboardId, claim })
+      .catch(() => undefined);
+    if (!version) {
+      return undefined;
+    }
+    return {
+      summary: thaiSummaryForVersion(version),
+      allowedTerms: storyboardAllowedTerms(version),
+    };
+  }
+
   async hasActiveStoryboard(
     event: StoryboardDispatchEvent,
     context: StoryboardDispatchContext,
