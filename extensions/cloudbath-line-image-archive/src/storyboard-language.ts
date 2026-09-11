@@ -77,13 +77,6 @@ export type ThaiValidationOptions = Readonly<{
 }>;
 
 /**
- * Reports foreign-script fragments inside Thai text.
- *
- * Text with no Thai at all is not judged: a caption that is only a model name
- * is a legitimate shape, and this layer decides consistency, not language
- * choice.
- */
-/**
  * Foreign fragments inside ONE whitespace-delimited token.
  *
  * Judged per token rather than per script run because identifiers carry their
@@ -113,6 +106,13 @@ function foreignFragmentsInToken(token: string, allowed: ReadonlySet<string>): s
     .filter(Boolean);
 }
 
+/**
+ * Reports foreign-script fragments inside Thai text.
+ *
+ * Text with no Thai at all is not judged: a caption that is only a model name
+ * is a legitimate shape, and this layer decides consistency, not language
+ * choice.
+ */
 export function validateThaiText(
   text: string,
   options: ThaiValidationOptions = {},
