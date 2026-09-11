@@ -228,3 +228,88 @@ export function repairThaiFragment(text: string, options: ThaiValidationOptions 
   }
   return stripForeignFragments(value, options);
 }
+
+/**
+ * Latin words this product legitimately uses inside Thai copy.
+ *
+ * Derived from the shipped reply strings themselves ("ทำวิดีโอจาก Storyboard
+ * นี้", "draft นี้ถูกแทนที่แล้ว", "ใช้ Default Model หรือเปลี่ยน Model?"), not
+ * invented. Without it a script-consistency check would call the product's own
+ * vocabulary contamination and rewrite correct messages — including paid video
+ * copy. This is an allowlist of proper nouns, which is the opposite of a
+ * blacklist of bad phrases: it can only ever permit MORE text through.
+ */
+export const STORYBOARD_PRODUCT_TERMS: readonly string[] = Object.freeze([
+  "Storyboard",
+  "storyboard",
+  "Visual",
+  "Previs",
+  "VIDEO",
+  "Video",
+  "video",
+  "AUDIO",
+  "Audio",
+  "Draft",
+  "draft",
+  "Final",
+  "Model",
+  "model",
+  "Default",
+  "Character",
+  "Library",
+  "UGC",
+  "LINE",
+  "GPT",
+  "workspace",
+  "fal.ai",
+]);
+
+/**
+ * The owner-facing Thai scene list for a whole version, or undefined when this
+ * storyboard is not Thai.
+ *
+ * One implementation shared by the tool result and the outbound guard: if the
+ * relay ever rebuilt a different summary than the tool advertised, the owner
+ * would see the text change for no reason they can observe.
+ */
+export function thaiSummaryForVersion(version: {
+  document: {
+    beats: readonly Readonly<{
+      startSeconds: number;
+      endSeconds: number;
+      kind: StoryboardBeatKind;
+      action: string;
+      caption?: string;
+    }>[];
+    cast: readonly Readonly<{ displayName: string }>[];
+  };
+  characterLocks: readonly Readonly<{ code: string }>[];
+}): string | undefined {
+  const beats = version.document.beats;
+  if (!beats.some((beat) => isThaiText(beat.caption ?? beat.action))) {
+    return undefined;
+  }
+  return buildThaiStoryboardSummary(
+    beats.map((beat, index) => ({
+      shotIndex: index + 1,
+      startSeconds: beat.startSeconds,
+      endSeconds: beat.endSeconds,
+      kind: beat.kind,
+      action: beat.action,
+      caption: beat.caption ?? "",
+    })),
+    { allowedTerms: storyboardAllowedTerms(version) },
+  );
+}
+
+/** Product vocabulary plus the cast and codes THIS storyboard declares. */
+export function storyboardAllowedTerms(version: {
+  document: { cast: readonly Readonly<{ displayName: string }>[] };
+  characterLocks: readonly Readonly<{ code: string }>[];
+}): readonly string[] {
+  return [
+    ...STORYBOARD_PRODUCT_TERMS,
+    ...version.document.cast.map((member) => member.displayName),
+    ...version.characterLocks.map((lock) => lock.code),
+  ].filter(Boolean);
+}

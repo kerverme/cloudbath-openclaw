@@ -50,6 +50,7 @@ import { CLOUDBATH_PREVIS_VIEW_ROUTE } from "./src/previs-url.js";
 import { resolveSchemaForAgent } from "./src/profiles.js";
 import { R2ArchiveClient } from "./src/r2.js";
 import type { CloudbathStoryboardLineRouter } from "./src/storyboard-line-router.js";
+import { createStoryboardOutboundRelay } from "./src/storyboard-outbound-relay.js";
 import { StoryboardLlmPlanner } from "./src/storyboard-planner.js";
 import {
   createCloudbathStoryboardLineRouter,
@@ -951,6 +952,31 @@ export default definePluginEntry({
         senderIsOwner: event.senderIsOwner,
       });
       return await registry.handleBeforeDispatch(event, ctx);
+    });
+
+    // The visible reply is composed by the agent AFTER cloudbath_storyboard
+    // returns, so the clean structured summary in the tool result is only
+    // advice to the model. These two hooks are where LINE actually sends:
+    // reply-token delivery reaches `reply_payload_sending` and never
+    // `message_sending`, while durable and message-tool delivery reaches
+    // `message_sending`. Guarding one alone leaves the other path open.
+    const outboundLanguageRelay = createStoryboardOutboundRelay({
+      resolve: async (outboundCtx) =>
+        await tryGetCloudbathWorkspacePolicyRuntime()?.storyboardLineRouter?.readOutboundStoryboardLanguage(
+          {
+            channelId: outboundCtx.channelId ?? "",
+            accountId: outboundCtx.accountId ?? "",
+            conversationId: outboundCtx.conversationId ?? "",
+            ...(outboundCtx.sessionKey ? { sessionKey: outboundCtx.sessionKey } : {}),
+          },
+        ),
+      logger,
+    });
+    api.on("message_sending", async (event, ctx) => {
+      return await outboundLanguageRelay.messageSending(event, ctx);
+    });
+    api.on("reply_payload_sending", async (event, ctx) => {
+      return await outboundLanguageRelay.replyPayloadSending(event, ctx);
     });
 
     api.on("before_tool_call", async (event, ctx) => {
