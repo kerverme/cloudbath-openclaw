@@ -355,7 +355,14 @@ export function summarizeFragmentScripts(
 ): Readonly<Record<string, number>> {
   const counts: Record<string, number> = {};
   for (const fragment of fragments) {
-    for (const script of new Set([...fragment].map(namedScriptOf))) {
+    const scripts = new Set<string>();
+    // for..of over a string, matching `scriptRuns` above: code-point iteration
+    // is what script classification wants, and spreading would trip the
+    // emoji-splitting lint for no gain.
+    for (const character of fragment) {
+      scripts.add(namedScriptOf(character));
+    }
+    for (const script of scripts) {
       counts[script] = (counts[script] ?? 0) + 1;
     }
   }
