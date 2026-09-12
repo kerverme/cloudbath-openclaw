@@ -243,7 +243,11 @@ describe("expected reply language on the streamed chat path", () => {
     const logged = logWarnMock.mock.calls.map(([message]) => String(message)).join("\n");
     expect(logged).toContain("streamValidationFailed=true");
     expect(logged).toContain("detectedScriptClasses=");
+    expect(logged).toContain("finalValidationOutcome=fallback");
     expect(logged).toContain("finalRepairKind=fallback");
+    expect(logged).toContain("expectedReplyLanguage=th");
+    expect(logged).toContain("expectedReplyLanguageSource=account");
+    expect(logged).toMatch(/streamSuppressionStartedMs=\d+/u);
     expect(logged).not.toContain("เข้าใจ");
     expect(logged).not.toContain("ಮ");
   });
