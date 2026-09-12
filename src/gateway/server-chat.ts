@@ -13,7 +13,9 @@ import { getRuntimeConfig } from "../config/io.js";
 import { type AgentEventPayload, getAgentRunContext } from "../infra/agent-events.js";
 import { formatErrorMessage } from "../infra/errors.js";
 import { resolveHeartbeatVisibility } from "../infra/heartbeat-visibility.js";
-import { logError } from "../logger.js";
+import { createReplyLanguageScanner } from "../infra/reply-language-policy.js";
+import { resolveAuthoritativeReplyText } from "../infra/reply-language-repair.js";
+import { logError, logWarn } from "../logger.js";
 import {
   isAcpSessionKey,
   isSubagentSessionKey,
@@ -825,6 +827,94 @@ export function createAgentEventHandler({
     pendingTerminalLifecycleErrors.set(evt.runId, { timer, event: evt, opts });
   };
 
+  /**
+   * The expected-language policy the channel declared for this turn. Resolved
+   * from the run context, never from the text being streamed: inferring the
+   * expectation from the output is what let a wholly foreign reply pass.
+   */
+  const resolveRunReplyPolicy = (clientRunId: string, sourceRunId: string) =>
+    getAgentRunContext(sourceRunId)?.replyPresentation ??
+    getAgentRunContext(clientRunId)?.replyPresentation;
+
+  const resolveReplyLanguageScanner = (clientRunId: string, sourceRunId: string) => {
+    const existing = chatRunState.replyLanguageScanners.get(clientRunId);
+    if (existing) {
+      return existing;
+    }
+    const scanner = createReplyLanguageScanner(resolveRunReplyPolicy(clientRunId, sourceRunId));
+    chatRunState.replyLanguageScanners.set(clientRunId, scanner);
+    return scanner;
+  };
+
+  /**
+   * Whether this run's raw assistant text may still reach a client.
+   *
+   * The CUMULATIVE buffer is validated, not the chunk: contamination usually
+   * straddles a delta boundary, and a chunk on its own looks fine. Once the
+   * buffer has gone invalid the decision is sticky for the rest of the run —
+   * every later delta extends text that is already wrong — and the provider
+   * keeps running untouched, so the authoritative final still has the whole
+   * reply to repair. Nothing user or model text reaches the log.
+   */
+  const shouldSuppressAssistantStream = (
+    clientRunId: string,
+    sourceRunId: string,
+    cumulativeText: string,
+  ): boolean => {
+    if (chatRunState.streamSuppressedAt.has(clientRunId)) {
+      return true;
+    }
+    const validation = resolveReplyLanguageScanner(clientRunId, sourceRunId).push(cumulativeText);
+    if (validation.valid) {
+      return false;
+    }
+    chatRunState.streamSuppressedAt.set(clientRunId, Date.now());
+    logWarn(
+      `chat stream suppressed for expected reply language runId=${clientRunId} ` +
+        `streamValidationFailed=true reason=${validation.reason} ` +
+        `detectedScriptClasses=${validation.detectedScripts.join("|") || "none"} ` +
+        `violatingScripts=${validation.violatingScripts.join("|") || "none"}`,
+    );
+    return true;
+  };
+
+  /**
+   * The one authoritative text for this turn, shared with delivery through the
+   * per-run memo so the UI, the transcript and the channel cannot disagree.
+   * `replaced` also covers a suppressed stream whose text turned out valid: the
+   * client stopped receiving deltas, so it still needs the full reply.
+   */
+  const resolveAuthoritativeChatFinal = (
+    clientRunId: string,
+    sourceRunId: string,
+    bufferedText: string,
+    suppressionStartedAt: number | undefined,
+  ): { text: string; replaced: boolean } => {
+    const policy = resolveRunReplyPolicy(clientRunId, sourceRunId);
+    if (!policy || !bufferedText) {
+      return { text: bufferedText, replaced: false };
+    }
+    const finalized = resolveAuthoritativeReplyText({
+      runId: sourceRunId,
+      text: bufferedText,
+      policy,
+    });
+    if (finalized.outcome !== "valid" && finalized.outcome !== "unchecked") {
+      logWarn(
+        `chat final repaired for expected reply language runId=${clientRunId} ` +
+          `expectedReplyLanguage=${policy.expectedReplyLanguage ?? "none"} ` +
+          `expectedReplyLanguageSource=${policy.expectedReplyLanguageSource ?? "none"} ` +
+          `finalValidationOutcome=${finalized.outcome} finalRepairKind=${finalized.repairKind} ` +
+          `streamValidationFailed=${suppressionStartedAt !== undefined} ` +
+          `detectedScriptClasses=${finalized.validation.detectedScripts.join("|") || "none"}`,
+      );
+    }
+    return {
+      text: finalized.text,
+      replaced: finalized.text !== bufferedText || suppressionStartedAt !== undefined,
+    };
+  };
+
   const emitChatDelta = (
     sessionKey: string,
     agentId: string | undefined,
@@ -857,6 +947,9 @@ export function createAgentEventHandler({
       return;
     }
     if (shouldHideHeartbeatChatOutput(clientRunId, sourceRunId)) {
+      return;
+    }
+    if (shouldSuppressAssistantStream(clientRunId, sourceRunId, mergedText)) {
       return;
     }
     const last = chatRunState.deltaSentAt.get(clientRunId) ?? 0;
@@ -923,24 +1016,46 @@ export function createAgentEventHandler({
     clientRunId: string,
     sourceRunId: string,
     seq: number,
-    opts?: { controlUiVisible?: boolean; firstAssistantTimingEntry?: ChatRunEntry },
+    opts?: {
+      controlUiVisible?: boolean;
+      firstAssistantTimingEntry?: ChatRunEntry;
+      /**
+       * Authoritative text that supersedes whatever was streamed. Sent as a
+       * full-content refresh (`replace`), which the client already honours, so
+       * a partial or suppressed stream is replaced rather than appended to.
+       */
+      replacementText?: string;
+    },
   ) => {
-    const { text, shouldSuppressSilent } = resolveBufferedChatTextState(clientRunId, sourceRunId, {
+    const buffered = resolveBufferedChatTextState(clientRunId, sourceRunId, {
       suppressLeadFragments: true,
     });
+    const replacementText = opts?.replacementText;
+    const text = replacementText ?? buffered.text;
     const shouldSuppressHeartbeatStreaming = shouldHideHeartbeatChatOutput(
       clientRunId,
       sourceRunId,
     );
-    if (!text || shouldSuppressSilent || shouldSuppressHeartbeatStreaming) {
+    if (!text || buffered.shouldSuppressSilent || shouldSuppressHeartbeatStreaming) {
+      return;
+    }
+    if (
+      replacementText === undefined &&
+      shouldSuppressAssistantStream(clientRunId, sourceRunId, text)
+    ) {
       return;
     }
 
     const now = Date.now();
-    const delta = resolveBroadcastDelta({
-      text,
-      previousBroadcastText: chatRunState.deltaLastBroadcastText.get(clientRunId),
-    });
+    const delta =
+      replacementText === undefined
+        ? resolveBroadcastDelta({
+            text,
+            previousBroadcastText: chatRunState.deltaLastBroadcastText.get(clientRunId),
+          })
+        : chatRunState.deltaLastBroadcastText.get(clientRunId) === replacementText
+          ? undefined
+          : { deltaText: replacementText, replace: true as const };
     if (!delta) {
       return;
     }
@@ -1006,14 +1121,27 @@ export function createAgentEventHandler({
       abortErrorMessage?: string;
     },
   ) => {
-    const { text, shouldSuppressSilent } = resolveBufferedChatTextState(clientRunId, sourceRunId, {
+    const buffered = resolveBufferedChatTextState(clientRunId, sourceRunId, {
       suppressLeadFragments: false,
     });
+    const shouldSuppressSilent = buffered.shouldSuppressSilent;
+    // One authoritative text for the turn, decided here and memoized per run so
+    // delivery reads the same decision instead of repairing separately.
+    const authoritative = resolveAuthoritativeChatFinal(
+      clientRunId,
+      sourceRunId,
+      buffered.text,
+      chatRunState.streamSuppressedAt.get(clientRunId),
+    );
+    const text = authoritative.text;
     // Flush any throttled delta so streaming clients receive the complete text
     // before the final event. The 150 ms throttle in emitChatDelta may have
     // suppressed the most recent chunk, leaving the client with stale text.
     // Only flush if the buffered text differs from the last broadcast to avoid duplicates.
-    flushBufferedChatDeltaIfNeeded(sessionKey, opts?.agentId, clientRunId, sourceRunId, seq, opts);
+    flushBufferedChatDeltaIfNeeded(sessionKey, opts?.agentId, clientRunId, sourceRunId, seq, {
+      ...opts,
+      ...(authoritative.replaced ? { replacementText: text } : {}),
+    });
     chatRunState.clearRun(clientRunId);
     const spawnedBy = resolveSpawnedBy(sessionKey);
     if (jobState !== "error") {
