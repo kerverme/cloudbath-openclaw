@@ -886,6 +886,10 @@
       "types": "./dist/plugin-sdk/channel-contract.d.ts",
       "default": "./dist/plugin-sdk/channel-contract.js"
     },
+    "./plugin-sdk/reply-language": {
+      "types": "./dist/plugin-sdk/reply-language.d.ts",
+      "default": "./dist/plugin-sdk/reply-language.js"
+    },
     "./plugin-sdk/channel-envelope": {
       "types": "./dist/plugin-sdk/channel-envelope.d.ts",
       "default": "./dist/plugin-sdk/channel-envelope.js"

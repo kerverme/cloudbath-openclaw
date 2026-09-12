@@ -64,8 +64,19 @@ export type TurnPresentationPolicy = Readonly<{
    * never list model ids or links.
    */
   allowedTerms?: readonly string[];
-  /** This turn legitimately answers in another language (a translation request). */
-  allowIntentionalMultilingual?: boolean;
+  /**
+   * This turn legitimately answers in another language — a translation or an
+   * explicit "answer in X". `allowed` suspends the script expectation for the
+   * turn; `language` and `reason` are carried for observability, not to swap the
+   * expectation, because such a turn usually mixes framing in the configured
+   * language with content in the requested one.
+   */
+  multilingualOverride?: Readonly<{
+    allowed: boolean;
+    language?: string;
+    /** Why the turn was exempted. Recorded; never derived from model output. */
+    reason: string;
+  }>;
   /**
    * Short honest replacement in the expected language, used only when repair is
    * impossible. Core cannot author it: wording is the owning layer's.
@@ -196,9 +207,14 @@ export function expectedScriptsFor(
 /**
  * Removes policy-allowed proper nouns before tokenizing.
  *
- * Longest-first so a term that contains another cannot be half-consumed. The
- * replacement is a space, which also prevents an allowed term from fusing its
- * neighbours into one mixed-script word.
+ * Matched only at token boundaries. Boundaries exclude letters and digits in ANY
+ * script, because an allowed term fused to another script
+ * (`storyboardเรียบร้อย`) is exactly the defect being hunted and the allowlist
+ * must not hide it. They also exclude identifier punctuation, so a term that
+ * happens to be a prefix cannot be cut out of the middle of an identifier and
+ * leave a fragment behind (`GPT` inside `gpt-5.6-luna`). Longest-first so a term
+ * containing another cannot be half-consumed, and the replacement is a space so
+ * a removed term cannot fuse its neighbours into one mixed-script word.
  */
 function withoutAllowedTerms(text: string, allowedTerms: readonly string[] | undefined): string {
   if (!allowedTerms?.length) {
@@ -210,11 +226,11 @@ function withoutAllowedTerms(text: string, allowedTerms: readonly string[] | und
     if (!trimmed) {
       continue;
     }
-    result = result.split(trimmed).join(" ");
-    const lowered = trimmed.toLowerCase();
-    if (lowered !== trimmed) {
-      result = result.split(lowered).join(" ");
-    }
+    const escaped = trimmed.replaceAll(/[$()*+.?[\\\]^{|}]/gu, "\\$&");
+    result = result.replaceAll(
+      new RegExp(`(?<![\\p{L}\\p{N}._:/@+~#-])${escaped}(?![\\p{L}\\p{N}._:/@+~#-])`, "giu"),
+      " ",
+    );
   }
   return result;
 }
@@ -267,7 +283,12 @@ function cloneTally(tally: ScanTally): ScanTally {
  *   catching nothing the first rule misses. A wholly Latin REPLY is still
  *   caught, by the separate "expected script absent" check.
  */
-function tallyToken(token: string, expected: readonly ScriptName[], tally: ScanTally): void {
+function tallyToken(
+  token: string,
+  expected: readonly ScriptName[],
+  tally: ScanTally,
+  strictAuxiliaryScripts = false,
+): void {
   const scripts = scriptsInToken(token);
   if (scripts.length === 0) {
     return;
@@ -288,7 +309,11 @@ function tallyToken(token: string, expected: readonly ScriptName[], tally: ScanT
   }
   const mixesExpected = scripts.length > foreign.length;
   const latinAuxiliary =
-    !mixesExpected && !expected.includes("Latin") && foreign.length === 1 && foreign[0] === "Latin";
+    !strictAuxiliaryScripts &&
+    !mixesExpected &&
+    !expected.includes("Latin") &&
+    foreign.length === 1 &&
+    foreign[0] === "Latin";
   if (latinAuxiliary || (!mixesExpected && technical)) {
     return;
   }
@@ -348,23 +373,93 @@ const NO_EXPECTATION: ReplyLanguageValidation = Object.freeze({
   reason: "no_expectation",
 });
 
+export type ValidateReplyLanguageOptions = Readonly<{
+  /**
+   * Whether text containing none of the expected script fails.
+   *
+   * True (the default) for a whole reply: answering a Thai turn entirely in
+   * another language is the failure this exists to catch. False for a caller
+   * holding ONE structured field, where an all-Latin value can be a legitimate
+   * name and only mixing inside the field is a defect.
+   */
+  requireExpectedScript?: boolean;
+  /**
+   * Whether Latin loses its auxiliary status.
+   *
+   * False (the default) suits a whole reply: Latin carries proper nouns, product
+   * names, model refs and links inside non-Latin prose, so rejecting unlisted
+   * English words would reject correct replies. True suits ONE structured field
+   * that should be written in the expected language throughout — a scene
+   * description in Thai is not the place for a stray English word — where only
+   * declared terms and identifier shapes may stay Latin.
+   */
+  strictAuxiliaryScripts?: boolean;
+}>;
+
 /** Validates one complete text against a turn policy. */
 export function validateReplyLanguage(
   text: string,
   policy: TurnPresentationPolicy | undefined,
+  options: ValidateReplyLanguageOptions = {},
 ): ReplyLanguageValidation {
   const expected = expectedScriptsFor(policy?.expectedReplyLanguage);
   if (!expected) {
     return NO_EXPECTATION;
   }
-  if (policy?.allowIntentionalMultilingual) {
+  if (policy?.multilingualOverride?.allowed) {
     return { ...NO_EXPECTATION, reason: "multilingual_allowed" };
   }
   const tally = emptyTally();
   for (const token of tokenize(withoutAllowedTerms(text, policy?.allowedTerms))) {
-    tallyToken(token, expected, tally);
+    tallyToken(token, expected, tally, options.strictAuxiliaryScripts === true);
   }
-  return buildResult(tally, 1);
+  return buildResult(tally, options.requireExpectedScript === false ? Infinity : 1);
+}
+
+/**
+ * Foreign-script runs inside the text, as substrings.
+ *
+ * For a caller that owns ONE structured field and can judge the result itself.
+ * Never a repair for prose: removing runs from a sentence leaves grammatical
+ * text that no longer means what it said.
+ */
+export function foreignScriptRuns(
+  text: string,
+  policy: TurnPresentationPolicy | undefined,
+  options: ValidateReplyLanguageOptions = {},
+): readonly string[] {
+  const expected = expectedScriptsFor(policy?.expectedReplyLanguage);
+  if (!expected) {
+    return [];
+  }
+  const runs: string[] = [];
+  for (const token of tokenize(withoutAllowedTerms(text, policy?.allowedTerms))) {
+    const tally = emptyTally();
+    tallyToken(token, expected, tally, options.strictAuxiliaryScripts === true);
+    if (tally.violatingTokens.length === 0) {
+      continue;
+    }
+    // Only the offending runs, so a mixed token loses its foreign part and
+    // keeps the expected-script part exactly as written.
+    let current = "";
+    let currentForeign = false;
+    for (const character of token) {
+      const script = scriptOf(character);
+      const foreign = script !== undefined && !expected.includes(script);
+      if (current && foreign !== currentForeign) {
+        if (currentForeign) {
+          runs.push(current);
+        }
+        current = "";
+      }
+      currentForeign = foreign;
+      current += character;
+    }
+    if (current && currentForeign) {
+      runs.push(current);
+    }
+  }
+  return runs.filter((run) => run.trim().length > 0);
 }
 
 /**
@@ -385,7 +480,7 @@ export function createReplyLanguageScanner(
   policy: TurnPresentationPolicy | undefined,
 ): ReplyLanguageScanner {
   const expectedScripts = expectedScriptsFor(policy?.expectedReplyLanguage);
-  if (!expectedScripts || policy?.allowIntentionalMultilingual) {
+  if (!expectedScripts || policy?.multilingualOverride?.allowed) {
     const constant: ReplyLanguageValidation = expectedScripts
       ? { ...NO_EXPECTATION, reason: "multilingual_allowed" }
       : NO_EXPECTATION;

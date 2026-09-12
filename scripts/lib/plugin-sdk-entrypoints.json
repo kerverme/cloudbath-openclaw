@@ -190,6 +190,7 @@
   "channel-core",
   "channel-entry-contract",
   "channel-contract",
+  "reply-language",
   "channel-envelope",
   "channel-feedback",
   "channel-inbound",

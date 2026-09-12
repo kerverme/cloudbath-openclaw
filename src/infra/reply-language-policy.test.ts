@@ -124,7 +124,10 @@ describe("policy data, not core knowledge", () => {
   });
 
   it("allows an intentionally multilingual turn", () => {
-    const multilingual: TurnPresentationPolicy = { ...THAI, allowIntentionalMultilingual: true };
+    const multilingual: TurnPresentationPolicy = {
+      ...THAI,
+      multilingualOverride: { allowed: true, language: "ru", reason: "request_asks_to_translate" },
+    };
 
     expect(validateReplyLanguage('แปลว่า "Привет" ครับ', THAI).valid).toBe(false);
     expect(validateReplyLanguage('แปลว่า "Привет" ครับ', multilingual)).toMatchObject({

@@ -59,6 +59,32 @@ describe("payloads are finalized before they reach a channel", () => {
     expect(finalized?.[1]).toBe(reasoning);
   });
 
+  it("replaces a reply written wholly in another language", () => {
+    // The rule that needs turn context lives here, where the policy and its
+    // multilingual override are known.
+    expect(finalize([{ text: "Sure, I updated the storyboard with 6 shots." }])?.[0]?.text).toBe(
+      FALLBACK,
+    );
+    expect(finalize([{ text: "Привет, я могу помочь вам с этим." }])?.[0]?.text).toBe(FALLBACK);
+  });
+
+  it("keeps a non-Thai reply when the turn declared a multilingual override", () => {
+    registerAgentRunContext("run-multi", {
+      sessionKey: "session-multi",
+      replyPresentation: {
+        ...THAI,
+        multilingualOverride: {
+          allowed: true,
+          language: "en",
+          reason: "request_names_a_reply_language",
+        },
+      },
+    });
+    const payloads: ReplyPayload[] = [{ text: "Sure — here it is in English." }];
+
+    expect(finalizeDeliveryPayloadsLanguage({ runId: "run-multi", payloads })).toBe(payloads);
+  });
+
   it("changes nothing when the run declares no policy", () => {
     registerAgentRunContext("run-2", { sessionKey: "session-2" });
     const payloads: ReplyPayload[] = [{ text: CORRUPTED }];

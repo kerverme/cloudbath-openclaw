@@ -7,11 +7,11 @@
  * or how to apologise in Thai — so all of that is resolved here and handed over
  * as plain data.
  *
- * `allowIntentionalMultilingual` is decided from the USER's request, never from
- * the reply. A user who asks for a translation has declared a multilingual
- * turn; a reply that drifted into another language on its own is the bug being
- * caught, and letting the output vouch for itself is exactly the hole that let
- * a wholly Russian answer pass.
+ * The multilingual override is decided from the USER's request, never from the
+ * reply. A user who asks for a translation has declared a multilingual turn; a
+ * reply that drifted into another language on its own is the bug being caught,
+ * and letting the output vouch for itself is exactly the hole that let a wholly
+ * Russian answer pass.
  */
 import { normalizeAccountId } from "openclaw/plugin-sdk/account-id";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/account-resolution";
@@ -42,21 +42,59 @@ const DEFAULT_FALLBACK_TEXT = "Sorry — that reply came out malformed. Please a
  * classifier: a translation or "answer in <language>" request is stated
  * outright, and anything subtler is better left validated than guessed at.
  */
-const MULTILINGUAL_REQUEST_PATTERNS: readonly RegExp[] = Object.freeze([
-  /แปล/u,
-  /ทับศัพท์/u,
-  /(?:ตอบ|เขียน|พูด|อ่าน)\s*(?:กลับ\s*)?เป็นภาษา/u,
-  /\btransliterate\b/iu,
-  /\btranslat(?:e|ion)\b/iu,
-  /\b(?:reply|answer|respond|write|say)\s+(?:it\s+|this\s+|that\s+)?in\s+\p{Script=Latin}{3,}/iu,
+const MULTILINGUAL_REQUEST_PATTERNS: ReadonlyArray<readonly [RegExp, string]> = Object.freeze([
+  [/แปล/u, "request_asks_to_translate"],
+  [/ทับศัพท์/u, "request_asks_to_transliterate"],
+  // `เป็น` is optional: "เขียนภาษาญี่ปุ่นให้หน่อย" names a language without it.
+  [/(?:ตอบ|เขียน|พูด|อ่าน|แต่ง)\s*(?:กลับ\s*)?(?:เป็น)?ภาษา/u, "request_names_a_reply_language"],
+  [/\btransliterate\b/iu, "request_asks_to_transliterate"],
+  [/\btranslat(?:e|ion)\b/iu, "request_asks_to_translate"],
+  [
+    /\b(?:reply|answer|respond|write|say)\s+(?:it\s+|this\s+|that\s+)?in\s+\p{Script=Latin}{3,}/iu,
+    "request_names_a_reply_language",
+  ],
 ]);
 
-export function requestDeclaresMultilingualTurn(requestText: string | null | undefined): boolean {
+/**
+ * Named languages this product's users ask for by name, mapped to subtags.
+ *
+ * Recorded on the override for observability only — the expectation is
+ * suspended for the turn rather than swapped, because such a reply usually
+ * frames in Thai and answers in the requested language.
+ */
+const REQUESTED_LANGUAGE_PATTERNS: ReadonlyArray<readonly [RegExp, string]> = Object.freeze([
+  [/อังกฤษ|\benglish\b/iu, "en"],
+  [/รัสเซีย|\brussian\b/iu, "ru"],
+  [/ญี่ปุ่น|\bjapanese\b/iu, "ja"],
+  [/จีน|\bchinese\b|\bmandarin\b/iu, "zh"],
+  [/เกาหลี|\bkorean\b/iu, "ko"],
+  [/ไทย|\bthai\b/iu, "th"],
+]);
+
+/**
+ * The multilingual override this request declares, or undefined.
+ *
+ * Deliberately a handful of explicit instructions rather than an intent
+ * classifier: a translation or "answer in <language>" request is stated
+ * outright, and anything subtler is better left validated than guessed at.
+ */
+export function resolveMultilingualOverride(
+  requestText: string | null | undefined,
+): TurnPresentationPolicy["multilingualOverride"] | undefined {
   const text = requestText?.trim();
   if (!text) {
-    return false;
+    return undefined;
   }
-  return MULTILINGUAL_REQUEST_PATTERNS.some((pattern) => pattern.test(text));
+  const matched = MULTILINGUAL_REQUEST_PATTERNS.find(([pattern]) => pattern.test(text));
+  if (!matched) {
+    return undefined;
+  }
+  const language = REQUESTED_LANGUAGE_PATTERNS.find(([pattern]) => pattern.test(text))?.[1];
+  return Object.freeze({
+    allowed: true,
+    ...(language ? { language } : {}),
+    reason: matched[1],
+  });
 }
 
 /** Account-level terms plus this group's, de-duplicated and trimmed. */
@@ -114,12 +152,12 @@ export function resolveLineReplyPresentation(
     params.groupId,
     params.groupSpace,
   );
-  const multilingual = requestDeclaresMultilingualTurn(params.requestText);
+  const multilingualOverride = resolveMultilingualOverride(params.requestText);
   return {
     expectedReplyLanguage: resolution.language,
     expectedReplyLanguageSource: resolution.source,
     fallbackText: FALLBACK_TEXT[resolution.language] ?? DEFAULT_FALLBACK_TEXT,
     ...(allowedTerms.length > 0 ? { allowedTerms } : {}),
-    ...(multilingual ? { allowIntentionalMultilingual: true } : {}),
+    ...(multilingualOverride ? { multilingualOverride } : {}),
   };
 }

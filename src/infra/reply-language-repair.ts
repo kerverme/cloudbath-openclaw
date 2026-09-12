@@ -45,13 +45,32 @@ export type FinalizedReply = Readonly<{
  */
 const MIN_KEPT_RATIO = 0.5;
 
-/** Lines first, then sentence ends. Never sub-word: dropping words is stripping. */
-function segments(text: string): string[] {
-  return text
-    .split(/\r?\n/u)
-    .flatMap((line) => line.split(/(?<=[.!?;:。！？])\s+/u))
-    .map((segment) => segment.trim())
-    .filter(Boolean);
+type Segment = Readonly<{ text: string; start: number; end: number }>;
+
+/**
+ * Lines first, then sentence ends, with offsets. Never sub-word: dropping words
+ * is the character-stripping this module exists to avoid.
+ *
+ * Offsets are kept so a rewrite can cut the violating spans out of the ORIGINAL
+ * text and leave every surviving byte, including its line breaks, exactly as
+ * the model wrote it.
+ */
+function segments(text: string): Segment[] {
+  const found: Segment[] = [];
+  let cursor = 0;
+  for (const line of text.split(/\r?\n/u)) {
+    for (const piece of line.split(/(?<=[.!?;:。！？])\s+/u)) {
+      const trimmed = piece.trim();
+      if (trimmed) {
+        const start = text.indexOf(trimmed, cursor);
+        if (start >= 0) {
+          found.push({ text: trimmed, start, end: start + trimmed.length });
+          cursor = start + trimmed.length;
+        }
+      }
+    }
+  }
+  return found;
 }
 
 function hasTechnicalToken(text: string): boolean {
@@ -72,25 +91,36 @@ function rewriteWithoutViolatingSegments(
   if (parts.length < 2) {
     return undefined;
   }
-  const kept: string[] = [];
+  let rewritten = "";
+  let cursor = 0;
+  let keptCount = 0;
   for (const part of parts) {
-    if (validateReplyLanguage(part, policy).valid) {
-      kept.push(part);
+    if (validateReplyLanguage(part.text, policy).valid) {
+      // Everything since the last kept segment comes along, so separators and
+      // line breaks between survivors are the model's own.
+      rewritten += text.slice(cursor, part.end);
+      cursor = part.end;
+      keptCount += 1;
       continue;
     }
-    if (hasTechnicalToken(part)) {
+    if (hasTechnicalToken(part.text)) {
       return undefined;
     }
+    cursor = part.end;
   }
-  if (kept.length === 0) {
+  if (keptCount === 0) {
     return undefined;
   }
-  const rewritten = kept.join(" ");
+  // Cutting a segment leaves the whitespace that surrounded it on both sides.
+  const collapsed = rewritten
+    .replaceAll(/[ \t]*\r?\n(?:[ \t]*\r?\n)+/gu, "\n")
+    .replaceAll(/[ \t]{2,}/gu, " ")
+    .trim();
   const trimmedLength = text.trim().length;
-  if (trimmedLength > 0 && rewritten.length / trimmedLength < MIN_KEPT_RATIO) {
+  if (trimmedLength > 0 && collapsed.length / trimmedLength < MIN_KEPT_RATIO) {
     return undefined;
   }
-  return validateReplyLanguage(rewritten, policy).valid ? rewritten : undefined;
+  return validateReplyLanguage(collapsed, policy).valid ? collapsed : undefined;
 }
 
 /**

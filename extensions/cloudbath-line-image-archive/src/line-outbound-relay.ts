@@ -18,7 +18,7 @@ import {
   guardLineOutboundText,
   LINE_PRODUCT_TERMS,
   outboundReplacementText,
-  validateThaiText,
+  validateOutboundThai,
   type OutboundLanguageDecision,
 } from "./line-language.js";
 
@@ -47,6 +47,11 @@ export type LineOutboundRelayDeps = Readonly<{
   ): Promise<
     Readonly<{ summary: string | undefined; allowedTerms: readonly string[] }> | undefined
   >;
+  /**
+   * Whether this outbound text is the structured summary's own operation, so a
+   * rebuild would be faithful. Owned by the caller that owns the template.
+   */
+  isRebuildTarget(text: string): boolean;
   logger?: Readonly<{
     info?(event: string, fields?: Record<string, unknown>): void;
     warn(event: string, fields?: Record<string, unknown>): void;
@@ -83,14 +88,19 @@ export function createLineOutboundRelay(deps: LineOutboundRelayDeps): LineOutbou
     // product terms need no store read, so ordinary replies — including the
     // shipped Thai copy that names Storyboard, Model or draft — settle here and
     // this gate costs a read only when something actually looks wrong.
-    if (validateThaiText(value, { allowedTerms: LINE_PRODUCT_TERMS }).kind === "clean") {
+    if (validateOutboundThai(value, { allowedTerms: LINE_PRODUCT_TERMS }).kind === "clean") {
       return undefined;
     }
     const structured = await deps.resolve(ctx).catch(() => undefined);
+    // The rebuild is offered only when this message IS the summary's operation.
+    // A conversation owning a storyboard still has ordinary chat turns, and
+    // substituting a shot list into one of those would be a confident
+    // non-answer rather than a repair.
+    const rebuildable = structured?.summary !== undefined && deps.isRebuildTarget(value);
     const decision = guardLineOutboundText({
       text: value,
       ...(structured?.allowedTerms ? { allowedTerms: structured.allowedTerms } : {}),
-      ...(structured ? { rebuild: () => structured.summary } : {}),
+      ...(rebuildable ? { rebuild: () => structured?.summary } : {}),
     });
     report(decision, ctx);
     return outboundReplacementText(decision);
