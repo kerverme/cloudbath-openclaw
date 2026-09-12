@@ -18,6 +18,7 @@ import { inferLineTargetChatType, normalizeLineMessagingTarget } from "./messagi
 import { lineMessageAdapter, lineOutboundAdapter } from "./outbound.js";
 import { applyLinePresentationQuickReplies } from "./presentation-quick-reply.js";
 import { hasLineDirectives, parseLineDirectives } from "./reply-payload-transform.js";
+import { resolveLineReplyPresentation } from "./reply-presentation.js";
 import { getLineRuntime } from "./runtime.js";
 import { lineSetupAdapter } from "./setup-core.js";
 import { lineSetupWizard } from "./setup-surface.js";
@@ -106,6 +107,10 @@ export const linePlugin: ChannelPlugin<ResolvedLineAccount> = createChatChannelP
       defaultTopLevelPlacement: "current",
     },
     agentPrompt: {
+      // LINE owns the expected reply language, the proper nouns that may stay in
+      // another script, and the Thai wording used when a reply cannot be
+      // repaired. Core validates against this and knows none of it.
+      replyPresentation: resolveLineReplyPresentation,
       messageToolHints: () => [
         "",
         "### LINE Rich Messages",

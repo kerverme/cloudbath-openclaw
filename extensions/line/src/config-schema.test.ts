@@ -87,3 +87,29 @@ describe("replyLanguage", () => {
     expect(result.success).toBe(false);
   });
 });
+
+describe("replyLanguageAllowedTerms", () => {
+  it("accepts terms at the account and per-group level", () => {
+    const result = LineConfigSchema.safeParse({
+      channelAccessToken: "token",
+      channelSecret: "secret",
+      replyLanguage: "th",
+      replyLanguageAllowedTerms: ["ライン"],
+      groups: {
+        Caaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa: { replyLanguageAllowedTerms: ["Мойка"] },
+      },
+    });
+
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects a single string where a list is required", () => {
+    const result = LineConfigSchema.safeParse({
+      channelAccessToken: "token",
+      channelSecret: "secret",
+      replyLanguageAllowedTerms: "ライン",
+    });
+
+    expect(result.success).toBe(false);
+  });
+});

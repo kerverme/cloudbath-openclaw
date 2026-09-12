@@ -18,6 +18,7 @@ export type {
   ChannelMessageActionDiscoveryContext,
   ChannelMessageActionName,
   ChannelMessageToolDiscovery,
+  ChannelReplyPresentationContext,
   ChannelMessageToolSchemaContribution,
   ChannelMeta,
   ChannelStructuredComponents,
@@ -27,6 +28,7 @@ export type {
   ChannelToolSend,
 } from "../channels/plugins/types.public.js";
 export type { ChannelLegacyStateMigrationPlan } from "../channels/plugins/legacy-state-migration.types.js";
+export type { TurnPresentationPolicy } from "../infra/reply-language-policy.js";
 
 export type {
   ChannelDirectoryAdapter,

@@ -13,6 +13,7 @@ import type { ReplyDeliveryContext, ReplyPayload } from "../../auto-reply/reply-
 import type { MsgContext } from "../../auto-reply/templating.js";
 import type { MarkdownTableMode } from "../../config/types.base.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
+import type { TurnPresentationPolicy } from "../../infra/reply-language-policy.js";
 import type { MessagePresentation } from "../../interactive/payload.js";
 import type { OutboundMediaAccess } from "../../media/load-options.js";
 import type { PollInput } from "../../polls.js";
@@ -666,6 +667,16 @@ export type ChannelMessagingAdapter = {
   }) => ChannelOutboundSessionRoute | Promise<ChannelOutboundSessionRoute | null> | null;
 };
 
+/**
+ * Conversation plus THIS turn's request. `requestText` is the user's own
+ * message, never the model's output: a user who asks for a translation has
+ * declared a multilingual turn, whereas output that drifted into another
+ * language is the bug being caught.
+ */
+export type ChannelReplyPresentationContext = ChannelGroupContext & {
+  requestText?: string | null;
+};
+
 export type ChannelAgentPromptAdapter = {
   messageToolHints?: (params: { cfg: OpenClawConfig; accountId?: string | null }) => string[];
   messageToolCapabilities?: (params: {
@@ -682,6 +693,15 @@ export type ChannelAgentPromptAdapter = {
     cfg: OpenClawConfig;
     accountId?: string | null;
   }) => { level: "minimal" | "extensive"; channelLabel?: string } | undefined;
+  /**
+   * Turn-level presentation policy for one conversation: which language replies
+   * are expected in, which proper nouns may appear in any script, and the
+   * wording to fall back on. Core validates against this and owns none of it —
+   * expected language and product vocabulary belong to the channel.
+   */
+  replyPresentation?: (
+    params: ChannelReplyPresentationContext,
+  ) => TurnPresentationPolicy | undefined;
 };
 
 export type ChannelDirectoryEntryKind = "user" | "group" | "channel";
