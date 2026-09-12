@@ -32,26 +32,10 @@ export { resolveHeartbeatReplyPayload } from "../auto-reply/heartbeat-reply-payl
 // expects, and what do we send if it is not": the LINE plugin carried its own
 // copy and the two drifted, so only one of them could see a reply written wholly
 // in the wrong language and each repaired the same turn by different rules.
-export {
-  createReplyLanguageScanner,
-  expectedScriptsFor,
-  foreignScriptRuns,
-  isTechnicalToken,
-  validateReplyLanguage,
-} from "../infra/reply-language-policy.js";
-export type {
-  ReplyLanguageScanner,
-  ReplyLanguageValidation,
-  ScriptName,
-  TurnPresentationPolicy,
-  ValidateReplyLanguageOptions,
-} from "../infra/reply-language-policy.js";
+// Narrowed to what a channel plugin actually calls — every name published here
+// is also declaration surface counted against the plugin SDK budget.
+export { foreignScriptRuns, validateReplyLanguage } from "../infra/reply-language-policy.js";
 export { finalizeReplyText } from "../infra/reply-language-repair.js";
-export type {
-  FinalizedReply,
-  FinalReplyOutcome,
-  FinalReplyRepairKind,
-} from "../infra/reply-language-repair.js";
 export { getReplyFromConfig } from "../auto-reply/reply/get-reply.js";
 export { HEARTBEAT_TOKEN, isSilentReplyText, SILENT_REPLY_TOKEN } from "../auto-reply/tokens.js";
 export { isAbortRequestText } from "../auto-reply/reply/abort.js";
