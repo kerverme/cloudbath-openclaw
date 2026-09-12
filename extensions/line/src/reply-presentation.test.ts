@@ -180,3 +180,40 @@ describe("presentation policy never widens authorization or tools", () => {
     ).toEqual({ deny: ["image_generate"] });
   });
 });
+
+describe("group config does not reach a direct conversation", () => {
+  // A `groups["*"]` entry is the operator's statement about GROUPS. Letting it
+  // decide a direct message's language or allowed terms would apply group policy
+  // to a one-to-one conversation the operator never scoped.
+  const wildcard = {
+    channels: {
+      line: {
+        replyLanguage: "en",
+        replyLanguageAllowedTerms: ["Cloudbath"],
+        groups: { "*": { replyLanguage: "th", replyLanguageAllowedTerms: ["ライン"] } },
+      },
+    },
+  };
+
+  it("uses the account language and terms in a direct conversation", () => {
+    expect(resolve(wildcard)).toMatchObject({
+      expectedReplyLanguage: "en",
+      expectedReplyLanguageSource: "account",
+      allowedTerms: ["Cloudbath"],
+    });
+  });
+
+  it("does not inherit wildcard group terms when the group id is blank", () => {
+    for (const blank of ["", "   "]) {
+      expect(resolve(wildcard, { groupId: blank })?.allowedTerms, blank).toEqual(["Cloudbath"]);
+    }
+  });
+
+  it("still inherits the wildcard entry inside a real group", () => {
+    expect(resolve(wildcard, { groupId: GROUP_A })).toMatchObject({
+      expectedReplyLanguage: "th",
+      expectedReplyLanguageSource: "group",
+      allowedTerms: ["Cloudbath", "ライン"],
+    });
+  });
+});

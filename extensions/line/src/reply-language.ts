@@ -20,7 +20,7 @@
 import { normalizeAccountId } from "openclaw/plugin-sdk/account-id";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/account-resolution";
 import { resolveAccountEntry } from "openclaw/plugin-sdk/account-resolution";
-import { resolveLineGroupConfigEntry } from "./group-keys.js";
+import { hasLineGroupIdentity, resolveLineGroupConfigEntry } from "./group-keys.js";
 import type { LineConfig } from "./types.js";
 
 /**
@@ -75,10 +75,14 @@ export function resolveLineReplyLanguage(params: {
   }
   const account = resolveAccountEntry(lineConfig.accounts, normalizeAccountId(params.accountId));
   const groups = account?.groups ?? lineConfig.groups;
-  const groupEntry = resolveLineGroupConfigEntry(groups, {
-    groupId: params.groupId ?? null,
-    roomId: params.roomId ?? null,
-  });
+  // Only a conversation that HAS a group identity may inherit group config; a
+  // direct message must not be governed by a `groups["*"]` entry.
+  const groupEntry = hasLineGroupIdentity(params)
+    ? resolveLineGroupConfigEntry(groups, {
+        groupId: params.groupId ?? null,
+        roomId: params.roomId ?? null,
+      })
+    : undefined;
   const groupLanguage = normalizeLanguageTag(groupEntry?.replyLanguage);
   if (groupLanguage) {
     return Object.freeze({ language: groupLanguage, source: "group" });
