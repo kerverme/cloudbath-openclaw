@@ -836,6 +836,12 @@ export function createAgentEventHandler({
     getAgentRunContext(sourceRunId)?.replyPresentation ??
     getAgentRunContext(clientRunId)?.replyPresentation;
 
+  /** Milliseconds since the run was registered, so a timestamp never leaks. */
+  const resolveRunElapsedMs = (sourceRunId: string, at: number): number | "unknown" => {
+    const registeredAt = getAgentRunContext(sourceRunId)?.registeredAt;
+    return registeredAt === undefined ? "unknown" : Math.max(0, at - registeredAt);
+  };
+
   const resolveReplyLanguageScanner = (clientRunId: string, sourceRunId: string) => {
     const existing = chatRunState.replyLanguageScanners.get(clientRunId);
     if (existing) {
@@ -868,10 +874,12 @@ export function createAgentEventHandler({
     if (validation.valid) {
       return false;
     }
-    chatRunState.streamSuppressedAt.set(clientRunId, Date.now());
+    const suppressedAt = Date.now();
+    chatRunState.streamSuppressedAt.set(clientRunId, suppressedAt);
     logWarn(
       `chat stream suppressed for expected reply language runId=${clientRunId} ` +
         `streamValidationFailed=true reason=${validation.reason} ` +
+        `streamSuppressionStartedMs=${resolveRunElapsedMs(sourceRunId, suppressedAt)} ` +
         `detectedScriptClasses=${validation.detectedScripts.join("|") || "none"} ` +
         `violatingScripts=${validation.violatingScripts.join("|") || "none"}`,
     );
@@ -906,6 +914,11 @@ export function createAgentEventHandler({
           `expectedReplyLanguageSource=${policy.expectedReplyLanguageSource ?? "none"} ` +
           `finalValidationOutcome=${finalized.outcome} finalRepairKind=${finalized.repairKind} ` +
           `streamValidationFailed=${suppressionStartedAt !== undefined} ` +
+          `streamSuppressionStartedMs=${
+            suppressionStartedAt === undefined
+              ? "none"
+              : resolveRunElapsedMs(sourceRunId, suppressionStartedAt)
+          } ` +
           `detectedScriptClasses=${finalized.validation.detectedScripts.join("|") || "none"}`,
       );
     }
