@@ -20,7 +20,7 @@ import type {
   ChannelReplyPresentationContext,
   TurnPresentationPolicy,
 } from "openclaw/plugin-sdk/channel-contract";
-import { resolveLineGroupConfigEntry } from "./group-keys.js";
+import { hasLineGroupIdentity, resolveLineGroupConfigEntry } from "./group-keys.js";
 import { resolveLineReplyLanguage } from "./reply-language.js";
 import type { LineConfig } from "./types.js";
 
@@ -110,10 +110,11 @@ function resolveAllowedTerms(
   }
   const account = resolveAccountEntry(lineConfig.accounts, normalizeAccountId(accountId));
   const groups = account?.groups ?? lineConfig.groups;
-  const groupEntry = resolveLineGroupConfigEntry(groups, {
-    groupId: groupId ?? null,
-    roomId: roomId ?? null,
-  });
+  // Same boundary as the language resolver: a direct message inherits no group
+  // entry, wildcard included.
+  const groupEntry = hasLineGroupIdentity({ groupId, roomId })
+    ? resolveLineGroupConfigEntry(groups, { groupId: groupId ?? null, roomId: roomId ?? null })
+    : undefined;
   const terms = new Set<string>();
   for (const term of [
     ...(lineConfig.replyLanguageAllowedTerms ?? []),
