@@ -28,6 +28,7 @@ export type {
   ChannelToolSend,
 } from "../channels/plugins/types.public.js";
 export type { ChannelLegacyStateMigrationPlan } from "../channels/plugins/legacy-state-migration.types.js";
+/** Turn-level presentation policy carried on `ChannelAgentPromptAdapter`. */
 export type { TurnPresentationPolicy } from "../infra/reply-language-policy.js";
 
 export type {

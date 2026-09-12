@@ -27,6 +27,31 @@ export {
   stripHeartbeatToken,
 } from "../auto-reply/heartbeat.js";
 export { resolveHeartbeatReplyPayload } from "../auto-reply/heartbeat-reply-payload.js";
+// The shared reply-language validator and repair. There must be exactly one
+// implementation of "is this reply written in the language this conversation
+// expects, and what do we send if it is not": the LINE plugin carried its own
+// copy and the two drifted, so only one of them could see a reply written wholly
+// in the wrong language and each repaired the same turn by different rules.
+export {
+  createReplyLanguageScanner,
+  expectedScriptsFor,
+  foreignScriptRuns,
+  isTechnicalToken,
+  validateReplyLanguage,
+} from "../infra/reply-language-policy.js";
+export type {
+  ReplyLanguageScanner,
+  ReplyLanguageValidation,
+  ScriptName,
+  TurnPresentationPolicy,
+  ValidateReplyLanguageOptions,
+} from "../infra/reply-language-policy.js";
+export { finalizeReplyText } from "../infra/reply-language-repair.js";
+export type {
+  FinalizedReply,
+  FinalReplyOutcome,
+  FinalReplyRepairKind,
+} from "../infra/reply-language-repair.js";
 export { getReplyFromConfig } from "../auto-reply/reply/get-reply.js";
 export { HEARTBEAT_TOKEN, isSilentReplyText, SILENT_REPLY_TOKEN } from "../auto-reply/tokens.js";
 export { isAbortRequestText } from "../auto-reply/reply/abort.js";

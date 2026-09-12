@@ -18,7 +18,7 @@ import {
   foreignScriptRuns,
   validateReplyLanguage,
   type TurnPresentationPolicy,
-} from "openclaw/plugin-sdk/reply-language";
+} from "openclaw/plugin-sdk/reply-runtime";
 
 /**
  * Latin words this product legitimately uses inside Thai copy.
