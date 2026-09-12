@@ -13,11 +13,11 @@
  * falls back to, and that a paid confirmation code must reach the owner byte
  * for byte.
  */
+import type { TurnPresentationPolicy } from "openclaw/plugin-sdk/channel-contract";
 import {
   finalizeReplyText,
   foreignScriptRuns,
   validateReplyLanguage,
-  type TurnPresentationPolicy,
 } from "openclaw/plugin-sdk/reply-runtime";
 
 /**
