@@ -190,6 +190,60 @@ becoming a policy.
 This field affects output validation only. It does not change tool policy,
 owner authorization, or delivery behavior.
 
+### What validation does with it
+
+With `replyLanguage` set, every assistant reply is checked against the script
+that language is written in, and the same check runs on streamed text, on the
+final Control UI message, and on the text delivered to LINE:
+
+- A reply written wholly in another language is rejected, which inspecting the
+  reply alone can never detect.
+- A word that mixes the expected script with another is rejected. This is the
+  contamination seen in production, where a token arrived half in Thai and half
+  in some other script.
+- Latin words are accepted inside non-Latin prose. Product names, model refs and
+  links are conventionally Latin, so `LINE`, `gpt-5.6-luna` and
+  `https://example.com/a` need no configuration. URLs, identifiers and codes are
+  recognised by shape, so operators never list them.
+- While a reply is still streaming, the Control UI stops receiving raw text the
+  moment the accumulated reply becomes invalid. The provider keeps running; the
+  final message then replaces what was shown.
+- Repair never strips characters. It prefers a deterministic rebuild, then drops
+  whole contaminated lines when what remains still carries the reply, and
+  otherwise sends one short message saying the reply failed. A line carrying a
+  confirmation code or a link is never dropped silently.
+
+Nothing is inferred from the reply itself, and nothing is inferred about a
+conversation that has no `replyLanguage`.
+
+### Allowed terms
+
+`replyLanguageAllowedTerms` lists proper nouns that may appear in any script
+regardless of `replyLanguage`. Use it only for names validation would otherwise
+reject — URLs, model refs and codes are already recognised by shape.
+
+- `channels.line.replyLanguageAllowedTerms` — account-wide
+- `channels.line.groups.<groupId>.replyLanguageAllowedTerms` — added for that
+  group, on top of the account list
+
+```json
+{
+  "channels": {
+    "line": {
+      "replyLanguage": "th",
+      "replyLanguageAllowedTerms": ["ライン"]
+    }
+  }
+}
+```
+
+### Multilingual turns
+
+A turn whose own request asks for another language — a translation, or "answer
+in English" — is not validated against `replyLanguage`. That decision is made
+from the user's message, never from the reply: a reply that drifted into another
+language by itself is the failure being caught, so it cannot excuse itself.
+
 ## Group tool surface
 
 A LINE group that has no `tools` entry in config runs with a restricted tool

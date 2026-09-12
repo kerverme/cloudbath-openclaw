@@ -5,6 +5,11 @@ import type { VerboseLevel } from "../auto-reply/thinking.js";
 import { resolveGlobalSingleton } from "../shared/global-singleton.js";
 import { notifyListeners, registerListener } from "../shared/listeners.js";
 import { createAbortError } from "./abort-signal.js";
+import type { TurnPresentationPolicy } from "./reply-language-policy.js";
+import {
+  clearAuthoritativeReplyText,
+  resetAuthoritativeReplyTextForTest,
+} from "./reply-language-repair.js";
 
 /** Stream name for agent events delivered to gateway listeners and plugin host hooks. */
 export type AgentEventStream =
@@ -144,6 +149,12 @@ export type AgentRunContext = {
   registeredAt?: number;
   /** Timestamp of last activity (updated on every emitAgentEvent). */
   lastActiveAt?: number;
+  /**
+   * Turn-level presentation policy supplied by the channel that started this
+   * run. Data only: core validates against it and never derives it from model
+   * output. Absent means no expectation, which keeps generic behaviour.
+   */
+  replyPresentation?: TurnPresentationPolicy;
 };
 
 type AgentEventState = {
@@ -266,6 +277,9 @@ export function registerAgentRunContext(runId: string, context: AgentRunContext)
   if (context.lastActiveAt !== undefined) {
     existing.lastActiveAt = context.lastActiveAt;
   }
+  if (context.replyPresentation !== undefined) {
+    existing.replyPresentation = context.replyPresentation;
+  }
 }
 
 function getAgentRunContextOwners(state = getAgentEventState()) {
@@ -368,6 +382,9 @@ export function clearAgentRunContext(runId: string, lifecycleGeneration?: string
   }
   state.runContextById.delete(runId);
   state.seqByRun.delete(runId);
+  // The authoritative final text is per-run state with no other owner; it is
+  // released here so the memo cannot outlive the run that produced it.
+  clearAuthoritativeReplyText(runId);
 }
 
 /** Releases one tracked owner and clears its context after the final owner exits. */
@@ -407,6 +424,7 @@ export function sweepStaleRunContexts(maxAgeMs = 30 * 60 * 1000): number {
       state.runContextById.delete(runId);
       state.seqByRun.delete(runId);
       getAgentRunContextOwners(state).delete(runId);
+      clearAuthoritativeReplyText(runId);
       swept++;
     }
   }
@@ -419,6 +437,7 @@ export function resetAgentRunContextForTest() {
   state.runContextById.clear();
   state.seqByRun.clear();
   getAgentRunContextOwners(state).clear();
+  resetAuthoritativeReplyTextForTest();
 }
 
 function enrichAgentEvent(

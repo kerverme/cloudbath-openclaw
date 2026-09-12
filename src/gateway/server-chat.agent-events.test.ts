@@ -10,6 +10,7 @@ import { registerAgentRunContext, resetAgentRunContextForTest } from "../infra/a
 
 const persistGatewaySessionLifecycleEventMock = vi.fn();
 const logErrorMock = vi.fn();
+const logWarnMock = vi.fn();
 
 vi.mock("./server-chat.persist-session-lifecycle.runtime.js", () => ({
   persistGatewaySessionLifecycleEvent: (...args: unknown[]) =>
@@ -18,6 +19,7 @@ vi.mock("./server-chat.persist-session-lifecycle.runtime.js", () => ({
 
 vi.mock("../logger.js", () => ({
   logError: (...args: unknown[]) => logErrorMock(...args),
+  logWarn: (...args: unknown[]) => logWarnMock(...args),
 }));
 
 vi.mock("../config/io.js", () => ({

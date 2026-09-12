@@ -66,6 +66,12 @@ interface LineAccountBaseConfig {
    * recognised; absent means no expectation is asserted.
    */
   replyLanguage?: string;
+  /**
+   * Proper nouns that may appear in any script regardless of `replyLanguage`.
+   * URLs, model refs and codes need no entry — those are recognised by shape —
+   * so this is only for names output validation would otherwise reject.
+   */
+  replyLanguageAllowedTerms?: string[];
   mediaMaxMb?: number;
   webhookPath?: string;
   threadBindings?: LineThreadBindingsConfig;
@@ -88,6 +94,8 @@ export interface LineGroupConfig {
   skills?: string[];
   /** Overrides the account's `replyLanguage` for this group only. */
   replyLanguage?: string;
+  /** Adds to the account's `replyLanguageAllowedTerms` for this group. */
+  replyLanguageAllowedTerms?: string[];
 }
 
 export interface ResolvedLineAccount {

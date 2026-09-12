@@ -1,6 +1,7 @@
 // Gateway chat run state registries.
 // Tracks active runs, delta buffers, tool recipients, and session subscribers.
 import type { AgentEventPayload } from "../infra/agent-events.js";
+import type { ReplyLanguageScanner } from "../infra/reply-language-policy.js";
 
 export type ChatRunTiming = {
   ackedAtMs: number;
@@ -153,6 +154,15 @@ export type ChatRunState = {
   /** Length of text at the time of the last broadcast, used to avoid duplicate flushes. */
   deltaLastBroadcastLen: Map<string, number>;
   deltaLastBroadcastText: Map<string, string>;
+  /** Incremental expected-language scan over the cumulative assistant buffer. */
+  replyLanguageScanners: Map<string, ReplyLanguageScanner>;
+  /**
+   * When this run's raw deltas stopped being broadcast, in ms since the run's
+   * first suppressed delta was seen. Sticky for the rest of the run: once the
+   * cumulative text has gone invalid, later deltas extend invalid text, and the
+   * authoritative final replaces all of it.
+   */
+  streamSuppressedAt: Map<string, number>;
   agentDeltaSentAt: Map<string, number>;
   bufferedAgentEvents: Map<string, BufferedAgentEvent>;
   abortedRuns: Map<string, ChatAbortMarker>;
@@ -169,6 +179,8 @@ export function createChatRunState(): ChatRunState {
   const deltaSentAt = new Map<string, number>();
   const deltaLastBroadcastLen = new Map<string, number>();
   const deltaLastBroadcastText = new Map<string, string>();
+  const replyLanguageScanners = new Map<string, ReplyLanguageScanner>();
+  const streamSuppressedAt = new Map<string, number>();
   const agentDeltaSentAt = new Map<string, number>();
   const bufferedAgentEvents = new Map<string, BufferedAgentEvent>();
   const abortedRuns = new Map<string, ChatAbortMarker>();
@@ -180,6 +192,8 @@ export function createChatRunState(): ChatRunState {
     deltaSentAt.delete(runId);
     deltaLastBroadcastLen.delete(runId);
     deltaLastBroadcastText.delete(runId);
+    replyLanguageScanners.delete(runId);
+    streamSuppressedAt.delete(runId);
     for (const key of [runId, `${runId}:assistant`, `${runId}:thinking`]) {
       agentDeltaSentAt.delete(key);
       bufferedAgentEvents.delete(key);
@@ -194,6 +208,8 @@ export function createChatRunState(): ChatRunState {
     deltaSentAt.clear();
     deltaLastBroadcastLen.clear();
     deltaLastBroadcastText.clear();
+    replyLanguageScanners.clear();
+    streamSuppressedAt.clear();
     agentDeltaSentAt.clear();
     bufferedAgentEvents.clear();
     abortedRuns.clear();
@@ -207,6 +223,8 @@ export function createChatRunState(): ChatRunState {
     deltaSentAt,
     deltaLastBroadcastLen,
     deltaLastBroadcastText,
+    replyLanguageScanners,
+    streamSuppressedAt,
     agentDeltaSentAt,
     bufferedAgentEvents,
     abortedRuns,

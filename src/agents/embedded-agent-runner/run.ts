@@ -152,6 +152,7 @@ import {
   resolveSelectedOpenAIRuntimeProvider,
 } from "../openai-routing.js";
 import { hasOnlyAssistantReasoningContent } from "../replay-turn-classification.js";
+import { finalizeDeliveryPayloadsLanguage } from "../reply-language-delivery.js";
 import { runAgentCleanupStep } from "../run-cleanup-timeout.js";
 import {
   applyAgentRunSessionTargetIdentity,
@@ -4470,7 +4471,14 @@ async function runEmbeddedAgentInternal(
               : silentToolResultReplyPayload
                 ? [silentToolResultReplyPayload]
                 : payloadsWithToolMedia;
-          const payloadCount = payloadsForTerminalPath?.length ?? 0;
+          // Replace contaminated assistant text with the turn's authoritative
+          // wording BEFORE delivery, so the channel and the Control UI show the
+          // same reply rather than each repairing its own copy.
+          const deliverablePayloads = finalizeDeliveryPayloadsLanguage({
+            runId: params.runId,
+            payloads: payloadsForTerminalPath,
+          });
+          const payloadCount = deliverablePayloads?.length ?? 0;
           const emptyAssistantReplyIsSilent = shouldTreatEmptyAssistantReplyAsSilent({
             allowEmptyAssistantReplyAsSilent: params.allowEmptyAssistantReplyAsSilent,
             payloadCount,
@@ -4886,7 +4894,7 @@ async function runEmbeddedAgentInternal(
               : (attemptAssistant?.stopReason as string | undefined);
           const terminalPayloads = emptyAssistantReplyIsSilent
             ? [{ text: SILENT_REPLY_TOKEN }]
-            : payloadsForTerminalPath;
+            : deliverablePayloads;
           setTerminalLifecycleMeta({
             replayInvalid,
             livenessState,
