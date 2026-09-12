@@ -77,9 +77,15 @@ import {
 } from "../../hooks/message-hook-mappers.js";
 import { isAbortError } from "../../infra/abort-signal.js";
 import { isDiagnosticsEnabled } from "../../infra/diagnostic-events.js";
+import { getActiveDiagnosticTraceContext } from "../../infra/diagnostic-trace-context.js";
 import { measureDiagnosticsTimelineSpan } from "../../infra/diagnostics-timeline.js";
 import { formatErrorMessage } from "../../infra/errors.js";
 import { getSessionBindingService } from "../../infra/outbound/session-binding-service.js";
+import {
+  createTurnLatencyLedger,
+  formatTurnLatencyRecord,
+  runWithTurnLatencyLedger,
+} from "../../infra/turn-latency-ledger.js";
 import {
   logMessageDispatchCompleted,
   logMessageDispatchStarted,
@@ -1703,13 +1709,33 @@ async function dispatchReplyFromConfigInner(
   const replyHotPathTiming = createReplyHotPathTimingTracker({
     profilerEnabled: isReplyProfilerEnabled({ config: cfg }),
   });
+  // One correlated record per inbound event, sharing the profiler's single
+  // switch so there is not a second thing to turn on. Inert when off.
+  const turnLatency = createTurnLatencyLedger({
+    enabled: isReplyProfilerEnabled({ config: cfg }),
+    channel,
+    turnId: `${channel}:${messageId ?? "unknown"}`,
+    ...(getActiveDiagnosticTraceContext()?.traceId
+      ? { traceId: getActiveDiagnosticTraceContext()?.traceId }
+      : {}),
+    ...(messageId === undefined ? {} : { inboundMessageId: String(messageId) }),
+    ...(sessionKey ? { sessionKey } : {}),
+    ...(process.env.GIT_COMMIT ? { buildSha: process.env.GIT_COMMIT } : {}),
+  });
   const traceReplyPhase = <T>(name: string, run: () => Promise<T> | T): Promise<T> =>
     replyHotPathTiming.measure(name, () =>
-      measureDiagnosticsTimelineSpan(name, run, {
-        phase: "agent-turn",
-        config: cfg,
-        attributes: traceAttributes,
-      }),
+      turnLatency.phase(name, () =>
+        // The ALS scope is established here rather than around the whole
+        // dispatch because provider calls happen inside traced phases, and
+        // this keeps the carrier's lifetime equal to the phase it measures.
+        runWithTurnLatencyLedger(turnLatency, () =>
+          measureDiagnosticsTimelineSpan(name, run, {
+            phase: "agent-turn",
+            config: cfg,
+            attributes: traceAttributes,
+          }),
+        ),
+      ),
     );
   let agentDispatchStartedAt = 0;
 
@@ -1723,6 +1749,12 @@ async function dispatchReplyFromConfigInner(
         outcome,
         reason: opts?.reason,
       });
+    }
+    // Emitted unconditionally for a recording turn, not only a slow one: a
+    // baseline of normal turns is what makes a slow one legible.
+    const latencyRecord = turnLatency.finish({ outcome });
+    if (latencyRecord) {
+      replyHotPathTimingLog.info(formatTurnLatencyRecord(latencyRecord), latencyRecord);
     }
     messageLifecycle.markProcessed(outcome, opts);
   };
