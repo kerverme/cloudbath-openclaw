@@ -6,7 +6,10 @@ import { resolveGlobalSingleton } from "../shared/global-singleton.js";
 import { notifyListeners, registerListener } from "../shared/listeners.js";
 import { createAbortError } from "./abort-signal.js";
 import type { TurnPresentationPolicy } from "./reply-language-policy.js";
-import { clearAuthoritativeReplyText } from "./reply-language-repair.js";
+import {
+  clearAuthoritativeReplyText,
+  resetAuthoritativeReplyTextForTest,
+} from "./reply-language-repair.js";
 
 /** Stream name for agent events delivered to gateway listeners and plugin host hooks. */
 export type AgentEventStream =
@@ -421,6 +424,7 @@ export function sweepStaleRunContexts(maxAgeMs = 30 * 60 * 1000): number {
       state.runContextById.delete(runId);
       state.seqByRun.delete(runId);
       getAgentRunContextOwners(state).delete(runId);
+      clearAuthoritativeReplyText(runId);
       swept++;
     }
   }
@@ -433,6 +437,7 @@ export function resetAgentRunContextForTest() {
   state.runContextById.clear();
   state.seqByRun.clear();
   getAgentRunContextOwners(state).clear();
+  resetAuthoritativeReplyTextForTest();
 }
 
 function enrichAgentEvent(
