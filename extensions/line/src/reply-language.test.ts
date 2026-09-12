@@ -152,3 +152,32 @@ describe("the language field does not widen tools or authorization", () => {
     ).toEqual({ deny: ["image_generate"] });
   });
 });
+
+describe("group config does not reach a direct conversation", () => {
+  // `groups["*"]` is the operator's statement about GROUPS. A direct message has
+  // no group identity, so applying it there would let group policy decide a
+  // one-to-one conversation's language — a scope the operator never wrote.
+  const wildcard = {
+    channels: { line: { replyLanguage: "en", groups: { "*": { replyLanguage: "th" } } } },
+  };
+
+  it("keeps the account default when there is no group or room at all", () => {
+    expect(resolve(wildcard)).toEqual({ language: "en", source: "account" });
+  });
+
+  it("keeps the account default when the group id is blank", () => {
+    for (const blank of ["", "   "]) {
+      expect(resolve(wildcard, blank)).toEqual({ language: "en", source: "account" });
+    }
+  });
+
+  it("asserts nothing in a direct conversation when only a wildcard group is configured", () => {
+    const groupsOnly = { channels: { line: { groups: { "*": { replyLanguage: "th" } } } } };
+
+    expect(resolve(groupsOnly)).toEqual({ source: "none" });
+  });
+
+  it("still applies the wildcard inside a real group", () => {
+    expect(resolve(wildcard, GROUP_B)).toEqual({ language: "th", source: "group" });
+  });
+});
