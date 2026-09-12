@@ -50,6 +50,7 @@ import type { PrevisProjectHead, PrevisVersion } from "./src/previs-types.js";
 import { CLOUDBATH_PREVIS_VIEW_ROUTE } from "./src/previs-url.js";
 import { resolveSchemaForAgent } from "./src/profiles.js";
 import { R2ArchiveClient } from "./src/r2.js";
+import { isStoryboardSummaryText } from "./src/storyboard-language.js";
 import type { CloudbathStoryboardLineRouter } from "./src/storyboard-line-router.js";
 import { StoryboardLlmPlanner } from "./src/storyboard-planner.js";
 import {
@@ -971,6 +972,7 @@ export default definePluginEntry({
             ...(outboundCtx.sessionKey ? { sessionKey: outboundCtx.sessionKey } : {}),
           },
         ),
+      isRebuildTarget: isStoryboardSummaryText,
       logger,
     });
     api.on("message_sending", async (event, ctx) => {

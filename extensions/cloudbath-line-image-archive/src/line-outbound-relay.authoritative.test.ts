@@ -20,7 +20,11 @@ const CTX = { channelId: "line", conversationId: "line:group:C1", sessionKey: "s
 function createRelay() {
   const resolve = vi.fn(async () => undefined);
   const warn = vi.fn();
-  return { relay: createLineOutboundRelay({ resolve, logger: { warn } }), resolve, warn };
+  return {
+    relay: createLineOutboundRelay({ resolve, isRebuildTarget: () => false, logger: { warn } }),
+    resolve,
+    warn,
+  };
 }
 
 describe("authoritative text passes through both LINE paths untouched", () => {

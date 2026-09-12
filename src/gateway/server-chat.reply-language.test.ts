@@ -94,11 +94,12 @@ describe("expected reply language on the streamed chat path", () => {
 
   function createHarness(policy?: AgentRunContext["replyPresentation"]) {
     const broadcast = vi.fn();
+    const nodeSendToSession = vi.fn();
     const chatRunState = createChatRunState();
     const handler = createAgentEventHandler({
       broadcast,
       broadcastToConnIds: vi.fn(),
-      nodeSendToSession: vi.fn(),
+      nodeSendToSession,
       agentRunSeq: new Map<string, number>(),
       chatRunState,
       resolveSessionKeyForRun: () => "session-1",
@@ -136,9 +137,15 @@ describe("expected reply language on the streamed chat path", () => {
         .filter(([event]) => event === "chat")
         .map(([, payload]) => payload as ChatPayload);
 
+    /** What the session transcript mirror receives, in order. */
+    const mirrored = (): ChatPayload[] =>
+      nodeSendToSession.mock.calls
+        .filter((call) => call[1] === "chat")
+        .map((call) => call[2] as ChatPayload);
+
     const textOf = (payload: ChatPayload) => payload.message?.content?.[0]?.text;
 
-    return { stream, finish, payloads, textOf };
+    return { stream, finish, payloads, mirrored, textOf };
   }
 
   it("streams a clean Thai reply delta by delta and finalizes it unchanged", () => {
@@ -209,7 +216,7 @@ describe("expected reply language on the streamed chat path", () => {
   it("leaves an intentionally multilingual turn streaming normally", () => {
     const { stream, finish, payloads, textOf } = createHarness({
       ...THAI_POLICY,
-      allowIntentionalMultilingual: true,
+      multilingualOverride: { allowed: true, reason: "request_asks_to_translate" },
     });
 
     stream("คำนี้แปลว่า");
@@ -232,6 +239,25 @@ describe("expected reply language on the streamed chat path", () => {
     expect(events.map((payload) => payload.state)).toEqual(["delta", "delta", "final"]);
     expect(events.every((payload) => payload.replace !== true)).toBe(true);
     expect(textOf(events.at(-1) as ChatPayload)).toBe("Привет, я могу помочь.");
+  });
+
+  it("gives the transcript mirror the same authoritative text as the UI final", () => {
+    const { stream, finish, payloads, mirrored, textOf } = createHarness(THAI_POLICY);
+
+    stream("เข้าใจครับ");
+    stream("เข้าใจครับ ใช่ไಮೈ");
+    finish();
+
+    const uiFinal = payloads().find((payload) => payload.state === "final");
+    const mirrorFinal = mirrored().find((payload) => payload.state === "final");
+
+    expect(textOf(uiFinal as ChatPayload)).toBe(FALLBACK);
+    expect(textOf(mirrorFinal as ChatPayload)).toBe(textOf(uiFinal as ChatPayload));
+    // Neither record keeps the contaminated stream.
+    for (const payload of [...payloads(), ...mirrored()]) {
+      expect(textOf(payload) ?? "").not.toContain("ಮ");
+      expect(payload.deltaText ?? "").not.toContain("ಮ");
+    }
   });
 
   it("logs the outcome without logging any reply text", () => {

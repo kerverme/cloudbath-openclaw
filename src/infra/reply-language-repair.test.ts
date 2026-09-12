@@ -35,7 +35,10 @@ describe("nothing configured changes nothing", () => {
   it("leaves an intentionally multilingual turn alone", () => {
     const result = finalizeReplyText({
       text: 'แปลว่า "Привет" ครับ',
-      policy: { ...THAI, allowIntentionalMultilingual: true },
+      policy: {
+        ...THAI,
+        multilingualOverride: { allowed: true, reason: "request_asks_to_translate" },
+      },
     });
 
     expect(result).toMatchObject({ text: 'แปลว่า "Привет" ครับ', outcome: "unchecked" });
@@ -78,14 +81,16 @@ describe("structured regeneration wins", () => {
 });
 
 describe("the rewrite drops whole segments or refuses", () => {
-  it("keeps the clean lines of a multi-line reply", () => {
+  it("keeps the clean lines of a multi-line reply, line breaks and all", () => {
+    // Survivors keep the model's own separators: a repair that silently reflowed
+    // a bulleted reply into one line would be a second, invisible edit.
     const result = finalizeReplyText({
       text: "เรียบร้อยแล้วครับ ทั้งหมดหกฉาก\nรอสักครู่นะครับ\nใช่ไಮೈ",
       policy: THAI,
     });
 
     expect(result).toMatchObject({ outcome: "repaired", repairKind: "rewritten" });
-    expect(result.text).toBe("เรียบร้อยแล้วครับ ทั้งหมดหกฉาก รอสักครู่นะครับ");
+    expect(result.text).toBe("เรียบร้อยแล้วครับ ทั้งหมดหกฉาก\nรอสักครู่นะครับ");
     expect(result.validation.valid).toBe(true);
   });
 
