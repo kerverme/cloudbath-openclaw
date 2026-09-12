@@ -52,3 +52,38 @@ describe("LineConfigSchema", () => {
     );
   });
 });
+
+describe("replyLanguage", () => {
+  it("accepts an account default and a per-group override", () => {
+    // Both schemas are strict, so an unknown key would fail outright: this
+    // proves the field is actually part of the config contract.
+    const result = LineConfigSchema.safeParse({
+      channelAccessToken: "token",
+      channelSecret: "secret",
+      replyLanguage: "th",
+      groups: { Caaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa: { replyLanguage: "en" } },
+    });
+
+    expect(result.success).toBe(true);
+  });
+
+  it("accepts a per-account default", () => {
+    const result = LineConfigSchema.safeParse({
+      accounts: {
+        default: { channelAccessToken: "token", channelSecret: "secret", replyLanguage: "th" },
+      },
+    });
+
+    expect(result.success).toBe(true);
+  });
+
+  it("still rejects an unknown neighbouring key", () => {
+    const result = LineConfigSchema.safeParse({
+      channelAccessToken: "token",
+      channelSecret: "secret",
+      replyLanguag: "th",
+    });
+
+    expect(result.success).toBe(false);
+  });
+});

@@ -151,6 +151,45 @@ LINE IDs are case-sensitive. Valid IDs look like:
 - Group: `C` + 32 hex chars
 - Room: `R` + 32 hex chars
 
+## Reply language
+
+`replyLanguage` states the language replies are expected to be written in, as a
+primary subtag such as `th`. Output validation reads it so a reply written
+_entirely_ in another language can be recognised — something that is impossible
+to detect from the reply alone.
+
+- `channels.line.replyLanguage` — account default
+- `channels.line.groups.<groupId>.replyLanguage` — per-group override
+
+```json
+{
+  "channels": {
+    "line": {
+      "replyLanguage": "th",
+      "groups": {
+        "C<32 hex chars>": { "replyLanguage": "en" }
+      }
+    }
+  }
+}
+```
+
+Resolution order, highest first:
+
+1. explicit per-group `replyLanguage` (a `"*"` entry counts as explicit)
+2. account `replyLanguage`
+3. nothing — no expectation is asserted, and validation keeps its prior
+   behavior rather than guessing
+
+A group entry that omits `replyLanguage` inherits the account default: the
+absence of the field is not a statement about language. Regional tags are
+accepted and reduced to the primary subtag (`th-TH` resolves to `th`), and a
+value that cannot be a language subtag is treated as unconfigured rather than
+becoming a policy.
+
+This field affects output validation only. It does not change tool policy,
+owner authorization, or delivery behavior.
+
 ## Group tool surface
 
 A LINE group that has no `tools` entry in config runs with a restricted tool

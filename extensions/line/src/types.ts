@@ -60,6 +60,12 @@ interface LineAccountBaseConfig {
   dmPolicy?: "open" | "allowlist" | "pairing" | "disabled";
   groupPolicy?: "open" | "allowlist" | "disabled";
   responsePrefix?: string;
+  /**
+   * Language replies are expected to be written in, as a primary subtag such as
+   * `th`. Read by output validation so a wholly foreign-language reply can be
+   * recognised; absent means no expectation is asserted.
+   */
+  replyLanguage?: string;
   mediaMaxMb?: number;
   webhookPath?: string;
   threadBindings?: LineThreadBindingsConfig;
@@ -80,6 +86,8 @@ export interface LineGroupConfig {
   requireMention?: boolean;
   systemPrompt?: string;
   skills?: string[];
+  /** Overrides the account's `replyLanguage` for this group only. */
+  replyLanguage?: string;
 }
 
 export interface ResolvedLineAccount {
