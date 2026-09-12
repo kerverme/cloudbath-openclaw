@@ -17,6 +17,8 @@ async function makeRepoRoot(root: string): Promise<void> {
 
 function buildParams(params: { config?: OpenClawConfig; workspaceDir?: string; cwd?: string }) {
   return buildSystemPromptParams({
+    // Repo-root detection, not disclosure: keep every field rendered.
+    disclosureScope: "operator",
     config: params.config,
     workspaceDir: params.workspaceDir,
     cwd: params.cwd,
@@ -108,6 +110,8 @@ describe("buildSystemPromptParams", () => {
 
   it("carries session identity into runtime info", () => {
     const { runtimeInfo } = buildSystemPromptParams({
+      // Repo-root detection, not disclosure: keep every field rendered.
+      disclosureScope: "operator",
       agentId: "main",
       runtime: {
         sessionKey: "agent:main:main",
