@@ -62,6 +62,29 @@ describe("a wholly foreign reply fails", () => {
 });
 
 describe("mixed-script contamination fails", () => {
+  it.each([
+    ["Kannada", "ಮೈ"],
+    ["Cyrillic", "Привет"],
+    ["Devanagari", "नमस्ते"],
+    ["Han", "你好"],
+    ["Hangul", "안녕하세요"],
+  ])("rejects %s when Thai is expected", (script, foreignText) => {
+    const result = validateReplyLanguage(`เรียบร้อยครับ ${foreignText}`, THAI);
+
+    expect(result).toMatchObject({ valid: false, reason: "foreign_script" });
+    expect(result.violatingScripts).toContain(script);
+  });
+
+  it("fails closed for a Unicode script outside the named table", () => {
+    const result = validateReplyLanguage("เรียบร้อยครับ ᎣᏏᏲ", THAI);
+
+    expect(result).toMatchObject({
+      valid: false,
+      reason: "foreign_script",
+      violatingScripts: ["Unknown"],
+    });
+  });
+
   it("fails the observed Kannada fragment inside a Thai word", () => {
     const result = validateReplyLanguage('เข้าใจครับ — "จัดไว้ อันนี้" ใช่ไಮೈ? 🐱', THAI);
 

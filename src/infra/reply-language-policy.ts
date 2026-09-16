@@ -13,7 +13,7 @@
  * any product's vocabulary.
  */
 
-/** Unicode scripts this module can name. Anything else classifies as neutral. */
+/** Unicode scripts this module can name. */
 const NAMED_SCRIPTS = [
   "Arabic",
   "Armenian",
@@ -44,7 +44,7 @@ const NAMED_SCRIPTS = [
   "Tibetan",
 ] as const;
 
-export type ScriptName = (typeof NAMED_SCRIPTS)[number];
+export type ScriptName = (typeof NAMED_SCRIPTS)[number] | "Unknown";
 
 /**
  * Turn-level presentation policy, carried as data from channel ingress.
@@ -169,7 +169,7 @@ export function isTechnicalToken(token: string): boolean {
 /** ASCII is most of what streams through here, and needs no property lookup. */
 const ASCII_LETTER = /^[A-Za-z]$/u;
 
-/** The script of one character, or undefined when it is neutral or unknown. */
+/** The script of one character, or undefined only when it is neutral. */
 function scriptOf(character: string): ScriptName | undefined {
   if ((character.codePointAt(0) ?? 0) < 128) {
     return ASCII_LETTER.test(character) ? "Latin" : undefined;
@@ -182,7 +182,9 @@ function scriptOf(character: string): ScriptName | undefined {
       return script;
     }
   }
-  return undefined;
+  // A letter outside the maintained table is still substantive language. It
+  // must fail closed instead of becoming neutral and bypassing enforcement.
+  return /\p{L}/u.test(character) ? "Unknown" : undefined;
 }
 
 /** Scripts present in one word, in first-seen order. */

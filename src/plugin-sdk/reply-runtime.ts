@@ -35,7 +35,11 @@ export { resolveHeartbeatReplyPayload } from "../auto-reply/heartbeat-reply-payl
 // Narrowed to what a channel plugin actually calls — every name published here
 // is also declaration surface counted against the plugin SDK budget.
 export { foreignScriptRuns, validateReplyLanguage } from "../infra/reply-language-policy.js";
-export { finalizeReplyText } from "../infra/reply-language-repair.js";
+export {
+  finalizeReplyText,
+  isAuthoritativeReplyText,
+  prepareAuthoritativeReplyRegeneration,
+} from "../infra/reply-language-repair.js";
 export { getReplyFromConfig } from "../auto-reply/reply/get-reply.js";
 export { HEARTBEAT_TOKEN, isSilentReplyText, SILENT_REPLY_TOKEN } from "../auto-reply/tokens.js";
 export { isAbortRequestText } from "../auto-reply/reply/abort.js";

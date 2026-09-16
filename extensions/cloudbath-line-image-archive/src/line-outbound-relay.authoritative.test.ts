@@ -15,7 +15,12 @@ import { createLineOutboundRelay } from "./line-outbound-relay.js";
 const AUTHORITATIVE_FALLBACK = "ขออภัยครับ ข้อความตอบกลับเมื่อกี้มีปัญหา กรุณาลองอีกครั้ง";
 const AUTHORITATIVE_REPLY = "เรียบร้อยแล้วครับ ส่งทาง LINE ให้แล้ว ดูได้ที่ https://example.com/a";
 
-const CTX = { channelId: "line", conversationId: "line:group:C1", sessionKey: "s1" } as const;
+const CTX = {
+  channelId: "line",
+  conversationId: "line:group:C1",
+  sessionKey: "s1",
+  runId: "run-authoritative",
+} as const;
 
 function createRelay() {
   const resolve = vi.fn(async () => undefined);
@@ -62,6 +67,25 @@ describe("authoritative text passes through both LINE paths untouched", () => {
     // Undefined from both means neither rewrote it, so both send the same bytes.
     expect(durable).toBeUndefined();
     expect(replyToken).toBeUndefined();
+  });
+
+  it.each([
+    "Sure — here it is in English.",
+    "Привет, я могу помочь вам с этим.",
+    "こんにちは。こちらが回答です。",
+  ])("does not overwrite an intentional authoritative translation: %s", async (text) => {
+    const resolve = vi.fn(async () => undefined);
+    const relay = createLineOutboundRelay({
+      resolve,
+      isRebuildTarget: () => false,
+      isAuthoritative: (candidate, runId) => candidate === text && runId === CTX.runId,
+    });
+
+    await expect(relay.messageSending({ content: text }, CTX)).resolves.toBeUndefined();
+    await expect(
+      relay.replyPayloadSending({ payload: { text }, channel: "line" }, CTX),
+    ).resolves.toBeUndefined();
+    expect(resolve).not.toHaveBeenCalled();
   });
 
   it("still guards text that never went through finalization", async () => {

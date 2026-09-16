@@ -4,6 +4,7 @@ import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import type { OpenClawPluginApi, PluginLogger } from "openclaw/plugin-sdk/plugin-entry";
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import type { PluginStateKeyedStore } from "openclaw/plugin-sdk/plugin-state-runtime";
+import { prepareAuthoritativeReplyRegeneration } from "openclaw/plugin-sdk/reply-runtime";
 import { extractSchemaFieldsWithCurrentModel } from "./src/analysis.js";
 import {
   createCharacterViewRouteHandler,
@@ -975,11 +976,36 @@ export default definePluginEntry({
       isRebuildTarget: isStoryboardSummaryText,
       logger,
     });
+    api.on("before_agent_finalize", async (event, ctx) => {
+      const sourceText = event.lastAssistantMessage;
+      if (!event.runId || !sourceText?.trim() || !isStoryboardSummaryText(sourceText)) {
+        return;
+      }
+      const structured =
+        await tryGetCloudbathWorkspacePolicyRuntime()?.storyboardLineRouter?.readOutboundStoryboardLanguage(
+          {
+            channelId: ctx.channel ?? ctx.channelId ?? "",
+            accountId: "",
+            conversationId: ctx.chatId ?? "",
+            ...(ctx.sessionKey ? { sessionKey: ctx.sessionKey } : {}),
+          },
+        );
+      if (structured?.summary) {
+        prepareAuthoritativeReplyRegeneration({
+          runId: event.runId,
+          sourceText,
+          regeneratedText: structured.summary,
+        });
+      }
+    });
     api.on("message_sending", async (event, ctx) => {
       return await outboundLanguageRelay.messageSending(event, ctx);
     });
     api.on("reply_payload_sending", async (event, ctx) => {
-      return await outboundLanguageRelay.replyPayloadSending(event, ctx);
+      return await outboundLanguageRelay.replyPayloadSending(event, {
+        ...ctx,
+        runId: event.runId ?? ctx.runId,
+      });
     });
 
     api.on("before_tool_call", async (event, ctx) => {

@@ -77,6 +77,21 @@ function hasTechnicalToken(text: string): boolean {
   return text.split(/\s+/u).some((token) => token && isTechnicalToken(token));
 }
 
+function protectedTechnicalTokens(text: string): string[] {
+  const videoCodes = text.match(/\bVIDEO\s+[A-Za-z0-9]{3,}\b/gu) ?? [];
+  const codeParts = new Set(videoCodes.flatMap((code) => code.split(/\s+/u)));
+  const technical = text
+    .split(/\s+/u)
+    .filter(
+      (token) =>
+        token &&
+        !codeParts.has(token) &&
+        isTechnicalToken(token) &&
+        (/[_:/@+#?&=%~-]/u.test(token) || (/[A-Za-z]/u.test(token) && /[0-9]/u.test(token))),
+    );
+  return [...new Set([...videoCodes, ...technical])];
+}
+
 /**
  * Drops whole violating segments, or returns undefined when that would lose
  * meaning or lose an exact span (a confirmation code, a link) that the reply
@@ -166,11 +181,14 @@ export function finalizeReplyText(params: {
   }
   const fallback = policy.fallbackText?.trim();
   if (fallback) {
+    const protectedSpans = protectedTechnicalTokens(params.text);
+    const fallbackText =
+      protectedSpans.length > 0 ? `${fallback}\n${protectedSpans.join(" ")}` : fallback;
     return {
-      text: fallback,
+      text: fallbackText,
       outcome: "fallback",
       repairKind: "fallback",
-      validation: validateReplyLanguage(fallback, policy),
+      validation: validateReplyLanguage(fallbackText, policy),
     };
   }
   // No rebuild, no safe rewrite, and the owning layer supplied no wording we
@@ -181,15 +199,32 @@ export function finalizeReplyText(params: {
 /**
  * Per-run memo so every surface reads one decision.
  *
- * Single slot per run, keyed by the source text it was computed from: a surface
- * that finalizes a DIFFERENT source text recomputes rather than inherit a
- * decision that was never about its text. Cleared with the run.
+ * Single slot per run. The first finalization is authoritative even if a later
+ * surface still holds different raw bytes; recomputing there would create a
+ * second final answer. Cleared with the run.
  */
-type MemoEntry = { sourceText: string; finalized: FinalizedReply };
+type PreparedRegeneration = { sourceText: string; regeneratedText: string };
 const FINALIZED_BY_RUN_KEY = Symbol.for("openclaw.replyLanguage.finalizedByRun");
+const PREPARED_BY_RUN_KEY = Symbol.for("openclaw.replyLanguage.preparedByRun");
 
-function finalizedByRun(): Map<string, MemoEntry> {
-  return resolveGlobalSingleton(FINALIZED_BY_RUN_KEY, () => new Map<string, MemoEntry>());
+function finalizedByRun(): Map<string, FinalizedReply> {
+  return resolveGlobalSingleton(FINALIZED_BY_RUN_KEY, () => new Map<string, FinalizedReply>());
+}
+
+function preparedByRun(): Map<string, PreparedRegeneration> {
+  return resolveGlobalSingleton(PREPARED_BY_RUN_KEY, () => new Map<string, PreparedRegeneration>());
+}
+
+/** Supplies trusted structured text before any UI, transcript, or delivery finalizes the run. */
+export function prepareAuthoritativeReplyRegeneration(params: {
+  runId: string;
+  sourceText: string;
+  regeneratedText: string;
+}): void {
+  const regeneratedText = params.regeneratedText.trim();
+  if (params.sourceText && regeneratedText) {
+    preparedByRun().set(params.runId, { sourceText: params.sourceText, regeneratedText });
+  }
 }
 
 export function resolveAuthoritativeReplyText(params: {
@@ -203,19 +238,32 @@ export function resolveAuthoritativeReplyText(params: {
     return finalizeReplyText(params);
   }
   const existing = finalizedByRun().get(runId);
-  if (existing?.sourceText === params.text) {
-    return existing.finalized;
+  if (existing) {
+    return existing;
   }
-  const finalized = finalizeReplyText(params);
-  finalizedByRun().set(runId, { sourceText: params.text, finalized });
+  const prepared = preparedByRun().get(runId);
+  const regenerate =
+    prepared?.sourceText === params.text ? () => prepared.regeneratedText : params.regenerate;
+  const finalized = finalizeReplyText({ ...params, ...(regenerate ? { regenerate } : {}) });
+  finalizedByRun().set(runId, finalized);
   return finalized;
+}
+
+/** True when active run finalization already chose these exact bytes. */
+export function isAuthoritativeReplyText(text: string, runId?: string): boolean {
+  if (runId) {
+    return finalizedByRun().get(runId)?.text === text;
+  }
+  return [...finalizedByRun().values()].some((finalized) => finalized.text === text);
 }
 
 export function clearAuthoritativeReplyText(runId: string): void {
   finalizedByRun().delete(runId);
+  preparedByRun().delete(runId);
 }
 
 /** Test seam: the memo is process-local run state with no other owner. */
 export function resetAuthoritativeReplyTextForTest(): void {
   finalizedByRun().clear();
+  preparedByRun().clear();
 }

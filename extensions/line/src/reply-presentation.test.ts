@@ -125,6 +125,7 @@ describe("a multilingual turn is declared by the request, never by the reply", (
       "ช่วยจัดคิวงานให้หน่อยครับ",
       "ส่งรูปล่าสุดมาให้ดูหน่อย",
       "what happened to the last render?",
+      "ช่วยดูแปลนบ้านหลังนี้ให้หน่อยครับ",
     ]) {
       expect(resolve(cfg, { requestText: request })).not.toHaveProperty("multilingualOverride");
     }

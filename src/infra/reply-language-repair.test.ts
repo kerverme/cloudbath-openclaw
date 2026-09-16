@@ -103,23 +103,30 @@ describe("the rewrite drops whole segments or refuses", () => {
     expect(result).toMatchObject({ text: FALLBACK, repairKind: "fallback" });
   });
 
-  it("refuses to drop a segment that carries a confirmation code", () => {
-    // Losing the code silently would leave a reply that looks complete and is not.
+  it("carries a confirmation code into the fallback rather than losing it", () => {
+    // Dropping the code silently would leave a reply that looks complete and is
+    // not; keeping the contaminated prose around it would ship the defect. The
+    // exact span survives, the prose does not.
     const result = finalizeReplyText({
       text: "เรียบร้อยแล้วครับ ทุกอย่างพร้อม\nรหัสยืนยัน VIDEO 4821 ใช่ไಮೈ",
       policy: THAI,
     });
 
-    expect(result).toMatchObject({ text: FALLBACK, repairKind: "fallback" });
+    expect(result).toMatchObject({ text: `${FALLBACK}\nVIDEO 4821`, repairKind: "fallback" });
+    expect(result.text).not.toContain("ใช่ไ");
   });
 
-  it("refuses to drop a segment that carries a link", () => {
+  it("carries a link into the fallback as its exact span", () => {
     const result = finalizeReplyText({
       text: "เรียบร้อยแล้วครับ ทุกอย่างพร้อม\nดูที่ https://example.com/x ใช่ไಮೈ",
       policy: THAI,
     });
 
-    expect(result).toMatchObject({ text: FALLBACK, repairKind: "fallback" });
+    expect(result).toMatchObject({
+      text: `${FALLBACK}\nhttps://example.com/x`,
+      repairKind: "fallback",
+    });
+    expect(result.text).not.toContain("ใช่ไ");
   });
 
   it("falls back rather than keep a fragment of the answer", () => {
@@ -153,15 +160,19 @@ describe("every surface reads one decision", () => {
     expect(second).toBe(first);
   });
 
-  it("does not hand a decision about one text to a surface holding another", () => {
-    resolveAuthoritativeReplyText({ runId: "run-1", text: "เข้าใจครับ ใช่ไಮೈ", policy: THAI });
+  it("does not let a later surface create a second final answer", () => {
+    const first = resolveAuthoritativeReplyText({
+      runId: "run-1",
+      text: "เข้าใจครับ ใช่ไಮೈ",
+      policy: THAI,
+    });
     const other = resolveAuthoritativeReplyText({
       runId: "run-1",
       text: "เรียบร้อยครับ",
       policy: THAI,
     });
 
-    expect(other).toMatchObject({ text: "เรียบร้อยครับ", outcome: "valid" });
+    expect(other).toBe(first);
   });
 
   it("is deterministic without a run id, so unkeyed surfaces still converge", () => {

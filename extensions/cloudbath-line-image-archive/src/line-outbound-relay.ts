@@ -14,6 +14,7 @@
  * conversation additionally offers a structured rebuild; a plain chat turn has
  * none, so it repairs by keeping its clean sentences or falls back.
  */
+import { isAuthoritativeReplyText } from "openclaw/plugin-sdk/reply-runtime";
 import {
   guardLineOutboundText,
   LINE_PRODUCT_TERMS,
@@ -27,6 +28,7 @@ export type OutboundRelayContext = Readonly<{
   accountId?: string;
   conversationId?: string;
   sessionKey?: string;
+  runId?: string;
 }>;
 
 type MessageSendingEvent = Readonly<{ content?: string; to?: string }>;
@@ -52,6 +54,8 @@ export type LineOutboundRelayDeps = Readonly<{
    * rebuild would be faithful. Owned by the caller that owns the template.
    */
   isRebuildTarget(text: string): boolean;
+  /** Test seam; production uses core's active authoritative-reply registry. */
+  isAuthoritative?: (text: string, runId?: string) => boolean;
   logger?: Readonly<{
     info?(event: string, fields?: Record<string, unknown>): void;
     warn(event: string, fields?: Record<string, unknown>): void;
@@ -79,8 +83,14 @@ export function createLineOutboundRelay(deps: LineOutboundRelayDeps): LineOutbou
     ctx: OutboundRelayContext,
     channel: string | undefined,
   ): Promise<string | undefined> => {
-    const value = text?.trim();
-    if (!value || (channel ?? ctx.channelId) !== "line") {
+    const sourceText = text;
+    const value = sourceText?.trim();
+    if (!sourceText || !value || (channel ?? ctx.channelId) !== "line") {
+      return undefined;
+    }
+    // Core has already selected these exact bytes for every user-visible
+    // surface. A delivery hook must not form a second language opinion.
+    if ((deps.isAuthoritative ?? isAuthoritativeReplyText)(sourceText, ctx.runId)) {
       return undefined;
     }
     // Allowed terms only ever PERMIT more text, so anything clean against the

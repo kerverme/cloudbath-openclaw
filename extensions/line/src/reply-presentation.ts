@@ -43,7 +43,7 @@ const DEFAULT_FALLBACK_TEXT = "Sorry — that reply came out malformed. Please a
  * outright, and anything subtler is better left validated than guessed at.
  */
 const MULTILINGUAL_REQUEST_PATTERNS: ReadonlyArray<readonly [RegExp, string]> = Object.freeze([
-  [/แปล/u, "request_asks_to_translate"],
+  [/แปล(?:ให้|เป็น|คำ|ประโยค|ข้อความ|อันนี้|นี่|ว่า|จาก|$)/u, "request_asks_to_translate"],
   [/ทับศัพท์/u, "request_asks_to_transliterate"],
   // `เป็น` is optional: "เขียนภาษาญี่ปุ่นให้หน่อย" names a language without it.
   [/(?:ตอบ|เขียน|พูด|อ่าน|แต่ง)\s*(?:กลับ\s*)?(?:เป็น)?ภาษา/u, "request_names_a_reply_language"],

@@ -11,6 +11,7 @@
  * the assistant's reply to the user.
  */
 import type { ReplyPayload } from "../auto-reply/reply-payload.js";
+import { isSilentReplyPayloadText } from "../auto-reply/tokens.js";
 import { getAgentRunContext } from "../infra/agent-events.js";
 import { resolveAuthoritativeReplyText } from "../infra/reply-language-repair.js";
 
@@ -30,6 +31,10 @@ export function finalizeDeliveryPayloadsLanguage(params: {
   let changed = false;
   const finalized = payloads.map((payload) => {
     const text = payload?.text;
+    if (isSilentReplyPayloadText(text)) {
+      changed = true;
+      return { ...payload, text: undefined };
+    }
     if (!text || payload.isError === true || payload.isReasoning === true) {
       return payload;
     }

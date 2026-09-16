@@ -11,6 +11,7 @@ import type { ReplyPayload } from "../auto-reply/reply-payload.js";
 import { registerAgentRunContext, resetAgentRunContextForTest } from "../infra/agent-events.js";
 import type { TurnPresentationPolicy } from "../infra/reply-language-policy.js";
 import {
+  prepareAuthoritativeReplyRegeneration,
   resetAuthoritativeReplyTextForTest,
   resolveAuthoritativeReplyText,
 } from "../infra/reply-language-repair.js";
@@ -34,6 +35,46 @@ beforeEach(() => {
 });
 
 describe("payloads are finalized before they reach a channel", () => {
+  it.each([
+    ["English", "Sure — here it is in English."],
+    ["Russian", "Привет, я могу помочь вам с этим."],
+    ["Japanese", "こんにちは。こちらが回答です。"],
+  ])("keeps an intentional %s reply", (_language, text) => {
+    registerAgentRunContext("run-multi", {
+      replyPresentation: {
+        ...THAI,
+        multilingualOverride: { allowed: true, reason: "request_names_a_reply_language" },
+      },
+    });
+
+    expect(
+      finalizeDeliveryPayloadsLanguage({ runId: "run-multi", payloads: [{ text }] })?.[0]?.text,
+    ).toBe(text);
+  });
+
+  it("regenerates trusted structured text before authoritative finalization", () => {
+    const regenerated = "ฉาก 1 · 0-3 วิ · ปูฉาก\nแมวเดินในสวนครับ";
+    prepareAuthoritativeReplyRegeneration({
+      runId: "run-1",
+      sourceText: CORRUPTED,
+      regeneratedText: regenerated,
+    });
+
+    expect(finalize([{ text: CORRUPTED }])?.[0]?.text).toBe(regenerated);
+    expect(
+      resolveAuthoritativeReplyText({ runId: "run-1", text: CORRUPTED, policy: THAI }).text,
+    ).toBe(regenerated);
+  });
+
+  it.each([
+    "NO_REPLY",
+    '"NO_REPLY"',
+    '{"action":"NO_REPLY"}',
+    "<thinking>internal plan</thinking> NO_REPLY",
+  ])("keeps wrapped silent payload internal: %s", (text) => {
+    expect(finalize([{ text }])?.[0]?.text).toBeUndefined();
+  });
+
   it("replaces contaminated assistant text", () => {
     const finalized = finalize([{ text: CORRUPTED }]);
 
@@ -125,11 +166,18 @@ describe("delivery and the UI final converge", () => {
     expect(uiFinal.text).toBe(delivered?.[0]?.text);
   });
 
-  it("keeps a paid confirmation code rather than quietly dropping it", () => {
-    // A reply carrying an exact span is never shortened into something that
-    // looks complete; it falls back and says so instead.
+  it("preserves a paid confirmation code inside the honest fallback", () => {
     const delivered = finalize([{ text: "เรียบร้อยแล้วครับ ทุกอย่างพร้อม\nรหัส VIDEO 4821 ใช่ไಮೈ" }]);
 
-    expect(delivered?.[0]?.text).toBe(FALLBACK);
+    expect(delivered?.[0]?.text).toBe(`${FALLBACK}\nVIDEO 4821`);
+  });
+
+  it("preserves URLs and opaque identifiers only as their exact spans", () => {
+    const delivered = finalize([
+      { text: "เข้าใจครับ Привет https://example.com/job/ABC-42 asset_9f2" },
+    ]);
+
+    expect(delivered?.[0]?.text).toBe(`${FALLBACK}\nhttps://example.com/job/ABC-42 asset_9f2`);
+    expect(delivered?.[0]?.text).not.toContain("Привет");
   });
 });
