@@ -542,10 +542,6 @@
       "types": "./dist/plugin-sdk/thread-bindings-session-runtime.d.ts",
       "default": "./dist/plugin-sdk/thread-bindings-session-runtime.js"
     },
-    "./plugin-sdk/text-runtime": {
-      "types": "./dist/plugin-sdk/text-runtime.d.ts",
-      "default": "./dist/plugin-sdk/text-runtime.js"
-    },
     "./plugin-sdk/text-chunking": {
       "types": "./dist/plugin-sdk/text-chunking.d.ts",
       "default": "./dist/plugin-sdk/text-chunking.js"
@@ -1273,10 +1269,6 @@
     "./plugin-sdk/provider-auth-result": {
       "types": "./dist/plugin-sdk/provider-auth-result.d.ts",
       "default": "./dist/plugin-sdk/provider-auth-result.js"
-    },
-    "./plugin-sdk/provider-auth-login": {
-      "types": "./dist/plugin-sdk/provider-auth-login.d.ts",
-      "default": "./dist/plugin-sdk/provider-auth-login.js"
     },
     "./plugin-sdk/provider-selection-runtime": {
       "types": "./dist/plugin-sdk/provider-selection-runtime.d.ts",
