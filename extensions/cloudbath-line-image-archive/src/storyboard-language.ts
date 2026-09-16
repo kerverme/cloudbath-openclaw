@@ -64,6 +64,27 @@ export function buildThaiStoryboardSummary(
 }
 
 /**
+ * The scene-header shape `buildThaiStoryboardSummary` always emits.
+ *
+ * Used to decide whether an outbound message IS the summary's operation. Kept
+ * next to the builder so the two cannot drift: if the template changes, this
+ * changes with it.
+ */
+const SUMMARY_SCENE_HEADER = /^ฉาก\s+\d+\s+·\s+\d+-\d+\s+วิ\s+·/mu;
+
+/**
+ * Whether this outbound text is the storyboard summary's own operation.
+ *
+ * A structured rebuild is only faithful for the text it describes. Offering it
+ * for any contaminated message in a conversation that happens to own a
+ * storyboard would answer "do cats nap?" with a six-scene shot list — a
+ * confident non-answer, which is worse than saying the reply failed.
+ */
+export function isStoryboardSummaryText(text: string): boolean {
+  return SUMMARY_SCENE_HEADER.test(text);
+}
+
+/**
  * Returns Thai text safe to show, repairing it when contaminated.
  *
  * Stripping is acceptable HERE and nowhere else on the outbound path: the

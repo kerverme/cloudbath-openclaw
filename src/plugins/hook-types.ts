@@ -283,6 +283,15 @@ export type PluginHookAgentContext = {
   chatId?: string;
   /** Sender identity for channel-originated runs when available. */
   senderId?: string;
+  /**
+   * Channel account that owns this run, for channel-originated runs.
+   *
+   * The account resolved at ingress from the inbound event — the same identity
+   * the outbound hooks receive — so a plugin can scope a read to this
+   * conversation's account. It grants nothing on its own: ownership checks still
+   * apply.
+   */
+  accountId?: string;
   trigger?: string;
   channelId?: string;
   /** Resolved effective context-token budget after model/config/agent caps. */

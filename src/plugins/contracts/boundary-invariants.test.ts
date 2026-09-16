@@ -30,12 +30,19 @@ const BUNDLED_TYPED_HOOK_REGISTRATION_FILES = [
 const BUNDLED_TYPED_HOOK_REGISTRATION_GUARDS = {
   "extensions/acpx/index.ts": ["reply_dispatch"],
   "extensions/active-memory/index.ts": ["before_prompt_build"],
+  // before_agent_finalize prepares the structured storyboard regeneration before
+  // the run's single authoritative reply decision; the two outbound sends then
+  // relay that already-decided text. Splitting them keeps the decision on one
+  // seam and the transports read-only.
   "extensions/cloudbath-line-image-archive/index.ts": [
     "after_tool_call",
+    "before_agent_finalize",
     "before_dispatch",
     "before_tool_call",
     "media_generation_completed",
     "message_received",
+    "message_sending",
+    "reply_payload_sending",
   ],
   "extensions/codex/index.ts": ["after_compaction", "inbound_claim", "session_end"],
   "extensions/diffs/src/plugin.ts": ["before_prompt_build"],

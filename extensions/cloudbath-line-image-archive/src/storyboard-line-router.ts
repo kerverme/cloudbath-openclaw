@@ -2223,6 +2223,7 @@ export class CloudbathStoryboardLineRouter {
    */
   async readOutboundStoryboardLanguage(
     context: StoryboardDispatchContext,
+    options: Readonly<{ ownerSenderId?: string }> = {},
   ): Promise<
     Readonly<{ summary: string | undefined; allowedTerms: readonly string[] }> | undefined
   > {
@@ -2230,9 +2231,12 @@ export class CloudbathStoryboardLineRouter {
       return undefined;
     }
     // An outbound send carries no inbound event, so the claim is built from the
-    // conversation itself; ownership is re-checked by the store read below.
+    // conversation plus the owner identity the CALLER already trusts. Without
+    // one the claim refuses, which is why a caller that cannot name the owner
+    // reads nothing: the store is scoped to (account, group, owner), so a claim
+    // is the only way to stay inside one conversation's storyboard.
     const claim = resolveStoryboardAccessClaim(
-      { content: "", senderId: "", senderIsOwner: true },
+      { content: "", senderId: options.ownerSenderId?.trim() ?? "", senderIsOwner: true },
       context,
     );
     if (!claim) {
