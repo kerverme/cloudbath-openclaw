@@ -16,6 +16,22 @@ export function resolveLineGroupLookupIds(groupId?: string | null): string[] {
   return [normalized, `group:${normalized}`, `room:${normalized}`];
 }
 
+/**
+ * Whether this conversation has a group identity at all.
+ *
+ * `resolveLineGroupConfigEntry` falls back to `groups["*"]`, which states what
+ * an operator wants for GROUPS. A direct message has no group or room, so a
+ * caller whose setting must not cross that boundary asks this first: group
+ * policy deciding a one-to-one conversation is a scope the operator never
+ * wrote. Callers that only run on group events do not need it.
+ */
+export function hasLineGroupIdentity(params: {
+  groupId?: string | null;
+  roomId?: string | null;
+}): boolean {
+  return Boolean(params.groupId?.trim() || params.roomId?.trim());
+}
+
 export function resolveLineGroupConfigEntry<T>(
   groups: Record<string, T | undefined> | undefined,
   params: { groupId?: string | null; roomId?: string | null },
