@@ -27,6 +27,7 @@ import {
   ssrfPolicyFromHttpBaseUrlAllowedOrigin,
   type SsrFPolicy,
 } from "../infra/net/ssrf.js";
+import { currentTurnLatencyLedger } from "../infra/turn-latency-ledger.js";
 import type { Model } from "../llm/types.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import { resolveDebugProxySettings } from "../proxy-capture/env.js";
@@ -860,6 +861,12 @@ export function buildGuardedModelFetch(
     };
     let result: Awaited<ReturnType<typeof fetchWithSsrFGuard>>;
     const fetchStartedAt = Date.now();
+    // One entry per provider request on the active turn's latency record, so
+    // "how many model calls did that turn make" stops being a guess.
+    const latencyCall = currentTurnLatencyLedger()?.modelCall({
+      provider: model.provider,
+      model: model.id,
+    });
     const useEnvProxy = !dispatcherPolicy && shouldUseEnvHttpProxyForUrl(url);
     emitModelTransportDebug(
       log,
@@ -881,6 +888,7 @@ export function buildGuardedModelFetch(
           : guardedFetchOptions,
       );
     } catch (error) {
+      latencyCall?.fail();
       log.warn(
         `[model-fetch] error provider=${model.provider} api=${model.api} model=${model.id} ` +
           `elapsedMs=${Date.now() - fetchStartedAt} ${summarizeError(error)}`,
@@ -889,6 +897,10 @@ export function buildGuardedModelFetch(
       throw error;
     }
     let response = result.response;
+    // Headers only. For a streamed completion the body has not started yet, so
+    // this is response-start, never first-token — the ledger keeps them apart.
+    latencyCall?.responseStarted();
+    latencyCall?.complete();
     emitModelTransportDebug(
       log,
       `[model-fetch] response provider=${model.provider} api=${model.api} model=${model.id} ` +
