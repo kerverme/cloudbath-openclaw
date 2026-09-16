@@ -4,6 +4,7 @@ import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import type { OpenClawPluginApi, PluginLogger } from "openclaw/plugin-sdk/plugin-entry";
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import type { PluginStateKeyedStore } from "openclaw/plugin-sdk/plugin-state-runtime";
+import { prepareAuthoritativeReplyRegeneration } from "openclaw/plugin-sdk/reply-runtime";
 import { extractSchemaFieldsWithCurrentModel } from "./src/analysis.js";
 import {
   createCharacterViewRouteHandler,
@@ -50,6 +51,7 @@ import type { PrevisProjectHead, PrevisVersion } from "./src/previs-types.js";
 import { CLOUDBATH_PREVIS_VIEW_ROUTE } from "./src/previs-url.js";
 import { resolveSchemaForAgent } from "./src/profiles.js";
 import { R2ArchiveClient } from "./src/r2.js";
+import { isStoryboardSummaryText } from "./src/storyboard-language.js";
 import type { CloudbathStoryboardLineRouter } from "./src/storyboard-line-router.js";
 import { StoryboardLlmPlanner } from "./src/storyboard-planner.js";
 import {
@@ -971,13 +973,39 @@ export default definePluginEntry({
             ...(outboundCtx.sessionKey ? { sessionKey: outboundCtx.sessionKey } : {}),
           },
         ),
+      isRebuildTarget: isStoryboardSummaryText,
       logger,
+    });
+    api.on("before_agent_finalize", async (event, ctx) => {
+      const sourceText = event.lastAssistantMessage;
+      if (!event.runId || !sourceText?.trim() || !isStoryboardSummaryText(sourceText)) {
+        return;
+      }
+      const structured =
+        await tryGetCloudbathWorkspacePolicyRuntime()?.storyboardLineRouter?.readOutboundStoryboardLanguage(
+          {
+            channelId: ctx.channel ?? ctx.channelId ?? "",
+            accountId: "",
+            conversationId: ctx.chatId ?? "",
+            ...(ctx.sessionKey ? { sessionKey: ctx.sessionKey } : {}),
+          },
+        );
+      if (structured?.summary) {
+        prepareAuthoritativeReplyRegeneration({
+          runId: event.runId,
+          sourceText,
+          regeneratedText: structured.summary,
+        });
+      }
     });
     api.on("message_sending", async (event, ctx) => {
       return await outboundLanguageRelay.messageSending(event, ctx);
     });
     api.on("reply_payload_sending", async (event, ctx) => {
-      return await outboundLanguageRelay.replyPayloadSending(event, ctx);
+      return await outboundLanguageRelay.replyPayloadSending(event, {
+        ...ctx,
+        runId: event.runId ?? ctx.runId,
+      });
     });
 
     api.on("before_tool_call", async (event, ctx) => {

@@ -1,3 +1,4 @@
+import { isAuthoritativeReplyText } from "openclaw/plugin-sdk/reply-runtime";
 /**
  * Applies the language guard to the two hooks LINE actually sends through.
  *
@@ -18,7 +19,7 @@ import {
   guardLineOutboundText,
   LINE_PRODUCT_TERMS,
   outboundReplacementText,
-  validateThaiText,
+  validateOutboundThai,
   type OutboundLanguageDecision,
 } from "./line-language.js";
 
@@ -27,6 +28,7 @@ export type OutboundRelayContext = Readonly<{
   accountId?: string;
   conversationId?: string;
   sessionKey?: string;
+  runId?: string;
 }>;
 
 type MessageSendingEvent = Readonly<{ content?: string; to?: string }>;
@@ -47,6 +49,13 @@ export type LineOutboundRelayDeps = Readonly<{
   ): Promise<
     Readonly<{ summary: string | undefined; allowedTerms: readonly string[] }> | undefined
   >;
+  /**
+   * Whether this outbound text is the structured summary's own operation, so a
+   * rebuild would be faithful. Owned by the caller that owns the template.
+   */
+  isRebuildTarget(text: string): boolean;
+  /** Test seam; production uses core's active authoritative-reply registry. */
+  isAuthoritative?: (text: string, runId?: string) => boolean;
   logger?: Readonly<{
     info?(event: string, fields?: Record<string, unknown>): void;
     warn(event: string, fields?: Record<string, unknown>): void;
@@ -74,8 +83,14 @@ export function createLineOutboundRelay(deps: LineOutboundRelayDeps): LineOutbou
     ctx: OutboundRelayContext,
     channel: string | undefined,
   ): Promise<string | undefined> => {
-    const value = text?.trim();
-    if (!value || (channel ?? ctx.channelId) !== "line") {
+    const sourceText = text;
+    const value = sourceText?.trim();
+    if (!sourceText || !value || (channel ?? ctx.channelId) !== "line") {
+      return undefined;
+    }
+    // Core has already selected these exact bytes for every user-visible
+    // surface. A delivery hook must not form a second language opinion.
+    if ((deps.isAuthoritative ?? isAuthoritativeReplyText)(sourceText, ctx.runId)) {
       return undefined;
     }
     // Allowed terms only ever PERMIT more text, so anything clean against the
@@ -83,14 +98,19 @@ export function createLineOutboundRelay(deps: LineOutboundRelayDeps): LineOutbou
     // product terms need no store read, so ordinary replies — including the
     // shipped Thai copy that names Storyboard, Model or draft — settle here and
     // this gate costs a read only when something actually looks wrong.
-    if (validateThaiText(value, { allowedTerms: LINE_PRODUCT_TERMS }).kind === "clean") {
+    if (validateOutboundThai(value, { allowedTerms: LINE_PRODUCT_TERMS }).kind === "clean") {
       return undefined;
     }
     const structured = await deps.resolve(ctx).catch(() => undefined);
+    // The rebuild is offered only when this message IS the summary's operation.
+    // A conversation owning a storyboard still has ordinary chat turns, and
+    // substituting a shot list into one of those would be a confident
+    // non-answer rather than a repair.
+    const rebuildable = structured?.summary !== undefined && deps.isRebuildTarget(value);
     const decision = guardLineOutboundText({
       text: value,
       ...(structured?.allowedTerms ? { allowedTerms: structured.allowedTerms } : {}),
-      ...(structured ? { rebuild: () => structured.summary } : {}),
+      ...(rebuildable ? { rebuild: () => structured?.summary } : {}),
     });
     report(decision, ctx);
     return outboundReplacementText(decision);
