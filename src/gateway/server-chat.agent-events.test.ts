@@ -4836,4 +4836,73 @@ describe("agent event handler", () => {
       }
     });
   });
+
+  describe("what the OpenClaw UI receives for a LINE-originated turn", () => {
+    /**
+     * The production reply, verbatim: Thai carrying a Kannada fragment, and
+     * "จดไว้" already mutated to "จัดไว้". The LINE outbound guard repaired
+     * this reply (the deploy log recorded outcome=rewritten for fragment ಮೈ),
+     * yet the owner saw it intact in the web UI. These cases show why: the UI
+     * is fed from the streaming broadcast, which happens during generation.
+     */
+    const CORRUPTED = 'เข้าใจครับ — "จัดไว้ อันนี้" ใช่ไಮೈ? 🐱';
+
+    function uiPayloadFor(text: string) {
+      const { broadcast, nodeSendToSession, nowSpy } = emitRun1AssistantText(
+        createHarness({ now: 1_000 }),
+        text,
+        "delta",
+      );
+      const chatCalls = chatBroadcastCalls(broadcast);
+      nowSpy?.mockRestore();
+      return {
+        chatCalls,
+        sessionCalls: sessionChatCalls(nodeSendToSession),
+        payload: chatCalls[0]?.[1] as {
+          state?: string;
+          deltaText?: string;
+          message?: { content?: Array<{ text?: string }> };
+        },
+      };
+    }
+
+    it("broadcasts the model's raw text to the UI, foreign script intact", () => {
+      const { payload } = uiPayloadFor(CORRUPTED);
+
+      // This is the leak: the exact bytes the guard later replaced.
+      expect(payload.deltaText).toBe(CORRUPTED);
+      expect(payload.message?.content?.[0]?.text).toBe(CORRUPTED);
+      expect(payload.deltaText).toContain("ಮೈ");
+    });
+
+    it("publishes that text as a streaming delta, not a delivered final", () => {
+      // A delta is emitted while the model generates. There is no delivered
+      // payload yet, so no outbound hook has run or could have run.
+      expect(uiPayloadFor(CORRUPTED).payload.state).toBe("delta");
+    });
+
+    it("reaches both UI transports before any delivery exists", () => {
+      const { chatCalls, sessionCalls } = uiPayloadFor(CORRUPTED);
+
+      // Control-UI broadcast and per-session fanout both carry it.
+      expect(chatCalls).toHaveLength(1);
+      expect(sessionCalls).toHaveLength(1);
+    });
+
+    it("carries a pure-Thai semantic mutation that no script check can catch", () => {
+      const { payload } = uiPayloadFor(CORRUPTED);
+
+      // "จดไว้" (note this down) became "จัดไว้" (arrange this). Every
+      // character is Thai, so script consistency is satisfied and the meaning
+      // is still wrong — this belongs to model evaluation, not the guard.
+      expect(payload.deltaText).toContain("จัดไว้");
+      expect(payload.deltaText).not.toContain("จดไว้");
+    });
+
+    it("treats clean Thai identically, so the path is not text-dependent", () => {
+      const clean = "เข้าใจครับ จะจดไว้ให้นะครับ";
+
+      expect(uiPayloadFor(clean).payload.deltaText).toBe(clean);
+    });
+  });
 });
