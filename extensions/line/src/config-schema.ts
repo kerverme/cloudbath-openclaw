@@ -78,6 +78,8 @@ const LineCommonConfigSchemaBase = z.object({
   dmPolicy: DmPolicySchema.optional().default("pairing"),
   groupPolicy: GroupPolicySchema.optional().default("allowlist"),
   responsePrefix: z.string().optional(),
+  replyLanguage: z.string().optional(),
+  replyLanguageAllowedTerms: z.array(z.string()).optional(),
   mediaMaxMb: z.number().optional(),
   webhookPath: z.string().optional(),
   threadBindings: ThreadBindingsSchema.optional(),
@@ -91,6 +93,8 @@ const LineGroupConfigSchema = z
     requireMention: z.boolean().optional(),
     systemPrompt: z.string().optional(),
     skills: z.array(z.string()).optional(),
+    replyLanguage: z.string().optional(),
+    replyLanguageAllowedTerms: z.array(z.string()).optional(),
   })
   .strict();
 
