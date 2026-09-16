@@ -240,10 +240,6 @@
       "types": "./dist/src/plugin-sdk/testing.d.ts",
       "default": "./src/testing.ts"
     },
-    "./text-runtime": {
-      "types": "./dist/src/plugin-sdk/text-runtime.d.ts",
-      "default": "./src/text-runtime.ts"
-    },
     "./video-generation": {
       "types": "./dist/src/plugin-sdk/video-generation.d.ts",
       "default": "./src/video-generation.ts"

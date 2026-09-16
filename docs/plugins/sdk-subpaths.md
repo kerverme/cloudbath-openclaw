@@ -43,9 +43,9 @@ Deprecated subpaths stay exported for older plugins, but new code should use the
 focused SDK subpaths below. The maintained list is
 `scripts/lib/plugin-sdk-deprecated-public-subpaths.json`; CI rejects bundled
 production imports from it. Broad barrels such as `plugin-sdk/compat`,
-`plugin-sdk/config-types`, `plugin-sdk/infra-runtime`, and
-`plugin-sdk/text-runtime` are compatibility only, and `plugin-sdk/zod` is a
-compatibility re-export: import `zod` directly from `zod`. The broad domain
+`plugin-sdk/config-types`, and `plugin-sdk/infra-runtime` are compatibility
+only, and `plugin-sdk/zod` is a compatibility re-export: import `zod` directly
+from `zod`. The broad domain
 barrels `plugin-sdk/agent-runtime`, `plugin-sdk/channel-lifecycle`,
 `plugin-sdk/channel-runtime`, `plugin-sdk/cli-runtime`,
 `plugin-sdk/conversation-runtime`, `plugin-sdk/hook-runtime`,
@@ -62,6 +62,16 @@ longer package exports: `agent-runtime-test-contracts`,
 `test-node-mocks`, and `testing`. The private bundled helper surfaces
 `ssrf-runtime-internal` and `codex-native-task-runtime` are also repo-local
 only.
+
+### Retired subpaths
+
+These deprecated subpaths have been removed from the package export map and
+stay retired. A plugin still importing one should move to the replacement:
+
+| Retired subpath                  | Replacement                                                                                                                      |
+| -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `plugin-sdk/text-runtime`        | `plugin-sdk/string-coerce-runtime`, `plugin-sdk/text-chunking`, `plugin-sdk/text-utility-runtime`, and `plugin-sdk/logging-core` |
+| `plugin-sdk/provider-auth-login` | Provider auth hooks; bundled provider login commands are owned by their provider plugin                                          |
 
 ### Reserved bundled plugin helper subpaths
 

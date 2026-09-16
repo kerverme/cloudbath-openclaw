@@ -10,6 +10,5 @@
   "infra-runtime",
   "media-runtime",
   "plugin-runtime",
-  "security-runtime",
-  "text-runtime"
+  "security-runtime"
 ]

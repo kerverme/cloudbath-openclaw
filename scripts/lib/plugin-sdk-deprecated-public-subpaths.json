@@ -45,7 +45,6 @@
   "outbound-send-deps",
   "plugin-test-api",
   "plugin-test-contracts",
-  "provider-auth-login",
   "provider-http-test-mocks",
   "provider-test-contracts",
   "provider-zai-endpoint",
@@ -60,7 +59,6 @@
   "test-fixtures",
   "test-node-mocks",
   "testing",
-  "text-runtime",
   "webhook-path",
   "zalouser",
   "zod"
