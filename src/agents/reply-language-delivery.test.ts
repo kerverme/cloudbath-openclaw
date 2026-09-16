@@ -52,6 +52,30 @@ describe("payloads are finalized before they reach a channel", () => {
     ).toBe(text);
   });
 
+  it("hands every later surface the regeneration prepared before the decision", () => {
+    // G: prepare happens while the run still owns the decision, so whichever
+    // surface finalizes FIRST already has the structured text — and the rest
+    // inherit it rather than repairing separately.
+    const regenerated = "ฉาก 1 · 0-3 วิ · ปูฉาก\nแมวเดินในสวนครับ";
+    prepareAuthoritativeReplyRegeneration({
+      runId: "run-1",
+      sourceText: CORRUPTED,
+      regeneratedText: regenerated,
+    });
+
+    // The Control UI finalizes first, as it does in production.
+    const uiFinal = resolveAuthoritativeReplyText({
+      runId: "run-1",
+      text: CORRUPTED,
+      policy: THAI,
+    });
+    const delivered = finalize([{ text: CORRUPTED }]);
+
+    expect(uiFinal).toMatchObject({ text: regenerated, repairKind: "regenerated" });
+    expect(delivered?.[0]?.text).toBe(uiFinal.text);
+    expect(delivered?.[0]?.text).not.toBe(FALLBACK);
+  });
+
   it("regenerates trusted structured text before authoritative finalization", () => {
     const regenerated = "ฉาก 1 · 0-3 วิ · ปูฉาก\nแมวเดินในสวนครับ";
     prepareAuthoritativeReplyRegeneration({

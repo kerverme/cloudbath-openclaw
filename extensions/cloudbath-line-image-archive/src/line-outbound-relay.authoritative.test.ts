@@ -88,6 +88,24 @@ describe("authoritative text passes through both LINE paths untouched", () => {
     expect(resolve).not.toHaveBeenCalled();
   });
 
+  it("passes a structured regeneration through both hooks untouched", async () => {
+    // H: once the run has regenerated the summary from the document, a delivery
+    // hook must not form a second opinion about it.
+    const regenerated = "ฉาก 1 · 0-3 วิ · ปูฉาก\nแมวเดินในสวนครับ";
+    const resolve = vi.fn(async () => undefined);
+    const relay = createLineOutboundRelay({
+      resolve,
+      isRebuildTarget: () => true,
+      isAuthoritative: (candidate) => candidate === regenerated,
+    });
+
+    await expect(relay.messageSending({ content: regenerated }, CTX)).resolves.toBeUndefined();
+    await expect(
+      relay.replyPayloadSending({ payload: { text: regenerated }, channel: "line" }, CTX),
+    ).resolves.toBeUndefined();
+    expect(resolve).not.toHaveBeenCalled();
+  });
+
   it("still guards text that never went through finalization", async () => {
     // The relay remains the last line for any path that bypasses the run, so a
     // contaminated string is still not delivered as-is.

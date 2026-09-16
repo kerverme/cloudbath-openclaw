@@ -54,6 +54,7 @@ import { R2ArchiveClient } from "./src/r2.js";
 import { isStoryboardSummaryText } from "./src/storyboard-language.js";
 import type { CloudbathStoryboardLineRouter } from "./src/storyboard-line-router.js";
 import { StoryboardLlmPlanner } from "./src/storyboard-planner.js";
+import { prepareStoryboardRegeneration } from "./src/storyboard-regeneration-prepare.js";
 import {
   createCloudbathStoryboardLineRouter,
   openStoryboardConversationStores,
@@ -976,27 +977,23 @@ export default definePluginEntry({
       isRebuildTarget: isStoryboardSummaryText,
       logger,
     });
+    // Prepares the trusted structured summary BEFORE anything finalizes the run,
+    // so the authoritative text can be regenerated rather than fall back. Every
+    // identity comes from the run's ingress context, never from the reply text.
     api.on("before_agent_finalize", async (event, ctx) => {
-      const sourceText = event.lastAssistantMessage;
-      if (!event.runId || !sourceText?.trim() || !isStoryboardSummaryText(sourceText)) {
-        return;
-      }
-      const structured =
-        await tryGetCloudbathWorkspacePolicyRuntime()?.storyboardLineRouter?.readOutboundStoryboardLanguage(
-          {
-            channelId: ctx.channel ?? ctx.channelId ?? "",
-            accountId: "",
-            conversationId: ctx.chatId ?? "",
-            ...(ctx.sessionKey ? { sessionKey: ctx.sessionKey } : {}),
-          },
-        );
-      if (structured?.summary) {
-        prepareAuthoritativeReplyRegeneration({
-          runId: event.runId,
-          sourceText,
-          regeneratedText: structured.summary,
-        });
-      }
+      await prepareStoryboardRegeneration({
+        event,
+        ctx,
+        deps: {
+          readStoryboardLanguage: async (context, options) =>
+            await tryGetCloudbathWorkspacePolicyRuntime()?.storyboardLineRouter?.readOutboundStoryboardLanguage(
+              context,
+              options,
+            ),
+          isRebuildTarget: isStoryboardSummaryText,
+          prepare: prepareAuthoritativeReplyRegeneration,
+        },
+      });
     });
     api.on("message_sending", async (event, ctx) => {
       return await outboundLanguageRelay.messageSending(event, ctx);

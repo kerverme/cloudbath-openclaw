@@ -107,9 +107,10 @@ export function buildAgentHookContextChannelFields(params: {
   currentChannelId?: string | null;
   messageTo?: string | null;
   senderId?: string | null;
+  agentAccountId?: string | null;
 }): Pick<
   PluginHookAgentContext,
-  "channel" | "channelId" | "chatId" | "messageProvider" | "senderId"
+  "channel" | "channelId" | "chatId" | "messageProvider" | "senderId" | "accountId"
 > {
   const channel = resolveAgentHookChannel(params);
   const channelId = resolveAgentHookChannelId(params);
@@ -119,6 +120,8 @@ export function buildAgentHookContextChannelFields(params: {
     channelId,
     chatId: channelId,
     senderId: normalizeOptionalString(params.senderId),
+    // Resolved at ingress from the inbound event, never from conversation text.
+    accountId: normalizeOptionalString(params.agentAccountId),
   };
 }
 
