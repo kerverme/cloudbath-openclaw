@@ -290,10 +290,10 @@ describe("opt-in extension package boundaries", () => {
     expect(packageJson.exports?.["./infra-runtime"]?.types).toBe(
       "./dist/src/plugin-sdk/infra-runtime.d.ts",
     );
-    expect(packageJson.exports?.["./text-runtime"]?.types).toBe(
-      "./dist/src/plugin-sdk/text-runtime.d.ts",
-    );
     expect(packageJson.exports?.["./zod"]?.types).toBe("./dist/src/plugin-sdk/zod.d.ts");
+    // Retired subpath: the facade and its export are gone, so the package must
+    // not resurrect a hand-written bridge for it.
+    expect(packageJson.exports?.["./text-runtime"]).toBeUndefined();
     expect(fs.existsSync(resolve(REPO_ROOT, "packages/plugin-sdk/types/plugin-entry.d.ts"))).toBe(
       false,
     );
