@@ -16,16 +16,20 @@ import {
   resolveUserTimezone,
   type ResolvedTimeFormat,
 } from "./date-time.js";
+import {
+  applyRuntimeDisclosureScope,
+  type RuntimeDisclosureScope,
+} from "./runtime-prompt-disclosure.js";
 
 type RuntimeInfoInput = {
   agentId?: string;
   sessionKey?: string;
   sessionId?: string;
-  host: string;
-  os: string;
-  arch: string;
-  node: string;
-  model: string;
+  host?: string;
+  os?: string;
+  arch?: string;
+  node?: string;
+  model?: string;
   defaultModel?: string;
   shell?: string;
   channel?: string;
@@ -50,6 +54,12 @@ export function buildSystemPromptParams(params: {
   runtime: Omit<RuntimeInfoInput, "agentId">;
   workspaceDir?: string;
   cwd?: string;
+  /**
+   * How much deployment detail this conversation may be told. Defaults to the
+   * restricted set, so a caller that has not thought about it cannot leak the
+   * host into a group prompt by omission.
+   */
+  disclosureScope?: RuntimeDisclosureScope;
 }): SystemPromptRuntimeParams {
   const repoRoot = resolveRepoRoot({
     config: params.config,
@@ -60,11 +70,14 @@ export function buildSystemPromptParams(params: {
   const userTimeFormat = resolveUserTimeFormat(params.config?.agents?.defaults?.timeFormat);
   const userTime = formatUserTime(new Date(), userTimezone, userTimeFormat);
   return {
-    runtimeInfo: {
-      agentId: params.agentId,
-      ...params.runtime,
-      repoRoot,
-    },
+    runtimeInfo: applyRuntimeDisclosureScope(
+      {
+        agentId: params.agentId,
+        ...params.runtime,
+        repoRoot,
+      },
+      params.disclosureScope ?? "restricted",
+    ),
     userTimezone,
     userTime,
     userTimeFormat,

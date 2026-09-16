@@ -215,6 +215,7 @@ import {
   logAgentRuntimeToolDiagnostics,
   normalizeAgentRuntimeTools,
 } from "../../runtime-plan/tools.js";
+import { resolveRuntimeDisclosureScope } from "../../runtime-prompt-disclosure.js";
 import type { AgentMessage } from "../../runtime/index.js";
 import { resolveSandboxContext } from "../../sandbox.js";
 import { resolveSandboxRuntimeStatus } from "../../sandbox/runtime-status.js";
@@ -2270,11 +2271,20 @@ export async function runEmbeddedAttempt(
         agentId: sessionAgentId,
       }),
     });
+    // Host, kernel, Node version, shell and repo root are named in the prompt's
+    // Runtime line. A group can read them straight out of its own context, so
+    // they are withheld unless this is the owner's private chat. The runtime
+    // itself is untouched — tools keep the real values.
+    const runtimeDisclosureScope = resolveRuntimeDisclosureScope({
+      chatType: params.chatType,
+      senderIsOwner: params.senderIsOwner,
+    });
     const { runtimeInfo, userTimezone, userTime, userTimeFormat } = buildSystemPromptParams({
       config: params.config,
       agentId: sessionAgentId,
       workspaceDir: effectiveWorkspace,
       cwd: effectiveCwd,
+      disclosureScope: runtimeDisclosureScope,
       runtime: {
         sessionKey: params.sessionKey,
         sessionId: params.sessionId,

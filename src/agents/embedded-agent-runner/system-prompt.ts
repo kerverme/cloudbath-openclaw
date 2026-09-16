@@ -61,11 +61,14 @@ export function buildEmbeddedSystemPrompt(params: {
     agentId?: string;
     sessionKey?: string;
     sessionId?: string;
-    host: string;
-    os: string;
-    arch: string;
-    node: string;
-    model: string;
+    // Optional: a restricted conversation has these withheld from the prompt
+    // by `applyRuntimeDisclosureScope`, so every consumer must render without
+    // them rather than assume a deployment fact is always present.
+    host?: string;
+    os?: string;
+    arch?: string;
+    node?: string;
+    model?: string;
     provider?: string;
     capabilities?: string[];
     channel?: string;

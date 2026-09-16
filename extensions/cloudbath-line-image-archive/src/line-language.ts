@@ -342,3 +342,56 @@ export function guardLineOutboundText(params: OutboundLanguageParams): OutboundL
 export function outboundReplacementText(decision: OutboundLanguageDecision): string | undefined {
   return decision.kind === "pass" || decision.kind === "skipped_exact" ? undefined : decision.text;
 }
+
+/**
+ * Names the Unicode scripts a set of fragments belongs to, with counts.
+ *
+ * Diagnostics need to know WHICH script leaked and how often, never the text:
+ * a contaminated reply can carry hostnames, paths or user content, and logging
+ * the fragments verbatim republishes exactly what the guard just withheld.
+ */
+export function summarizeFragmentScripts(
+  fragments: readonly string[],
+): Readonly<Record<string, number>> {
+  const counts: Record<string, number> = {};
+  for (const fragment of fragments) {
+    const scripts = new Set<string>();
+    // for..of over a string, matching `scriptRuns` above: code-point iteration
+    // is what script classification wants, and spreading would trip the
+    // emoji-splitting lint for no gain.
+    for (const character of fragment) {
+      scripts.add(namedScriptOf(character));
+    }
+    for (const script of scripts) {
+      counts[script] = (counts[script] ?? 0) + 1;
+    }
+  }
+  return Object.freeze(counts);
+}
+
+/** Coarse script name for one character, for diagnostics only. */
+function namedScriptOf(character: string): string {
+  for (const [name, pattern] of NAMED_SCRIPTS) {
+    if (pattern.test(character)) {
+      return name;
+    }
+  }
+  return scriptOf(character) === "common" ? "common" : "other";
+}
+
+/**
+ * Scripts worth naming in a log line. Ordered, so the first match wins and a
+ * character is counted once.
+ */
+const NAMED_SCRIPTS: readonly (readonly [string, RegExp])[] = Object.freeze([
+  ["thai", /\p{Script=Thai}/u],
+  ["latin", /\p{Script=Latin}/u],
+  ["cyrillic", /\p{Script=Cyrillic}/u],
+  ["kannada", /\p{Script=Kannada}/u],
+  ["devanagari", /\p{Script=Devanagari}/u],
+  ["han", /\p{Script=Han}/u],
+  ["hangul", /\p{Script=Hangul}/u],
+  ["hiragana", /\p{Script=Hiragana}/u],
+  ["katakana", /\p{Script=Katakana}/u],
+  ["arabic", /\p{Script=Arabic}/u],
+] as const);

@@ -164,6 +164,10 @@ export function buildCliAgentSystemPrompt(params: {
     agentId: params.agentId,
     workspaceDir: runtimeWorkspaceDir,
     cwd: runtimeWorkspaceDir,
+    // The CLI runs on the operator's own machine for the operator, so the
+    // prompt keeps host, OS and repo root. Chat surfaces resolve their own
+    // scope per conversation and default to withholding them.
+    disclosureScope: "operator",
     runtime: {
       sessionKey: params.sessionKey,
       sessionId: params.sessionId,
