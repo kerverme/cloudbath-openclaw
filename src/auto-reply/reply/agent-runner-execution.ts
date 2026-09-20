@@ -63,6 +63,7 @@ import {
   resolvePersistedOverrideModelRef,
 } from "../../agents/model-selection.js";
 import { resolveOpenAIRuntimeProvider } from "../../agents/openai-routing.js";
+import { resolveChannelReplyPresentation } from "../../agents/reply-presentation.js";
 import {
   AGENT_RUN_RESTART_ABORT_STOP_REASON,
   createAgentRunRestartAbortError,
@@ -1546,6 +1547,28 @@ async function runAgentTurnWithFallbackInternal(
       params.sessionCtx.Provider,
   );
   let lifecycleGeneration = captureAgentRunLifecycleGeneration(runId);
+  // Resolved once per turn, at ingress, from the channel that owns the
+  // conversation. Carried on the run context so the streaming path and the
+  // delivery path validate against the SAME expectation instead of each
+  // inferring one from whatever text they happen to hold.
+  const replyPresentation = resolveChannelReplyPresentation({
+    cfg: runtimeConfig,
+    channel:
+      params.followupRun.run.messageProvider ??
+      params.sessionCtx.Surface ??
+      params.sessionCtx.Provider,
+    accountId:
+      params.followupRun.originatingAccountId ?? params.followupRun.run.agentAccountId ?? null,
+    groupId: params.followupRun.run.groupId ?? null,
+    groupChannel: params.followupRun.run.groupChannel ?? null,
+    groupSpace: params.followupRun.run.groupSpace ?? null,
+    senderId: params.followupRun.run.senderId ?? null,
+    requestText:
+      params.sessionCtx.BodyForCommands ??
+      params.sessionCtx.CommandBody ??
+      params.sessionCtx.Body ??
+      null,
+  });
   if (params.sessionKey) {
     registerAgentRunContext(runId, {
       sessionKey: params.sessionKey,
@@ -1555,6 +1578,7 @@ async function runAgentTurnWithFallbackInternal(
       verboseLevel: params.resolvedVerboseLevel,
       isHeartbeat: params.isHeartbeat,
       isControlUiVisible: shouldSurfaceToControlUi,
+      ...(replyPresentation ? { replyPresentation } : {}),
     });
   }
   if (isDiagnosticsEnabled(runtimeConfig)) {
