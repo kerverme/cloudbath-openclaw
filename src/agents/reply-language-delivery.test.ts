@@ -11,6 +11,7 @@ import type { ReplyPayload } from "../auto-reply/reply-payload.js";
 import { registerAgentRunContext, resetAgentRunContextForTest } from "../infra/agent-events.js";
 import type { TurnPresentationPolicy } from "../infra/reply-language-policy.js";
 import {
+  isAuthoritativeReplyText,
   prepareAuthoritativeReplyRegeneration,
   resetAuthoritativeReplyTextForTest,
   resolveAuthoritativeReplyText,
@@ -50,6 +51,31 @@ describe("payloads are finalized before they reach a channel", () => {
     expect(
       finalizeDeliveryPayloadsLanguage({ runId: "run-multi", payloads: [{ text }] })?.[0]?.text,
     ).toBe(text);
+  });
+
+  it("marks a turn decided when the policy carries only a multilingual override", () => {
+    // An unconfigured conversation asserts no expected language, so nothing here
+    // is validated. Finalizing anyway is the point: it records the turn's text
+    // as authoritative, which is what stops a delivery hook forming its own
+    // language opinion about a translation the user asked for.
+    const japanese = "ありがとう (Arigatō)";
+    registerAgentRunContext("run-override-only", {
+      replyPresentation: {
+        multilingualOverride: {
+          allowed: true,
+          language: "ja",
+          reason: "request_asks_to_translate",
+        },
+      },
+    });
+
+    expect(
+      finalizeDeliveryPayloadsLanguage({
+        runId: "run-override-only",
+        payloads: [{ text: japanese }],
+      })?.[0]?.text,
+    ).toBe(japanese);
+    expect(isAuthoritativeReplyText(japanese, "run-override-only")).toBe(true);
   });
 
   it("hands every later surface the regeneration prepared before the decision", () => {
