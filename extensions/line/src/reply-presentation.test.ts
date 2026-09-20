@@ -102,6 +102,13 @@ describe("a multilingual turn is declared by the request, never by the reply", (
       "เขียนภาษาญี่ปุ่นให้หน่อย",
       "translate this into Russian",
       "please reply in English",
+      // The four forms production actually received. The last names a language
+      // without the word ภาษา, which went unrecognised and cost the user a
+      // Japanese reply.
+      "แปลเป็นภาษาญี่ปุ่นว่า ขอบคุณ",
+      "ตอบเป็นภาษาอังกฤษว่า วันนี้อากาศดี",
+      "ตอบเป็นภาษาญี่ปุ่นว่า ขอบคุณ",
+      "ตอบเป็น ญี่ปุ่น ว่า ขอบคุณ",
     ]) {
       const policy = resolve(cfg, { requestText: request });
 
@@ -126,6 +133,8 @@ describe("a multilingual turn is declared by the request, never by the reply", (
       "ส่งรูปล่าสุดมาให้ดูหน่อย",
       "what happened to the last render?",
       "ช่วยดูแปลนบ้านหลังนี้ให้หน่อยครับ",
+      // แปลน is a floor plan, not a translation request.
+      "ช่วยดูแปลนนี้หน่อย",
     ]) {
       expect(resolve(cfg, { requestText: request })).not.toHaveProperty("multilingualOverride");
     }
@@ -135,6 +144,26 @@ describe("a multilingual turn is declared by the request, never by the reply", (
     // A reply that drifted into Russian is the bug; it must not excuse itself.
     expect(resolveMultilingualOverride("Привет, я могу помочь вам с этим.")).toBeUndefined();
     expect(resolve(cfg, { requestText: null })).not.toHaveProperty("multilingualOverride");
+  });
+});
+
+describe("a declared multilingual turn survives an unconfigured conversation", () => {
+  // Production ran with no channels.line.replyLanguage. The override was
+  // discarded with the rest of the policy, so nothing marked the turn decided
+  // and the LINE outbound guard applied its own Thai expectation to the
+  // Japanese translation the user had just asked for.
+  const unconfigured = { channels: { line: {} } };
+
+  it("still carries the override when no reply language is configured", () => {
+    const policy = resolve(unconfigured, { requestText: "แปลเป็นภาษาญี่ปุ่นว่า ขอบคุณ" });
+
+    expect(policy).toMatchObject({ multilingualOverride: { allowed: true, language: "ja" } });
+    // Nothing to validate against, so the turn asserts no expectation.
+    expect(policy).not.toHaveProperty("expectedReplyLanguage");
+  });
+
+  it("asserts nothing for an ordinary turn in the same conversation", () => {
+    expect(resolve(unconfigured, { requestText: "ช่วยสรุปให้หน่อย" })).toBeUndefined();
   });
 });
 

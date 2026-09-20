@@ -45,8 +45,14 @@ const DEFAULT_FALLBACK_TEXT = "Sorry — that reply came out malformed. Please a
 const MULTILINGUAL_REQUEST_PATTERNS: ReadonlyArray<readonly [RegExp, string]> = Object.freeze([
   [/แปล(?:ให้|เป็น|คำ|ประโยค|ข้อความ|อันนี้|นี่|ว่า|จาก|$)/u, "request_asks_to_translate"],
   [/ทับศัพท์/u, "request_asks_to_transliterate"],
-  // `เป็น` is optional: "เขียนภาษาญี่ปุ่นให้หน่อย" names a language without it.
-  [/(?:ตอบ|เขียน|พูด|อ่าน|แต่ง)\s*(?:กลับ\s*)?(?:เป็น)?ภาษา/u, "request_names_a_reply_language"],
+  // `เป็น` is optional: "เขียนภาษาญี่ปุ่นให้หน่อย" names a language without it,
+  // and so is `ภาษา` itself: "ตอบเป็น ญี่ปุ่น ว่า ..." names one on its own. The
+  // bare form is an explicit alternation of the languages this product's users
+  // ask for, not an open-ended noun, so it stays as narrow as the rest.
+  [
+    /(?:ตอบ|เขียน|พูด|อ่าน|แต่ง)\s*(?:กลับ\s*)?(?:เป็น)?\s*(?:ภาษา|อังกฤษ|ญี่ปุ่น|รัสเซีย|จีน|เกาหลี|ไทย)/u,
+    "request_names_a_reply_language",
+  ],
   [/\btransliterate\b/iu, "request_asks_to_transliterate"],
   [/\btranslat(?:e|ion)\b/iu, "request_asks_to_translate"],
   [
@@ -144,8 +150,15 @@ export function resolveLineReplyPresentation(
     groupId: params.groupId,
     roomId: params.groupSpace,
   });
+  const multilingualOverride = resolveMultilingualOverride(params.requestText);
   if (!resolution.language) {
-    return undefined;
+    // A declared multilingual turn is a property of the REQUEST, so it survives
+    // a conversation that configures no expected language. Dropping it here left
+    // such a turn owned by nobody, and the outbound guard then applied its own
+    // Thai expectation to the translation the user had just asked for. Core
+    // validates nothing without an expected language; carrying the override is
+    // what marks the turn decided so later surfaces do not re-judge it.
+    return multilingualOverride ? { multilingualOverride } : undefined;
   }
   const allowedTerms = resolveAllowedTerms(
     params.cfg,
@@ -153,7 +166,6 @@ export function resolveLineReplyPresentation(
     params.groupId,
     params.groupSpace,
   );
-  const multilingualOverride = resolveMultilingualOverride(params.requestText);
   return {
     expectedReplyLanguage: resolution.language,
     expectedReplyLanguageSource: resolution.source,
