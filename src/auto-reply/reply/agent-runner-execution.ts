@@ -87,6 +87,7 @@ import {
   captureAgentRunLifecycleGeneration,
   clearAgentRunContext,
   emitAgentEvent,
+  claimAgentRunDeliveryWindow,
   registerAgentRunContext,
 } from "../../infra/agent-events.js";
 import { isDiagnosticsEnabled } from "../../infra/diagnostic-events.js";
@@ -1580,6 +1581,10 @@ async function runAgentTurnWithFallbackInternal(
       isControlUiVisible: shouldSurfaceToControlUi,
       ...(replyPresentation ? { replyPresentation } : {}),
     });
+    // Channel delivery hooks run after this run's `agent_end`, and the Control
+    // UI's terminal projection clears the run there. Hold the window open so the
+    // authoritative reply survives until the reply has actually been delivered.
+    claimAgentRunDeliveryWindow(runId, lifecycleGeneration);
   }
   if (isDiagnosticsEnabled(runtimeConfig)) {
     logSessionTurnCreated({

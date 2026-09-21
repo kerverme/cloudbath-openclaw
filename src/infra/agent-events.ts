@@ -387,6 +387,52 @@ export function clearAgentRunContext(runId: string, lifecycleGeneration?: string
   clearAuthoritativeReplyText(runId);
 }
 
+/**
+ * Owner token for the window between a run finishing and its reply reaching the
+ * channel. Channel delivery hooks run AFTER `agent_end`, so the Control UI's
+ * terminal projection would otherwise clear the run's authoritative reply text
+ * while the channel still had to consume it — the UI showed the right reply and
+ * LINE received a locally repaired one. A single fixed token is enough: the
+ * window is per run, and the owners record is already keyed by run and
+ * lifecycle generation.
+ */
+const DELIVERY_WINDOW_OWNER_TOKEN = "agent-run-delivery-window";
+
+/**
+ * Keeps this run's context and authoritative reply alive until delivery ends.
+ *
+ * A clear requested while the window is open is remembered, not applied, so the
+ * release below is what actually frees the run — deterministically, with no
+ * timer and no dependence on which surface finishes first.
+ */
+export function claimAgentRunDeliveryWindow(runId: string, lifecycleGeneration?: string) {
+  if (!runId) {
+    return;
+  }
+  const state = getAgentEventState();
+  const generation =
+    lifecycleGeneration ??
+    state.runContextById.get(runId)?.lifecycleGeneration ??
+    state.lifecycleGeneration;
+  const ownersById = getAgentRunContextOwners(state);
+  const existing = ownersById.get(runId);
+  if (existing && existing.lifecycleGeneration === generation) {
+    existing.ownerTokens.add(DELIVERY_WINDOW_OWNER_TOKEN);
+    return;
+  }
+  ownersById.set(runId, {
+    lifecycleGeneration: generation,
+    ownerTokens: new Set([DELIVERY_WINDOW_OWNER_TOKEN]),
+    preserveAfterRelease: false,
+    clearRequested: false,
+  });
+}
+
+/** Closes the delivery window, releasing the run once no other owner remains. */
+export function releaseAgentRunDeliveryWindow(runId: string) {
+  releaseAgentRunContext(runId, DELIVERY_WINDOW_OWNER_TOKEN);
+}
+
 /** Releases one tracked owner and clears its context after the final owner exits. */
 export function releaseAgentRunContext(runId: string, ownerToken: string | undefined) {
   if (!runId || !ownerToken) {
