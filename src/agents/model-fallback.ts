@@ -698,18 +698,22 @@ function appendFailedCandidateAttempt(params: {
   });
 }
 
-function findLiveSessionModelSwitchRedirectIndex(params: {
+/**
+ * Reports whether the live-switch target is still reachable in this chain.
+ *
+ * A reachable target is a real switch the outer retry owner can apply, not a
+ * stale pointer at a candidate this chain already burned; see the call site for
+ * why a reachable target must leave the chain instead of being redirected into.
+ */
+function hasReachableLiveSessionModelSwitchTarget(params: {
   error: LiveSessionModelSwitchError;
   candidates: ModelCandidate[];
   currentIndex: number;
-}): number | null {
+}): boolean {
   const targetKey = modelKey(params.error.provider, params.error.model);
-  for (const [offset, candidate] of params.candidates.slice(params.currentIndex + 1).entries()) {
-    if (modelKey(candidate.provider, candidate.model) === targetKey) {
-      return params.currentIndex + 1 + offset;
-    }
-  }
-  return null;
+  return params.candidates
+    .slice(params.currentIndex + 1)
+    .some((candidate) => modelKey(candidate.provider, candidate.model) === targetKey);
 }
 
 function hasDifferentLiveSessionRuntimeSelection(params: {
@@ -1863,33 +1867,28 @@ async function runWithModelFallbackInternal<T>(
           lane: params.lane,
         }) ?? err;
 
-      // LiveSessionModelSwitchError during fallback may point at a later
-      // candidate that is already the active live-session selection.  Jump
-      // there directly.  Stale same/earlier targets remain a known failover
-      // so the outer runner cannot loop on the conflicting model, but they
-      // are not provider overloads.
+      // A LiveSessionModelSwitchError is the session's new selection arriving
+      // mid-chain, not a provider overload.
       if (err instanceof LiveSessionModelSwitchError) {
-        // Runtime selection is part of the live switch transaction. The outer
-        // owner must apply it before any retry; redirecting here would pair the
-        // new model with the stale harness runtime captured by the caller.
+        // Model, auth profile and harness runtime are one live-switch
+        // transaction, and only the outer retry owner applies it
+        // (applyLiveModelSwitchToRun). Running the target here as a fallback
+        // candidate would win the turn while leaving the run's requested model
+        // pinned to the model the user just switched away from — the source the
+        // fallback notice calls "selected", so every later turn then reports a
+        // fallback off a model the session no longer selects.
         if (
           hasDifferentLiveSessionRuntimeSelection({
             error: err,
             currentAgentHarnessRuntimeOverride: candidateHarnessAuth.agentHarnessRuntimeOverride,
-          })
+          }) ||
+          hasReachableLiveSessionModelSwitchTarget({ error: err, candidates, currentIndex: i })
         ) {
           throw err;
         }
-        const liveSwitchTargetIndex = findLiveSessionModelSwitchRedirectIndex({
-          error: err,
-          candidates,
-          currentIndex: i,
-        });
-        if (liveSwitchTargetIndex !== null) {
-          i = liveSwitchTargetIndex - 1;
-          continue;
-        }
 
+        // A target this chain already burned is stale, not a live switch: it
+        // stays a known failover so the outer owner cannot loop on it (#58496).
         const switchMsg = err.message;
         const switchNormalized = new FailoverError(switchMsg, {
           reason: "unknown",
