@@ -1,3 +1,4 @@
+import { resolveGlobalSingleton } from "../shared/global-singleton.js";
 /**
  * The one authoritative final text for a turn.
  *
@@ -18,7 +19,7 @@
  * Nothing here invents a claim. The fallback says the reply failed; it never
  * says anything was saved, sent, completed or updated.
  */
-import { resolveGlobalSingleton } from "../shared/global-singleton.js";
+import { traceReplyDelivery } from "./reply-delivery-trace.js";
 import {
   isTechnicalToken,
   validateReplyLanguage,
@@ -246,6 +247,19 @@ export function resolveAuthoritativeReplyText(params: {
     prepared?.sourceText === params.text ? () => prepared.regeneratedText : params.regenerate;
   const finalized = finalizeReplyText({ ...params, ...(regenerate ? { regenerate } : {}) });
   finalizedByRun().set(runId, finalized);
+  traceReplyDelivery("authoritative_finalized", {
+    runId,
+    policyPresent: Boolean(params.policy),
+    ...(params.policy?.multilingualOverride
+      ? {
+          multilingualAllowed: params.policy.multilingualOverride.allowed,
+          ...(params.policy.multilingualOverride.language
+            ? { multilingualLanguage: params.policy.multilingualOverride.language }
+            : {}),
+        }
+      : {}),
+    lifecyclePhase: finalized.outcome,
+  });
   return finalized;
 }
 
@@ -258,6 +272,10 @@ export function isAuthoritativeReplyText(text: string, runId?: string): boolean 
 }
 
 export function clearAuthoritativeReplyText(runId: string): void {
+  traceReplyDelivery("authoritative_cleared", {
+    runId,
+    authoritativeFound: finalizedByRun().has(runId),
+  });
   finalizedByRun().delete(runId);
   preparedByRun().delete(runId);
 }

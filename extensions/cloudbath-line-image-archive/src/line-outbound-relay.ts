@@ -36,6 +36,7 @@ type ReplyPayloadSendingEvent = Readonly<{
   payload?: ({ text?: string } & Record<string, unknown>) | undefined;
   channel?: string;
   sessionKey?: string;
+  runId?: string;
 }>;
 
 export type LineOutboundRelayDeps = Readonly<{
@@ -82,6 +83,8 @@ export function createLineOutboundRelay(deps: LineOutboundRelayDeps): LineOutbou
     text: string | undefined,
     ctx: OutboundRelayContext,
     channel: string | undefined,
+    hook: "reply_payload_sending" | "message_sending",
+    eventRunId: string | undefined,
   ): Promise<string | undefined> => {
     const sourceText = text;
     const value = sourceText?.trim();
@@ -90,7 +93,23 @@ export function createLineOutboundRelay(deps: LineOutboundRelayDeps): LineOutbou
     }
     // Core has already selected these exact bytes for every user-visible
     // surface. A delivery hook must not form a second language opinion.
-    if ((deps.isAuthoritative ?? isAuthoritativeReplyText)(sourceText, ctx.runId)) {
+    const authoritativeFound = (deps.isAuthoritative ?? isAuthoritativeReplyText)(
+      sourceText,
+      ctx.runId,
+    );
+    // Content-free: which hook ran, under which run identity, and what it saw.
+    // A turn that reaches the guard with authoritativeFound=false is the failure
+    // being traced, and the two run ids show whether they disagreed.
+    deps.logger?.info?.("line_outbound_authoritative_checked", {
+      hook,
+      eventRunId,
+      ctxRunId: ctx.runId,
+      authoritativeFound,
+      conversationId: ctx.conversationId,
+      sessionKey: ctx.sessionKey,
+      channelId: channel ?? ctx.channelId,
+    });
+    if (authoritativeFound) {
       return undefined;
     }
     // Allowed terms only ever PERMIT more text, so anything clean against the
@@ -130,11 +149,17 @@ export function createLineOutboundRelay(deps: LineOutboundRelayDeps): LineOutbou
 
   return {
     messageSending: async (event, ctx) => {
-      const replacement = await decide(event.content, ctx, undefined);
+      const replacement = await decide(event.content, ctx, undefined, "message_sending", undefined);
       return replacement ? { content: replacement } : undefined;
     },
     replyPayloadSending: async (event, ctx) => {
-      const replacement = await decide(event.payload?.text, ctx, event.channel);
+      const replacement = await decide(
+        event.payload?.text,
+        ctx,
+        event.channel,
+        "reply_payload_sending",
+        event.runId,
+      );
       return replacement ? { payload: { ...event.payload, text: replacement } } : undefined;
     },
   };

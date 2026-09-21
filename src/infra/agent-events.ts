@@ -1,10 +1,11 @@
-// Stores and broadcasts agent lifecycle and streaming events.
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import type { VerboseLevel } from "../auto-reply/thinking.js";
 import { resolveGlobalSingleton } from "../shared/global-singleton.js";
 import { notifyListeners, registerListener } from "../shared/listeners.js";
 import { createAbortError } from "./abort-signal.js";
+// Stores and broadcasts agent lifecycle and streaming events.
+import { traceReplyDelivery } from "./reply-delivery-trace.js";
 import type { TurnPresentationPolicy } from "./reply-language-policy.js";
 import {
   clearAuthoritativeReplyText,
@@ -374,6 +375,13 @@ export function clearAgentRunContext(runId: string, lifecycleGeneration?: string
     return;
   }
   const owners = getAgentRunContextOwners(state).get(runId);
+  traceReplyDelivery("run_context_clear_requested", {
+    runId,
+    sessionKey: existing?.sessionKey,
+    deliveryWindowClaimed: owners?.ownerTokens.has(DELIVERY_WINDOW_OWNER_TOKEN) ?? false,
+    clearRequested: (owners?.ownerTokens.size ?? 0) > 0,
+    ...(lifecycleGeneration ? { lifecyclePhase: lifecycleGeneration } : {}),
+  });
   if (owners?.ownerTokens.size) {
     if (!lifecycleGeneration || owners.lifecycleGeneration === lifecycleGeneration) {
       owners.clearRequested = true;
@@ -416,6 +424,12 @@ export function claimAgentRunDeliveryWindow(runId: string, lifecycleGeneration?:
     state.lifecycleGeneration;
   const ownersById = getAgentRunContextOwners(state);
   const existing = ownersById.get(runId);
+  traceReplyDelivery("delivery_window_claimed", {
+    runId,
+    sessionKey: state.runContextById.get(runId)?.sessionKey,
+    lifecyclePhase: generation,
+    deliveryWindowClaimed: true,
+  });
   if (existing && existing.lifecycleGeneration === generation) {
     existing.ownerTokens.add(DELIVERY_WINDOW_OWNER_TOKEN);
     return;
@@ -430,6 +444,12 @@ export function claimAgentRunDeliveryWindow(runId: string, lifecycleGeneration?:
 
 /** Closes the delivery window, releasing the run once no other owner remains. */
 export function releaseAgentRunDeliveryWindow(runId: string) {
+  const owners = getAgentRunContextOwners().get(runId);
+  traceReplyDelivery("delivery_window_released", {
+    runId,
+    deliveryWindowClaimed: owners?.ownerTokens.has(DELIVERY_WINDOW_OWNER_TOKEN) ?? false,
+    clearRequested: owners?.clearRequested ?? false,
+  });
   releaseAgentRunContext(runId, DELIVERY_WINDOW_OWNER_TOKEN);
 }
 
