@@ -1733,6 +1733,29 @@ async function dispatchReplyFromConfigInner(
     ...(sessionKey ? { sessionKey } : {}),
   });
   turnLatency.mark("inbound.received");
+  let turnLatencyOutcome: DispatchProcessedOutcome | undefined;
+  let turnLatencyAwaitingDelivery = false;
+  let turnLatencyEmitted = false;
+  /**
+   * Emitted for every recording turn, not only a slow one: a baseline of
+   * ordinary turns is what makes a slow one legible.
+   */
+  const emitTurnLatencyRecord = () => {
+    if (turnLatencyEmitted) {
+      return;
+    }
+    turnLatencyEmitted = true;
+    const latencyRecord = turnLatency.finish({
+      outcome: turnLatencyOutcome ?? "unknown",
+      ...(params.replyOptions?.runId ? { runId: params.replyOptions.runId } : {}),
+    });
+    if (latencyRecord) {
+      turnLatencyLog.info(
+        formatTurnLatencyRecord(latencyRecord),
+        buildTurnLatencyLogRecord(latencyRecord),
+      );
+    }
+  };
   const traceReplyPhase = <T>(name: string, run: () => Promise<T> | T): Promise<T> =>
     replyHotPathTiming.measure(name, () =>
       turnLatency.phase(TURN_LATENCY_PHASE_NAMES[name] ?? name, () =>
@@ -1761,17 +1784,12 @@ async function dispatchReplyFromConfigInner(
         reason: opts?.reason,
       });
     }
-    // Emitted for every recording turn, not only a slow one: a baseline of
-    // ordinary turns is what makes a slow one legible.
-    const latencyRecord = turnLatency.finish({
-      outcome,
-      ...(params.replyOptions?.runId ? { runId: params.replyOptions.runId } : {}),
-    });
-    if (latencyRecord) {
-      turnLatencyLog.info(
-        formatTurnLatencyRecord(latencyRecord),
-        buildTurnLatencyLogRecord(latencyRecord),
-      );
+    // The dispatcher settles AFTER this boundary, so a turn that queued a final
+    // has not finished delivering yet. Hold the record until it has, and emit
+    // here only when nothing was queued to wait for.
+    turnLatencyOutcome = outcome;
+    if (!turnLatencyAwaitingDelivery) {
+      emitTurnLatencyRecord();
     }
     messageLifecycle.markProcessed(outcome, opts);
   };
@@ -3356,9 +3374,13 @@ async function dispatchReplyFromConfigInner(
       const queuedFinal = dispatcher.sendFinalReply(normalizedPayload);
       if (queuedFinal) {
         // The dispatcher's settle lifecycle is the real end of the turn: it
-        // runs after waitForIdle, which is after every outbound send.
+        // runs after waitForIdle, which is after every outbound send. Settle
+        // re-runs any task its try path missed, so an error cannot strand the
+        // record here.
+        turnLatencyAwaitingDelivery = true;
         registerReplyDispatcherSettledTask(dispatcher, () => {
           turnLatency.mark("delivery.complete");
+          emitTurnLatencyRecord();
         });
       }
       const dispatcherOutcome =
