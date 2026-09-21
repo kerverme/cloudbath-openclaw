@@ -5,6 +5,7 @@ import {
   type GatewayBrowserClient,
   type GatewayHelloOk,
 } from "../../api/gateway.ts";
+import type { ChatFinalBranch } from "./chat-final-branch.js";
 
 export { GatewayRequestError };
 import type {
@@ -446,6 +447,11 @@ export type ChatState = {
   chatAttachments: ChatAttachment[];
   chatQueue: ChatQueueItem[];
   chatRunId: string | null;
+  /**
+   * Which branch handled the last chat final, for the duplicate-answer
+   * investigation. Diagnostic only: nothing renders or routes from it.
+   */
+  lastChatFinalBranch?: ChatFinalBranch | null;
   chatStream: string | null;
   chatStreamStartedAt: number | null;
   lastError: string | null;

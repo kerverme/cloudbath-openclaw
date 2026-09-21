@@ -82,6 +82,12 @@ import { measureDiagnosticsTimelineSpan } from "../../infra/diagnostics-timeline
 import { formatErrorMessage } from "../../infra/errors.js";
 import { getSessionBindingService } from "../../infra/outbound/session-binding-service.js";
 import {
+  buildTurnLatencyLogRecord,
+  createTurnLatencyLedger,
+  formatTurnLatencyRecord,
+  runWithTurnLatencyLedger,
+} from "../../infra/turn-latency-ledger.js";
+import {
   logMessageDispatchCompleted,
   logMessageDispatchStarted,
   markDiagnosticSessionProgress,
@@ -1546,6 +1552,20 @@ type ReplyHotPathTimingSummary = {
 };
 
 const replyHotPathTimingLog = createSubsystemLogger("auto-reply/reply-timing");
+const turnLatencyLog = createSubsystemLogger("turn-latency");
+
+/**
+ * Hot-path trace names, as the turn record calls them.
+ *
+ * The tracer's names are internal call-site labels; the record's are a stable
+ * contract an operator reads across builds. Mapping the two here keeps the
+ * call sites untouched and means a renamed trace cannot silently rename a
+ * field somebody is graphing.
+ */
+const TURN_LATENCY_PHASE_NAMES: Readonly<Record<string, string>> = Object.freeze({
+  "reply.before_dispatch_hooks": "before_dispatch.total",
+  "reply.run_reply_resolver": "model.calls",
+});
 const REPLY_HOT_PATH_TIMING_WARN_TOTAL_MS = 1_000;
 const REPLY_HOT_PATH_TIMING_WARN_STAGE_MS = 500;
 
@@ -1704,13 +1724,29 @@ async function dispatchReplyFromConfigInner(
   const replyHotPathTiming = createReplyHotPathTimingTracker({
     profilerEnabled: isReplyProfilerEnabled({ config: cfg }),
   });
+  // One correlated record per inbound turn, sharing the profiler's single
+  // switch so there is not a second thing to turn on. Inert when off.
+  const turnLatency = createTurnLatencyLedger({
+    enabled: isReplyProfilerEnabled({ config: cfg }),
+    channel,
+    turnId: `${channel}:${messageId ?? "unknown"}`,
+    ...(sessionKey ? { sessionKey } : {}),
+  });
+  turnLatency.mark("inbound.received");
   const traceReplyPhase = <T>(name: string, run: () => Promise<T> | T): Promise<T> =>
     replyHotPathTiming.measure(name, () =>
-      measureDiagnosticsTimelineSpan(name, run, {
-        phase: "agent-turn",
-        config: cfg,
-        attributes: traceAttributes,
-      }),
+      turnLatency.phase(TURN_LATENCY_PHASE_NAMES[name] ?? name, () =>
+        // Scoped here rather than around the whole dispatch because every
+        // provider request happens inside a traced phase, and this keeps the
+        // carrier's lifetime equal to the phase it is measuring.
+        runWithTurnLatencyLedger(turnLatency, () =>
+          measureDiagnosticsTimelineSpan(name, run, {
+            phase: "agent-turn",
+            config: cfg,
+            attributes: traceAttributes,
+          }),
+        ),
+      ),
     );
   let agentDispatchStartedAt = 0;
 
@@ -1724,6 +1760,18 @@ async function dispatchReplyFromConfigInner(
         outcome,
         reason: opts?.reason,
       });
+    }
+    // Emitted for every recording turn, not only a slow one: a baseline of
+    // ordinary turns is what makes a slow one legible.
+    const latencyRecord = turnLatency.finish({
+      outcome,
+      ...(params.replyOptions?.runId ? { runId: params.replyOptions.runId } : {}),
+    });
+    if (latencyRecord) {
+      turnLatencyLog.info(
+        formatTurnLatencyRecord(latencyRecord),
+        buildTurnLatencyLogRecord(latencyRecord),
+      );
     }
     messageLifecycle.markProcessed(outcome, opts);
   };
@@ -1967,12 +2015,29 @@ async function dispatchReplyFromConfigInner(
     }
   };
   const runWithDispatchLifecycleAdmission = async <T>(run: () => Promise<T>): Promise<T> => {
-    if (dispatchReplyOperation) {
-      return await runWithReplyOperationLifecycleAdmission(dispatchReplyOperation, run);
+    // Only the admission itself is a wait; the work it admits is measured by
+    // whatever phase the caller is already inside.
+    const closeWait = turnLatency.beginWait("queue.wait");
+    let admitted = false;
+    const admit = async () => {
+      if (!admitted) {
+        admitted = true;
+        closeWait();
+      }
+      return await run();
+    };
+    try {
+      if (dispatchReplyOperation) {
+        return await runWithReplyOperationLifecycleAdmission(dispatchReplyOperation, admit);
+      }
+      return preDispatchLifecycleAdmission
+        ? await preDispatchLifecycleAdmission.run(admit)
+        : await admit();
+    } finally {
+      if (!admitted) {
+        closeWait();
+      }
     }
-    return preDispatchLifecycleAdmission
-      ? await preDispatchLifecycleAdmission.run(run)
-      : await run();
   };
   type DispatchReplyOperationAcquisition =
     | { status: "ready" }
@@ -2037,6 +2102,7 @@ async function dispatchReplyFromConfigInner(
       preDispatchLifecycleInterrupted = true;
       lifecycleOnlyAbortController?.abort();
     };
+    const closeSessionLockWait = turnLatency.beginWait("session.lock_wait");
     let admission = await admitReplyTurn({
       sessionKey: dispatchOperationSessionKey,
       sessionId: operationSessionId,
@@ -2051,6 +2117,7 @@ async function dispatchReplyFromConfigInner(
       retainLifecycleAdmissionOnActive: allowActivePreDispatch || allowSlackRoutedThreadBypass,
       onLifecycleInterrupt,
     });
+    closeSessionLockWait();
     if (
       admission.status === "skipped" &&
       admission.reason === "active-run" &&
@@ -3285,7 +3352,15 @@ async function dispatchReplyFromConfigInner(
         setReplyPayloadMetadata(normalizedPayload, { finalDeliveryCapture });
       }
       const deliveryOutcome = captureReplyDispatchDeliveryOutcome(normalizedPayload);
+      turnLatency.mark("delivery.start");
       const queuedFinal = dispatcher.sendFinalReply(normalizedPayload);
+      if (queuedFinal) {
+        // The dispatcher's settle lifecycle is the real end of the turn: it
+        // runs after waitForIdle, which is after every outbound send.
+        registerReplyDispatcherSettledTask(dispatcher, () => {
+          turnLatency.mark("delivery.complete");
+        });
+      }
       const dispatcherOutcome =
         queuedFinal && deliveryOutcome.isTracked() ? deliveryOutcome.promise : undefined;
       if (queuedFinal && deliveredTranscriptMirror && finalOutcomeBefore) {

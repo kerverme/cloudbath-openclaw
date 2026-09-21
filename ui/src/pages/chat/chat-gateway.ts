@@ -4,6 +4,7 @@ import { parseChatSideResult, type ChatSideResult } from "../../lib/chat/side-re
 // Control UI page module reconciles Chat Gateway events into Chat state.
 import { isUiGlobalSessionKey, resolveUiDefaultAgentId } from "../../lib/sessions/session-key.ts";
 import { normalizeLowercaseStringOrEmpty } from "../../lib/string-coerce.ts";
+import { classifyChatFinalBranch } from "./chat-final-branch.js";
 import {
   chatScopedEventSessionMatches,
   isHiddenAssistantStreamText,
@@ -162,6 +163,16 @@ export function handleChatEvent(state: ChatState, payload?: ChatEventPayload) {
     state.chatRunId !== null &&
     typeof payload.runId === "string" &&
     payload.runId === state.chatRunId;
+  if (payload.state === "final") {
+    // Recorded before the branches run, while the state they read is still the
+    // state that decided. Diagnostic only; nothing below reads it.
+    state.lastChatFinalBranch = classifyChatFinalBranch({
+      sessionMatches,
+      activeRunMatches,
+      activeRunId: state.chatRunId,
+      ...(typeof payload.runId === "string" ? { payloadRunId: payload.runId } : {}),
+    });
+  }
   if (!sessionMatches && !activeRunMatches) {
     if (payload.state === "final") {
       const finalMessage = normalizeFinalAssistantMessage(payload.message);

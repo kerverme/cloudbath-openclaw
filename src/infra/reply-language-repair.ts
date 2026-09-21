@@ -25,6 +25,7 @@ import {
   type ReplyLanguageValidation,
   type TurnPresentationPolicy,
 } from "./reply-language-policy.js";
+import { currentTurnLatencyLedger } from "./turn-latency-ledger.js";
 
 /** What happened to the text. `unrepaired` means we could not fix it and said so. */
 export type FinalReplyOutcome = "unchecked" | "valid" | "repaired" | "fallback" | "unrepaired";
@@ -285,6 +286,7 @@ export function resolveAuthoritativeReplyText(params: {
     prepared?.sourceText === params.text ? () => prepared.regeneratedText : params.regenerate;
   const finalized = finalizeReplyText({ ...params, ...(regenerate ? { regenerate } : {}) });
   finalizedByRun().set(runId, finalized);
+  currentTurnLatencyLedger()?.mark("authoritative.finalize");
   traceReplyDelivery("authoritative_finalized", {
     runId,
     policyPresent: Boolean(params.policy),

@@ -7,6 +7,7 @@ import { normalizeModelRef } from "../../agents/model-selection.js";
 import type { NormalizedUsage, UsageLike } from "../../agents/usage.js";
 import { normalizeUsage } from "../../agents/usage.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
+import { type LlmCallReason, runWithLlmCallReason } from "../../infra/turn-latency-ledger.js";
 import type { Api, Message } from "../../llm/types.js";
 import { getChildLogger } from "../../logging.js";
 import { normalizeAgentId } from "../../routing/session-key.js";
@@ -352,6 +353,27 @@ function assertAllowedModelOverride(params: {
 /**
  * Create the host-owned generic LLM completion runtime for trusted plugin callers.
  */
+/**
+ * The declared purpose of a plugin completion, as a latency call reason.
+ *
+ * Purposes are plugin-authored strings; the ledger's reasons are a closed set.
+ * Only the ones an operator needs to tell apart on a turn timeline are named,
+ * and everything else stays `plugin_llm` rather than growing the enum.
+ */
+export function resolvePluginCallReason(purpose: string | undefined): LlmCallReason {
+  const declared = purpose?.trim();
+  if (!declared) {
+    return "plugin_llm";
+  }
+  if (declared === "cloudbath-conversation-referent") {
+    return "cloudbath_conversation_referent";
+  }
+  if (declared.startsWith("cloudbath-storyboard-")) {
+    return "storyboard_planner";
+  }
+  return declared.startsWith("context-engine.") ? "context_compaction" : "plugin_llm";
+}
+
 export function createRuntimeLlm(
   options: CreateRuntimeLlmOptions = {},
 ): Pick<PluginRuntimeCore["llm"], "complete"> {
@@ -439,17 +461,21 @@ export function createRuntimeLlm(
         }),
       };
 
-      const result = await completeWithPreparedSimpleCompletionModel({
-        model: prepared.model,
-        auth: prepared.auth,
-        cfg,
-        context,
-        options: {
-          maxTokens: finiteOption(params.maxTokens),
-          temperature: finiteOption(params.temperature),
-          signal: params.signal,
-        },
-      });
+      const result = await runWithLlmCallReason(
+        resolvePluginCallReason(params.purpose),
+        async () =>
+          await completeWithPreparedSimpleCompletionModel({
+            model: prepared.model,
+            auth: prepared.auth,
+            cfg,
+            context,
+            options: {
+              maxTokens: finiteOption(params.maxTokens),
+              temperature: finiteOption(params.temperature),
+              signal: params.signal,
+            },
+          }),
+      );
 
       const text = result.content
         .filter((c): c is { type: "text"; text: string } => c.type === "text")
