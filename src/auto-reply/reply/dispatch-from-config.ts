@@ -76,6 +76,7 @@ import {
   toPluginMessageReceivedEvent,
 } from "../../hooks/message-hook-mappers.js";
 import { isAbortError } from "../../infra/abort-signal.js";
+import { releaseAgentRunDeliveryWindow } from "../../infra/agent-events.js";
 import { isDiagnosticsEnabled } from "../../infra/diagnostic-events.js";
 import { measureDiagnosticsTimelineSpan } from "../../infra/diagnostics-timeline.js";
 import { formatErrorMessage } from "../../infra/errors.js";
@@ -2207,15 +2208,19 @@ async function dispatchReplyFromConfigInner(
   };
   const getReplyOptions = () => {
     const abortSignal = getDispatchAbortSignal();
-    const onAgentRunStart = messageAuditTerminal
-      ? (runId: string) => {
-          messageAuditTerminal.observeRunId(runId);
-          params.replyOptions?.onAgentRunStart?.(runId);
-        }
-      : undefined;
-    if (!abortSignal && !onAgentRunStart) {
-      return params.replyOptions;
-    }
+    // The dispatcher's settle lifecycle is the real end of this turn: it runs
+    // after waitForIdle, so after every outbound send — and therefore after both
+    // LINE delivery hooks have consulted the run's authoritative reply. Releasing
+    // the run there, rather than when the agent runner returns, is what keeps the
+    // decision readable across delivery. Releasing an unclaimed run is a no-op,
+    // so this is safe for turns that never opened a window.
+    const onAgentRunStart = (runId: string) => {
+      registerReplyDispatcherSettledTask(params.dispatcher, () => {
+        releaseAgentRunDeliveryWindow(runId);
+      });
+      messageAuditTerminal?.observeRunId(runId);
+      params.replyOptions?.onAgentRunStart?.(runId);
+    };
     return {
       ...params.replyOptions,
       ...(abortSignal
@@ -2224,7 +2229,7 @@ async function dispatchReplyFromConfigInner(
             queuedFollowupAbortSignal: getQueuedFollowupAbortSignal(),
           }
         : {}),
-      ...(onAgentRunStart ? { onAgentRunStart } : {}),
+      onAgentRunStart,
       ...(dispatchReplyOperation ? { replyOperation: dispatchReplyOperation } : {}),
     };
   };

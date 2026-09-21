@@ -41,7 +41,7 @@ import { parseSessionThreadInfoFast } from "../../config/sessions/thread-info.js
 import type { TypingMode } from "../../config/types.js";
 import { readLatestSessionUsageFromTranscriptAsync } from "../../gateway/session-transcript-readers.js";
 import { logVerbose } from "../../globals.js";
-import { emitAgentEvent, releaseAgentRunDeliveryWindow } from "../../infra/agent-events.js";
+import { emitAgentEvent } from "../../infra/agent-events.js";
 import { emitTrustedDiagnosticEvent, isDiagnosticsEnabled } from "../../infra/diagnostic-events.js";
 import {
   createChildDiagnosticTraceContext,
@@ -1640,9 +1640,6 @@ export async function runReplyAgent(params: {
       cleanupTranscripts: true,
     });
   let preflightCompactionApplied;
-  // Set once the run reports its id, so the finally below can close the delivery
-  // window this turn opened at ingress.
-  let deliveryWindowRunId: string | undefined;
 
   try {
     await typingSignals.signalRunStart();
@@ -1799,7 +1796,6 @@ export async function runReplyAgent(params: {
       directlySentBlockPayloads,
       terminalFailurePayload,
     } = runOutcome;
-    deliveryWindowRunId = runId;
     const { autoCompactionCount } = runOutcome;
     let { didLogHeartbeatStrip } = runOutcome;
 
@@ -2821,13 +2817,6 @@ export async function runReplyAgent(params: {
     returnWithQueuedFollowupDrain(undefined);
     throw error;
   } finally {
-    // The reply has now been dispatched (or the turn failed), so the run's
-    // authoritative text has no further consumer. Releasing here applies any
-    // clear the Control UI's terminal projection requested while delivery was
-    // still in flight.
-    if (deliveryWindowRunId) {
-      releaseAgentRunDeliveryWindow(deliveryWindowRunId);
-    }
     try {
       await clearRestartRecoveryDeliveryContext();
     } catch (error) {
