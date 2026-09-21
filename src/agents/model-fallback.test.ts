@@ -2207,7 +2207,10 @@ describe("runWithModelFallback", () => {
     expect(run).toHaveBeenCalledTimes(2);
   });
 
-  it("jumps directly to a later live-session model switch candidate (#57471)", async () => {
+  it("returns a reachable live-session model switch to the retry owner", async () => {
+    // The target being a configured fallback does not make it a fallback: the
+    // switch is the session's new selection and only the retry owner applies
+    // it to the run. See model-fallback.live-switch-ownership.test.ts.
     const cfg = makeCfg({
       agents: {
         defaults: {
@@ -2230,33 +2233,19 @@ describe("runWithModelFallback", () => {
       if (provider === "openai" && model === "gpt-4.1-mini") {
         throw switchError;
       }
-      if (provider === "anthropic" && model === "claude-sonnet-4-6") {
-        return "ok";
-      }
       throw new Error(`unexpected fallback candidate: ${provider}/${model}`);
     });
     const onError = vi.fn();
 
-    const result = await runWithModelFallback({
-      cfg,
-      provider: "openai",
-      model: "gpt-4.1-mini",
-      run,
-      onError,
-    });
+    await expect(
+      runWithModelFallback({ cfg, provider: "openai", model: "gpt-4.1-mini", run, onError }),
+    ).rejects.toBe(switchError);
 
-    expect(result.result).toBe("ok");
-    expect(result.provider).toBe("anthropic");
-    expect(result.model).toBe("claude-sonnet-4-6");
-    expect(result.attempts).toStrictEqual([]);
     expect(onError).not.toHaveBeenCalled();
-    expect(run.mock.calls).toEqual([
-      ["openai", "gpt-4.1-mini", { isFinalFallbackAttempt: false }],
-      ["anthropic", "claude-sonnet-4-6", { isFinalFallbackAttempt: false }],
-    ]);
+    expect(run.mock.calls).toEqual([["openai", "gpt-4.1-mini", { isFinalFallbackAttempt: false }]]);
   });
 
-  it("returns runtime-changing live switches to the retry owner before redirecting", async () => {
+  it("returns runtime-changing live switches to the retry owner", async () => {
     const cfg = makeCfg({
       agents: {
         defaults: {
