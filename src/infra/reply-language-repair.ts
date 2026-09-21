@@ -21,7 +21,6 @@ import { resolveGlobalSingleton } from "../shared/global-singleton.js";
  */
 import { traceReplyDelivery } from "./reply-delivery-trace.js";
 import {
-  isTechnicalToken,
   validateReplyLanguage,
   type ReplyLanguageValidation,
   type TurnPresentationPolicy,
@@ -52,6 +51,11 @@ type Segment = Readonly<{ text: string; start: number; end: number }>;
  * Lines first, then sentence ends, with offsets. Never sub-word: dropping words
  * is the character-stripping this module exists to avoid.
  *
+ * A colon or semicolon ends a clause, not a sentence, so it is not a boundary:
+ * splitting there made `เดือน 1-2:` its own segment, and dropping the text
+ * after it left the label behind promising content that was no longer in the
+ * reply. A label and what it introduces stand or fall together.
+ *
  * Offsets are kept so a rewrite can cut the violating spans out of the ORIGINAL
  * text and leave every surviving byte, including its line breaks, exactly as
  * the model wrote it.
@@ -60,7 +64,7 @@ function segments(text: string): Segment[] {
   const found: Segment[] = [];
   let cursor = 0;
   for (const line of text.split(/\r?\n/u)) {
-    for (const piece of line.split(/(?<=[.!?;:。！？])\s+/u)) {
+    for (const piece of line.split(/(?<=[.!?。！？])\s+/u)) {
       const trimmed = piece.trim();
       if (trimmed) {
         const start = text.indexOf(trimmed, cursor);
@@ -74,23 +78,57 @@ function segments(text: string): Segment[] {
   return found;
 }
 
-function hasTechnicalToken(text: string): boolean {
-  return text.split(/\s+/u).some((token) => token && isTechnicalToken(token));
+/**
+ * A critical exact span is a token whose loss changes the operation: a link, a
+ * path or address, an opaque or confirmation id, a machine identifier.
+ *
+ * This is NOT the validator's `isTechnicalToken`, and the difference is the
+ * whole point. That predicate answers "is this prose I should count towards the
+ * language expectation?", where being generous is free — a bare `5` is not a
+ * word. Repair asks a different question, "would the reply be broken without
+ * this exact string?", where being generous is destructive: every number and
+ * range in the reply counted as critical, so one contaminated line could
+ * neither be dropped nor repaired, and the fallback trailed a meaningless dump
+ * of the reply's numbers.
+ */
+const VIDEO_CODE = /\bVIDEO\s+[A-Za-z0-9]{3,}\b/gu;
+/** Counts, ranges, percentages, decimals, times, fractions, dates. */
+const ORDINARY_NUMBER = /^[0-9]+(?:[.:/-][0-9]+)*%?$/u;
+const IDENTIFIER_CHARS = /^[A-Za-z0-9._:/@+~#?&=%-]+$/u;
+/** Punctuation that separates or locates; a full stop alone does not qualify. */
+const STRUCTURAL_PUNCTUATION = /[_:/@#?&=~]/u;
+/** Dotted labels ending in a real TLD, so `example.com` is a link and `i.e.` is prose. */
+const DOMAIN_LIKE = /^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}$/u;
+const LEADING_PROSE_PUNCTUATION = /^[([{"'\u00ab\u201c\u2018]+/u;
+const TRAILING_PROSE_PUNCTUATION = /[)\]}"'\u00bb\u201d\u2019.,;:!?\u2026]+$/u;
+
+/** The identifier inside a prose token, or undefined when the token is prose. */
+function criticalExactSpan(token: string): string | undefined {
+  const span = token.replace(LEADING_PROSE_PUNCTUATION, "").replace(TRAILING_PROSE_PUNCTUATION, "");
+  if (!span || !IDENTIFIER_CHARS.test(span) || ORDINARY_NUMBER.test(span)) {
+    return undefined;
+  }
+  const carriesAnOperation =
+    /[A-Za-z]/u.test(span) && (STRUCTURAL_PUNCTUATION.test(span) || /[0-9]/u.test(span));
+  return carriesAnOperation || DOMAIN_LIKE.test(span) ? span : undefined;
 }
 
-function protectedTechnicalTokens(text: string): string[] {
-  const videoCodes = text.match(/\bVIDEO\s+[A-Za-z0-9]{3,}\b/gu) ?? [];
+function hasCriticalExactSpan(text: string): boolean {
+  return (
+    text.match(VIDEO_CODE) !== null ||
+    text.split(/\s+/u).some((token) => criticalExactSpan(token) !== undefined)
+  );
+}
+
+function criticalExactSpans(text: string): string[] {
+  const videoCodes = text.match(VIDEO_CODE) ?? [];
   const codeParts = new Set(videoCodes.flatMap((code) => code.split(/\s+/u)));
-  const technical = text
-    .split(/\s+/u)
-    .filter(
-      (token) =>
-        token &&
-        !codeParts.has(token) &&
-        isTechnicalToken(token) &&
-        (/[_:/@+#?&=%~-]/u.test(token) || (/[A-Za-z]/u.test(token) && /[0-9]/u.test(token))),
-    );
-  return [...new Set([...videoCodes, ...technical])];
+  const spans = text.split(/\s+/u).flatMap((token) => {
+    const span = criticalExactSpan(token);
+    // A code's own id is already carried by the whole `VIDEO 4821` span.
+    return span && !codeParts.has(span) ? [span] : [];
+  });
+  return [...new Set([...videoCodes, ...spans])];
 }
 
 /**
@@ -119,7 +157,7 @@ function rewriteWithoutViolatingSegments(
       keptCount += 1;
       continue;
     }
-    if (hasTechnicalToken(part.text)) {
+    if (hasCriticalExactSpan(part.text)) {
       return undefined;
     }
     cursor = part.end;
@@ -182,7 +220,7 @@ export function finalizeReplyText(params: {
   }
   const fallback = policy.fallbackText?.trim();
   if (fallback) {
-    const protectedSpans = protectedTechnicalTokens(params.text);
+    const protectedSpans = criticalExactSpans(params.text);
     const fallbackText =
       protectedSpans.length > 0 ? `${fallback}\n${protectedSpans.join(" ")}` : fallback;
     return {
