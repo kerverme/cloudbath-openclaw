@@ -36,6 +36,15 @@ export async function settleReplyDispatcher(params: {
     await params.dispatcher.waitForIdle();
     await runReplyDispatcherSettledTasks(params.dispatcher);
   } finally {
+    // waitForIdle can throw. Settled tasks own per-run state that must still be
+    // released, so run whatever the try path did not reach; the helper clears
+    // the registry first, making this a no-op once the success path has run.
+    // Failures here are swallowed rather than masking the original error.
+    try {
+      await runReplyDispatcherSettledTasks(params.dispatcher);
+    } catch {
+      // A cleanup task that throws must not replace the dispatch error.
+    }
     settledTasksByDispatcher.delete(params.dispatcher);
     await params.onSettled?.();
   }
