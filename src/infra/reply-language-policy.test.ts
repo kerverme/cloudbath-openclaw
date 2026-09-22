@@ -253,3 +253,26 @@ describe("the incremental scanner matches a full scan", () => {
     expect(scanner.push("Привет").reason).toBe("no_expectation");
   });
 });
+
+/**
+ * Enforcement was never the thing that failed.
+ *
+ * A Thai LINE turn reached a user with `페이스` — Hangul — inside Thai prose,
+ * and the first suspicion was that the validator had missed it. It does not:
+ * Hangul is a named script, `th` maps to Thai, and a token wholly in another
+ * non-Latin script is a violation. The escape was downstream, in the surface
+ * that renders history. This pins the premise that investigation rests on.
+ */
+describe("a Hangul token in Thai prose is a foreign-script violation", () => {
+  it("reports the script rather than passing the reply", () => {
+    const result = validateReplyLanguage("เข้าใจแล้ว — 페이스 5 คือ pace 5:00", {
+      expectedReplyLanguage: "th",
+      expectedReplyLanguageSource: "account",
+    });
+
+    expect(result).toMatchObject({ valid: false, reason: "foreign_script" });
+    expect(result.violatingScripts).toStrictEqual(["Hangul"]);
+    // `pace` and `5:00` are ordinary Latin/technical company in Thai prose.
+    expect(result.violatingTokens).toHaveLength(1);
+  });
+});

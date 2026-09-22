@@ -163,6 +163,7 @@ import {
   projectRecentChatDisplayMessages,
   resolveEffectiveChatHistoryMaxChars,
 } from "../chat-display-projection.js";
+import { applyAuthoritativeReplyLanguageToHistory } from "../chat-history-reply-language.js";
 import { sanitizeChatSendMessageInput } from "../chat-input-sanitize.js";
 import {
   abortQueuedChatTurnById,
@@ -3276,7 +3277,18 @@ async function handleChatHistoryRequest({
     effectiveMaxChars,
     offset,
   });
-  const normalized = historyPage.messages;
+  // The transcript keeps what the provider said, because it is also the model's
+  // replay history. What the UI renders is the reply the turn actually decided
+  // on, which is how a Hangul token stayed visible here long after delivery had
+  // replaced it. Both history branches funnel through this one page.
+  const normalized = applyAuthoritativeReplyLanguageToHistory({
+    messages: historyPage.messages,
+    cfg,
+    channel: entry?.lastChannel,
+    accountId: entry?.lastAccountId,
+    groupId: entry?.lastTo,
+    sessionKey: canonicalKey,
+  }) as typeof historyPage.messages;
   const perMessageHardCap = Math.min(CHAT_HISTORY_MAX_SINGLE_MESSAGE_BYTES, maxHistoryBytes);
   const replaced = replaceOversizedChatHistoryMessages({
     messages: normalized,
