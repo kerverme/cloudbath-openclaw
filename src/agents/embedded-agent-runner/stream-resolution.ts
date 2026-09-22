@@ -3,6 +3,7 @@
  */
 import { getApiProvider } from "@openclaw/ai/internal/runtime";
 import { stripSystemPromptCacheBoundary } from "@openclaw/ai/internal/shared";
+import { observeAssistantStreamLatencyResult } from "../../infra/turn-latency-stream.js";
 import { streamSimple } from "../../llm/stream.js";
 import { createAnthropicVertexStreamFnForModel } from "../anthropic-vertex-stream.js";
 import { createBoundaryAwareStreamFnForModel } from "../provider-transport-stream.js";
@@ -115,7 +116,31 @@ export async function resolveEmbeddedAgentApiKey(params: {
   return params.authStorage ? await params.authStorage.getApiKey(params.provider) : undefined;
 }
 
-export function resolveEmbeddedAgentStreamFn(params: {
+/**
+ * The turn record's view of whichever stream this agent ended up using.
+ *
+ * `src/llm/stream.ts` observes the facade, but an embedded attempt rarely uses
+ * it: every transport-aware API (openai-completions among them, which is how
+ * OpenRouter models run) resolves to a boundary-aware transport instead, and a
+ * provider-owned or Vertex stream bypasses the facade too. The transport still
+ * opened the request, so the record showed a main_agent call that started and
+ * never finished — no first token, no completion, outcome `abandoned`.
+ *
+ * Wrapping the resolved function covers every branch below, because this is the
+ * one place that decides which stream the agent runs on.
+ */
+function observedStreamFn(streamFn: StreamFn): StreamFn {
+  return (model, context, options) =>
+    observeAssistantStreamLatencyResult(streamFn(model, context, options));
+}
+
+export function resolveEmbeddedAgentStreamFn(
+  params: Parameters<typeof resolveEmbeddedAgentStreamFnForStrategy>[0],
+): StreamFn {
+  return observedStreamFn(resolveEmbeddedAgentStreamFnForStrategy(params));
+}
+
+function resolveEmbeddedAgentStreamFnForStrategy(params: {
   currentStreamFn: StreamFn | undefined;
   providerStreamFn?: StreamFn;
   sessionId: string;
