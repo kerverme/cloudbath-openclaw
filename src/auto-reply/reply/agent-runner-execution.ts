@@ -93,6 +93,7 @@ import {
 import { isDiagnosticsEnabled } from "../../infra/diagnostic-events.js";
 import { formatErrorMessage } from "../../infra/errors.js";
 import { resolveHeartbeatRunScope } from "../../infra/heartbeat-run-scope.js";
+import type { LlmCallReason } from "../../infra/turn-latency-ledger.js";
 import { logSessionTurnCreated } from "../../logging/diagnostic.js";
 import { createSubsystemLogger } from "../../logging/subsystem.js";
 import { CommandLaneClearedError, GatewayDrainingError } from "../../process/command-queue.js";
@@ -1930,6 +1931,12 @@ async function runAgentTurnWithFallbackInternal(
       const fallbackResult = await agentTurnTiming.measure("model_fallback", () =>
         runWithModelFallback<EmbeddedAgentRunResult>({
           ...resolveModelFallbackOptions(effectiveRun, runtimeConfig),
+          // A restart that exists only to apply a session model switch says so,
+          // otherwise the extra agent call on the turn timeline reads as the
+          // turn simply having run twice.
+          ...(liveModelSwitchRetries > 0
+            ? { callReason: "live_model_switch" as LlmCallReason }
+            : {}),
           runId,
           sessionId: params.followupRun.run.sessionId,
           lane: runLane,

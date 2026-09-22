@@ -12,6 +12,7 @@ import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { isCronTerminalAbortReasonText } from "../cron/service/execution-errors.js";
 import { emitFailoverEvent } from "../infra/diagnostic-events.js";
 import { formatErrorMessage, toErrorObject } from "../infra/errors.js";
+import { type LlmCallReason, runWithLlmCallReason } from "../infra/turn-latency-ledger.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import { normalizePluginsConfig } from "../plugins/config-state.js";
 import { getCurrentPluginMetadataSnapshot } from "../plugins/current-plugin-metadata-snapshot.js";
@@ -438,6 +439,18 @@ async function runFallbackCandidate<T>(params: {
   }
 }
 
+/**
+ * Why this attempt's provider requests happened, for the turn latency record.
+ *
+ * Anything past the first candidate is the chain doing its job. The first one
+ * is the agent turn itself, unless an outer owner already said why it is
+ * re-running — a live model switch restarts the whole chain, and losing that
+ * is losing the reason an extra agent call exists on the timeline.
+ */
+function resolveAttemptCallReason(attempt: number, declared?: LlmCallReason): LlmCallReason {
+  return attempt > 1 ? "model_fallback" : (declared ?? "main_agent");
+}
+
 async function runFallbackAttempt<T>(params: {
   run: ModelFallbackRunFn<T>;
   provider: string;
@@ -449,6 +462,7 @@ async function runFallbackAttempt<T>(params: {
   classifyResult?: ModelFallbackResultClassifier<T>;
   attempt: number;
   total: number;
+  callReason?: LlmCallReason;
   attribution?: FailoverAttribution;
   abortSignal?: AbortSignal;
 }): Promise<
@@ -459,16 +473,20 @@ async function runFallbackAttempt<T>(params: {
       exhaustionResult?: ModelFallbackExhaustionResult<T>;
     }
 > {
-  const runResult = await runFallbackCandidate({
-    run: params.run,
-    provider: params.provider,
-    model: params.model,
-    options: params.options,
-    deferSessionSuspension: params.deferSessionSuspension,
-    onDeferredSessionSuspension: params.onDeferredSessionSuspension,
-    attribution: params.attribution,
-    abortSignal: params.abortSignal,
-  });
+  const runResult = await runWithLlmCallReason(
+    resolveAttemptCallReason(params.attempt, params.callReason),
+    async () =>
+      await runFallbackCandidate({
+        run: params.run,
+        provider: params.provider,
+        model: params.model,
+        options: params.options,
+        deferSessionSuspension: params.deferSessionSuspension,
+        onDeferredSessionSuspension: params.onDeferredSessionSuspension,
+        attribution: params.attribution,
+        abortSignal: params.abortSignal,
+      }),
+  );
   if (runResult.ok) {
     const classification = await params.classifyResult?.({
       result: runResult.result,
@@ -1368,6 +1386,8 @@ type RunWithModelFallbackParams<T> = {
   agentDir?: string;
   /** Optional explicit fallbacks list; when provided (even empty), replaces agents.defaults.model.fallbacks. */
   fallbacksOverride?: string[];
+  /** Why this chain is running, for the turn latency record. Defaults to the agent turn. */
+  callReason?: LlmCallReason;
   run: ModelFallbackRunFn<T>;
   onError?: ModelFallbackErrorHandler;
   onFallbackStep?: ModelFallbackStepHandler;
@@ -1777,6 +1797,7 @@ async function runWithModelFallbackInternal<T>(
       classifyResult: params.classifyResult,
       attempt: i + 1,
       total: candidates.length,
+      ...(params.callReason ? { callReason: params.callReason } : {}),
       attribution: { sessionId: params.sessionId, lane: params.lane },
       abortSignal: params.abortSignal,
     });

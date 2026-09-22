@@ -11,6 +11,7 @@ import { DEFAULT_HEARTBEAT_ACK_MAX_CHARS, stripHeartbeatToken } from "../auto-re
 import { normalizeVerboseLevel } from "../auto-reply/thinking.js";
 import { getRuntimeConfig } from "../config/io.js";
 import { type AgentEventPayload, getAgentRunContext } from "../infra/agent-events.js";
+import { resolveChatProjectionState, traceChatProjection } from "../infra/chat-projection-trace.js";
 import { formatErrorMessage } from "../infra/errors.js";
 import { resolveHeartbeatVisibility } from "../infra/heartbeat-visibility.js";
 import { createReplyLanguageScanner } from "../infra/reply-language-policy.js";
@@ -1107,6 +1108,21 @@ export function createAgentEventHandler({
     opts?: { agentId?: string; controlUiVisible?: boolean; dropIfSlow?: boolean },
   ) => {
     const deliverySessionKey = resolveSessionDeliveryKey(sessionKey, opts?.agentId);
+    // Identities only. Two finals for one answer are indistinguishable from one
+    // in the shipped logs, and which run ids they carried is what decides
+    // whether the UI reconciled them or appended twice.
+    traceChatProjection({
+      state: resolveChatProjectionState(payload),
+      ...(typeof (payload as { runId?: unknown })?.runId === "string"
+        ? { runId: (payload as { runId: string }).runId }
+        : {}),
+      ...(typeof (payload as { seq?: unknown })?.seq === "number"
+        ? { seq: (payload as { seq: number }).seq }
+        : {}),
+      sessionKey,
+      ...(opts?.agentId ? { agentId: opts.agentId } : {}),
+      broadcast: opts?.controlUiVisible ?? true,
+    });
     if (opts?.controlUiVisible ?? true) {
       broadcast("chat", payload, { dropIfSlow: opts?.dropIfSlow });
       sendNodeSessionPayloadForAgent(sessionKey, "chat", payload, opts?.agentId);

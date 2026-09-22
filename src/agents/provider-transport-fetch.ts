@@ -27,6 +27,7 @@ import {
   ssrfPolicyFromHttpBaseUrlAllowedOrigin,
   type SsrFPolicy,
 } from "../infra/net/ssrf.js";
+import { currentLlmCallReason, currentTurnLatencyLedger } from "../infra/turn-latency-ledger.js";
 import type { Model } from "../llm/types.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import { resolveDebugProxySettings } from "../proxy-capture/env.js";
@@ -860,6 +861,14 @@ export function buildGuardedModelFetch(
     };
     let result: Awaited<ReturnType<typeof fetchWithSsrFGuard>>;
     const fetchStartedAt = Date.now();
+    // One entry per provider request on the active turn's record. The reason
+    // is carried on the async context because this is the only place that sees
+    // every request and the last place that knows why any of them happened.
+    const latencyCall = currentTurnLatencyLedger()?.openModelCall({
+      provider: model.provider,
+      model: model.id,
+      callReason: currentLlmCallReason(),
+    });
     const useEnvProxy = !dispatcherPolicy && shouldUseEnvHttpProxyForUrl(url);
     emitModelTransportDebug(
       log,
@@ -881,6 +890,7 @@ export function buildGuardedModelFetch(
           : guardedFetchOptions,
       );
     } catch (error) {
+      latencyCall?.fail();
       log.warn(
         `[model-fetch] error provider=${model.provider} api=${model.api} model=${model.id} ` +
           `elapsedMs=${Date.now() - fetchStartedAt} ${summarizeError(error)}`,
@@ -889,6 +899,10 @@ export function buildGuardedModelFetch(
       throw error;
     }
     let response = result.response;
+    // Headers only. For a streamed completion the body has not started, so
+    // this is response-start and never first-token; the stream observer in
+    // src/infra/turn-latency-stream.ts records that separately.
+    latencyCall?.responseHeaders();
     emitModelTransportDebug(
       log,
       `[model-fetch] response provider=${model.provider} api=${model.api} model=${model.id} ` +

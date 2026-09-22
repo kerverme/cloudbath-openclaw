@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { resolveContextEngineCapabilities } from "../../agents/embedded-agent-runner/context-engine-capabilities.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { withPluginRuntimePluginIdScope } from "./gateway-request-scope.js";
-import { createRuntimeLlm } from "./runtime-llm.runtime.js";
+import { createRuntimeLlm, resolvePluginCallReason } from "./runtime-llm.runtime.js";
 import type { RuntimeLogger } from "./types-core.js";
 
 const hoisted = vi.hoisted(() => ({
@@ -767,5 +767,32 @@ describe("runtime.llm.complete", () => {
     expectSingleLogPayload(logger.warn as unknown as MockCalls, "plugin llm completion denied", {
       reason: "not trusted",
     });
+  });
+});
+
+/**
+ * A plugin completion's declared purpose, as a turn-record call reason.
+ *
+ * The transport sees every provider request and knows why none of them
+ * happened. Purposes are plugin-authored strings; the record's reasons are a
+ * closed set, and only the ones an operator needs to tell apart on a timeline
+ * are named. The pre-agent LINE helper is the one this investigation exists
+ * for, so it gets its own reason rather than landing in `plugin_llm`.
+ */
+describe("resolvePluginCallReason", () => {
+  it.each([
+    ["cloudbath-conversation-referent", "cloudbath_conversation_referent"],
+    ["cloudbath-storyboard-create", "storyboard_planner"],
+    ["cloudbath-storyboard-edit", "storyboard_planner"],
+    ["context-engine.compaction", "context_compaction"],
+    ["context-engine.after-turn", "context_compaction"],
+    ["logbook.standup", "plugin_llm"],
+    ["", "plugin_llm"],
+  ])("reads %s as %s", (purpose, expected) => {
+    expect(resolvePluginCallReason(purpose)).toBe(expected);
+  });
+
+  it("reports an undeclared purpose as a plugin completion", () => {
+    expect(resolvePluginCallReason(undefined)).toBe("plugin_llm");
   });
 });
