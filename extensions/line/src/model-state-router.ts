@@ -7,25 +7,49 @@
  * the configured aliases know the answers. Left to the agent, they were
  * answered from model memory or web_search, and a model that is not in the
  * catalog was described as available. This handler answers them before the
- * agent runs and never switches anything; switching stays with
- * model-switch-router.ts.
+ * agent runs. Each catalog answer leaves a short-lived reference so a bare
+ * follow-up ("เปลี่ยนให้หน่อย") resolves against the model it established
+ * (model-reference.ts); the switch itself is model-switch-router.ts's.
  */
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import { resolveSessionModelRef } from "openclaw/plugin-sdk/model-session-runtime";
+import type { PluginStateKeyedStore } from "openclaw/plugin-sdk/plugin-state-runtime";
 import { getRuntimeConfig } from "openclaw/plugin-sdk/runtime-config-snapshot";
-import { getSessionEntry, type SessionEntry } from "openclaw/plugin-sdk/session-store-runtime";
+import { getSessionEntry } from "openclaw/plugin-sdk/session-store-runtime";
 import {
+  catalogModelLabel,
   listCatalogFamily,
   lookupCatalogModel,
   modelFamilyWords,
-  modelVendor,
   namesKnownModelWord,
   normalizeCatalogText,
   readLineModelAliases,
-  type LineCatalogLookup,
   type LineModelAlias,
 } from "./model-catalog-lookup.js";
-import { loadOpenRouterAccountModels, type OpenRouterAccountModel } from "./model-catalog-tool.js";
+import {
+  loadOpenRouterAccountModels,
+  resolveLineOwnerScopeKey,
+  type OpenRouterAccountModel,
+} from "./model-catalog-tool.js";
+import {
+  classifyLineModelFollowUp,
+  decideLineModelFollowUp,
+  formatLineModelFollowUpReply,
+  type LineModelFollowUp,
+  type LineModelReference,
+  type LineReferencedModel,
+} from "./model-reference.js";
+import {
+  ENGLISH_REPLIES,
+  readSelectionState,
+  THAI_REPLIES,
+  type Replies,
+} from "./model-state-replies.js";
+import {
+  formatLineModelCatalogReply,
+  runLineModelCatalogAction,
+  type LineModelSwitchDeps,
+} from "./model-switch-router.js";
 import { resolveLineProviderApiKey } from "./openrouter-auth.js";
 
 type LineBeforeDispatchEvent = {
@@ -33,6 +57,7 @@ type LineBeforeDispatchEvent = {
   body?: string;
   channel?: string;
   sessionKey?: string;
+  senderId?: string;
   senderIsOwner?: boolean;
 };
 
@@ -201,181 +226,11 @@ export function classifyLineModelStateQuestion(
   return THAI_SCRIPT.test(text) ? classifyThai(text) : classifyEnglish(text);
 }
 
-type SelectedModel = { provider: string; model: string };
+type ReferenceDraft = Pick<LineModelReference, "status" | "models" | "asked">;
 
-function label(model: OpenRouterAccountModel): string {
-  return model.name === model.id ? model.id : `${model.name} (${model.id})`;
+function referenced(models: readonly OpenRouterAccountModel[]): LineReferencedModel[] {
+  return models.slice(0, MAX_LISTED_MODELS).map(({ id, name }) => ({ id, name }));
 }
-
-function bulletList(models: readonly OpenRouterAccountModel[]): string {
-  const shown = models.slice(0, MAX_LISTED_MODELS).map((model) => `• ${label(model)}`);
-  return shown.join("\n");
-}
-
-function vendorOf(selected: SelectedModel): string | undefined {
-  return selected.provider === "openrouter" ? modelVendor(selected.model) : undefined;
-}
-
-type SelectionState = {
-  source: "manual" | "auto" | "default";
-  fallbackFrom?: string;
-  pending: boolean;
-  locked: boolean;
-  lastRun?: string;
-};
-
-function readSelectionState(
-  selected: SelectedModel,
-  entry: SessionEntry | undefined,
-): SelectionState {
-  // Same condition resolveSessionModelRef treats as a session selection.
-  const hasOverride = Boolean(entry?.modelOverride?.trim());
-  const origin =
-    entry?.modelOverrideFallbackOriginProvider && entry.modelOverrideFallbackOriginModel
-      ? `${entry.modelOverrideFallbackOriginProvider}/${entry.modelOverrideFallbackOriginModel}`
-      : undefined;
-  const lastRun =
-    entry?.modelProvider && entry.model ? `${entry.modelProvider}/${entry.model}` : undefined;
-  return {
-    source: !hasOverride ? "default" : entry?.modelOverrideSource === "auto" ? "auto" : "manual",
-    ...(origin ? { fallbackFrom: origin } : {}),
-    pending: entry?.liveModelSwitchPending === true,
-    locked: entry?.modelSelectionLocked === true,
-    ...(lastRun && lastRun !== `${selected.provider}/${selected.model}` ? { lastRun } : {}),
-  };
-}
-
-type Replies = {
-  current(selected: SelectedModel, state: SelectionState): string;
-  currentProvider(selected: SelectedModel): string;
-  available(lookup: LineCatalogLookup): string;
-  provider(lookup: LineCatalogLookup): string;
-  notAvailable(target: string, lookup: LineCatalogLookup): string;
-  family(target: string, models: readonly OpenRouterAccountModel[]): string;
-  summary(models: readonly OpenRouterAccountModel[]): string;
-  catalogUnavailable(): string;
-};
-
-function vendorCounts(models: readonly OpenRouterAccountModel[]): string {
-  const counts = new Map<string, number>();
-  for (const model of models) {
-    const vendor = modelVendor(model.id) ?? model.id;
-    counts.set(vendor, (counts.get(vendor) ?? 0) + 1);
-  }
-  return [...counts]
-    .toSorted(
-      ([leftName, left], [rightName, right]) => right - left || leftName.localeCompare(rightName),
-    )
-    .slice(0, MAX_LISTED_MODELS)
-    .map(([vendor, count]) => `• ${vendor} (${count})`)
-    .join("\n");
-}
-
-function aliasNote(alias: LineModelAlias | undefined, thai: boolean): string {
-  if (!alias) {
-    return "";
-  }
-  return thai
-    ? `\n("${alias.alias}" คือชื่อเรียกที่ตั้งไว้ของ ${alias.provider}/${alias.model})`
-    : `\n("${alias.alias}" is the configured alias for ${alias.provider}/${alias.model})`;
-}
-
-const THAI_REPLIES: Replies = {
-  current: (selected, state) =>
-    [
-      `ตอนนี้ใช้โมเดล ${selected.model} ผ่าน ${selected.provider}`,
-      state.source === "manual"
-        ? "การเลือก: เลือกเอง"
-        : state.source === "auto"
-          ? `การเลือก: สลับอัตโนมัติ (fallback)${state.fallbackFrom ? ` จาก ${state.fallbackFrom}` : ""}`
-          : "การเลือก: ค่าเริ่มต้นของระบบ",
-      ...(state.pending ? ["การเปลี่ยนโมเดลจะมีผลในคำตอบถัดไป"] : []),
-      ...(state.locked ? ["การเลือกโมเดลถูกล็อกไว้"] : []),
-      ...(state.lastRun ? [`คำตอบล่าสุดใช้ ${state.lastRun}`] : []),
-    ].join("\n"),
-  currentProvider: (selected) => {
-    const vendor = vendorOf(selected);
-    return `โมเดลที่ใช้อยู่ (${selected.model}) ให้บริการผ่าน ${selected.provider}${vendor ? ` · ผู้พัฒนา: ${vendor}` : ""}`;
-  },
-  available: (lookup) =>
-    `มี ${lookup.matches.map(label).join(", ")} ในแคตตาล็อก OpenRouter ของบัญชีนี้${aliasNote(lookup.alias, true)}\nพิมพ์ "เปลี่ยนเป็น ${lookup.matches[0]!.id}" ถ้าต้องการใช้`,
-  provider: (lookup) =>
-    lookup.matches
-      .map(
-        (model) => `${label(model)} ให้บริการผ่าน OpenRouter · ผู้พัฒนา: ${modelVendor(model.id) ?? "-"}`,
-      )
-      .join("\n") + aliasNote(lookup.alias, true),
-  notAvailable: (target, lookup) =>
-    [
-      `ไม่มี "${target}" ในแคตตาล็อก OpenRouter ของบัญชีนี้`,
-      ...(lookup.alias
-        ? [
-            `("${lookup.alias.alias}" คือชื่อเรียกที่ตั้งไว้ของ ${lookup.alias.provider}/${lookup.alias.model} ซึ่งไม่อยู่ในแคตตาล็อกนี้)`,
-          ]
-        : []),
-      ...(lookup.suggestions.length > 0
-        ? [`รุ่นอื่นที่มีชื่อคล้ายกัน (ไม่ใช่รุ่นที่ถาม): ${lookup.suggestions.map(label).join(", ")}`]
-        : []),
-    ].join("\n"),
-  family: (target, models) =>
-    models.length === 0
-      ? `ไม่มีโมเดล "${target}" ในแคตตาล็อก OpenRouter ของบัญชีนี้`
-      : `ในแคตตาล็อก OpenRouter ของบัญชีนี้มี ${target} ${models.length} รุ่น:\n${bulletList(models)}${models.length > MAX_LISTED_MODELS ? `\nและอีก ${models.length - MAX_LISTED_MODELS} รุ่น` : ""}`,
-  summary: (models) =>
-    `ในแคตตาล็อก OpenRouter ของบัญชีนี้มีทั้งหมด ${models.length} รุ่น:\n${vendorCounts(models)}`,
-  catalogUnavailable: () =>
-    "ตอนนี้อ่านแคตตาล็อกโมเดลของ OpenRouter ไม่ได้ จึงยังยืนยันไม่ได้ว่ามีรุ่นนี้หรือไม่ ลองถามใหม่อีกครั้งภายหลัง",
-};
-
-const ENGLISH_REPLIES: Replies = {
-  current: (selected, state) =>
-    [
-      `Current model: ${selected.model} via ${selected.provider}`,
-      state.source === "manual"
-        ? "Selection: chosen manually"
-        : state.source === "auto"
-          ? `Selection: automatic fallback${state.fallbackFrom ? ` from ${state.fallbackFrom}` : ""}`
-          : "Selection: configured default",
-      ...(state.pending ? ["A model switch takes effect from the next reply"] : []),
-      ...(state.locked ? ["Model selection is locked"] : []),
-      ...(state.lastRun ? [`The last reply used ${state.lastRun}`] : []),
-    ].join("\n"),
-  currentProvider: (selected) => {
-    const vendor = vendorOf(selected);
-    return `The current model (${selected.model}) is served by ${selected.provider}${vendor ? ` · developer: ${vendor}` : ""}`;
-  },
-  available: (lookup) =>
-    `${lookup.matches.map(label).join(", ")} is in this account's OpenRouter catalog${aliasNote(lookup.alias, false)}\nSend "switch to ${lookup.matches[0]!.id}" to use it`,
-  provider: (lookup) =>
-    lookup.matches
-      .map(
-        (model) =>
-          `${label(model)} is served by OpenRouter · developer: ${modelVendor(model.id) ?? "-"}`,
-      )
-      .join("\n") + aliasNote(lookup.alias, false),
-  notAvailable: (target, lookup) =>
-    [
-      `"${target}" is not in this account's OpenRouter catalog`,
-      ...(lookup.alias
-        ? [
-            `("${lookup.alias.alias}" is the configured alias for ${lookup.alias.provider}/${lookup.alias.model}, which is not in this catalog)`,
-          ]
-        : []),
-      ...(lookup.suggestions.length > 0
-        ? [
-            `Other models with similar names (not the one asked for): ${lookup.suggestions.map(label).join(", ")}`,
-          ]
-        : []),
-    ].join("\n"),
-  family: (target, models) =>
-    models.length === 0
-      ? `No "${target}" models are in this account's OpenRouter catalog`
-      : `This account's OpenRouter catalog has ${models.length} ${target} models:\n${bulletList(models)}${models.length > MAX_LISTED_MODELS ? `\nand ${models.length - MAX_LISTED_MODELS} more` : ""}`,
-  summary: (models) =>
-    `This account's OpenRouter catalog has ${models.length} models:\n${vendorCounts(models)}`,
-  catalogUnavailable: () =>
-    "I can't read the OpenRouter model catalog right now, so I can't confirm whether that model is available. Please ask again shortly.",
-};
 
 function answerFromCatalog(params: {
   question: Extract<LineModelStateQuestion, { targets: string[] }>;
@@ -383,44 +238,98 @@ function answerFromCatalog(params: {
   aliases: readonly LineModelAlias[];
   familyWords: ReadonlySet<string>;
   replies: Replies;
-}): string {
+}): { text: string; reference: ReferenceDraft } {
   const { question, models, aliases, familyWords, replies } = params;
   if (question.targets.length === 0) {
-    return replies.summary(models);
+    return { text: replies.summary(models), reference: { status: "ambiguous", models: [] } };
   }
-  return question.targets
-    .map((target) => {
-      const lookup = lookupCatalogModel({ query: target, models, aliases });
-      if (lookup.matches.length > 0) {
-        return question.kind === "provider" ? replies.provider(lookup) : replies.available(lookup);
-      }
-      // "มี Claude ไหม" asks about a family, which the catalog answers by
-      // listing it. A digit keeps a target out of this path: listing by the
-      // words of "GPT-6" would return GPT-5.6, which is the confusion this
-      // handler exists to prevent.
-      const targetWords = normalizeCatalogText(target).split(" ");
-      const listable =
-        !/\d/u.test(target) &&
-        (question.kind === "list" || targetWords.every((word) => familyWords.has(word)));
-      return listable
-        ? replies.family(target, listCatalogFamily(models, target))
-        : replies.notAvailable(target, lookup);
-    })
-    .join("\n\n");
+  const answers = question.targets.map((target): { text: string; reference: ReferenceDraft } => {
+    const lookup = lookupCatalogModel({ query: target, models, aliases });
+    if (lookup.matches.length > 0) {
+      return {
+        text: question.kind === "provider" ? replies.provider(lookup) : replies.available(lookup),
+        reference: {
+          status: lookup.matches.length === 1 ? "available" : "ambiguous",
+          models: referenced(lookup.matches),
+        },
+      };
+    }
+    // "มี Claude ไหม" asks about a family, which the catalog answers by
+    // listing it. A digit keeps a target out of this path: listing by the
+    // words of "GPT-6" would return GPT-5.6, which is the confusion this
+    // handler exists to prevent.
+    const targetWords = normalizeCatalogText(target).split(" ");
+    const listable =
+      !/\d/u.test(target) &&
+      (question.kind === "list" || targetWords.every((word) => familyWords.has(word)));
+    if (listable) {
+      const family = listCatalogFamily(models, target);
+      return {
+        text: replies.family(target, family),
+        reference: {
+          status: family.length === 1 ? "available" : "ambiguous",
+          models: referenced(family),
+        },
+      };
+    }
+    // Not in the catalog: a single similar model is only a suggestion, which
+    // a follow-up must confirm before anything switches to it.
+    return {
+      text: replies.notAvailable(target, lookup),
+      reference: {
+        status: lookup.suggestions.length === 1 ? "suggested" : "ambiguous",
+        asked: target,
+        models: referenced(lookup.suggestions),
+      },
+    };
+  });
+  const [only] = answers;
+  return {
+    text: answers.map((answer) => answer.text).join("\n\n"),
+    reference:
+      answers.length === 1 && only
+        ? only.reference
+        : {
+            status: "ambiguous",
+            models: [
+              ...new Map(
+                answers
+                  .flatMap((answer) => answer.reference.models)
+                  .map((model) => [model.id, model]),
+              ).values(),
+            ],
+          },
+  };
+}
+
+function switchReply(
+  details: Record<string, unknown> | undefined,
+  model: LineReferencedModel,
+  thai: boolean,
+): string {
+  if (thai) {
+    // The typed-switch wording, so every LINE switch reads the same.
+    return formatLineModelCatalogReply(details ?? {}, {
+      kind: "switch",
+      query: model.id,
+      explicit: true,
+    });
+  }
+  return details?.resolution === "switched"
+    ? `Switched to ${catalogModelLabel(model)}.`
+    : `Switching to ${model.name} did not go through. Please try again.`;
 }
 
 /**
  * Builds the `before_dispatch` handler that answers owner model-state
- * questions from canonical state. It must run before Cloudbath's referent
- * arbitration (see the priority in index.ts), so these turns pay for no
- * model call at all.
+ * questions from canonical state, and their follow-ups from the reference the
+ * answer left. It must run before Cloudbath's referent arbitration (see the
+ * priority in index.ts), so these turns pay for no model call at all.
  */
 export function createLineModelStateRouter(
-  params: {
-    resolveApiKey?: (providerId: string) => Promise<string | undefined>;
-    fetchImpl?: typeof fetch;
+  params: LineModelSwitchDeps & {
+    referenceStore?: PluginStateKeyedStore<LineModelReference>;
     readConfig?: () => OpenClawConfig;
-    now?: () => number;
   } = {},
 ) {
   const resolveApiKey = params.resolveApiKey ?? resolveLineProviderApiKey;
@@ -429,6 +338,58 @@ export function createLineModelStateRouter(
   let catalogWords: { at: number; words: ReadonlySet<string> } | undefined;
   let recognitionReadFailedAt: number | undefined;
 
+  const readReference = async (
+    store: PluginStateKeyedStore<LineModelReference>,
+    scopeKey: string,
+  ): Promise<LineModelReference | undefined> => {
+    const reference = await store.lookup(scopeKey);
+    if (reference && (reference.version !== 1 || reference.scopeKey !== scopeKey)) {
+      await store.delete(scopeKey);
+      return undefined;
+    }
+    return reference;
+  };
+
+  const answerFollowUp = async (turn: {
+    store: PluginStateKeyedStore<LineModelReference>;
+    scopeKey: string;
+    reference: LineModelReference;
+    followUp: LineModelFollowUp;
+    target: { sessionKey: string; agentId?: string; senderId: string };
+    thai: boolean;
+  }): Promise<string> => {
+    const { store, scopeKey, target, thai } = turn;
+    const decision = decideLineModelFollowUp({
+      reference: turn.reference,
+      followUp: turn.followUp,
+      now: now(),
+    });
+    if (decision.kind === "switch") {
+      // The typed switch's own path: fresh account catalog, exact match on the
+      // canonical id, and the session-only OpenRouter applier.
+      const details = await runLineModelCatalogAction(params, target, {
+        action: "search",
+        query: decision.model.id,
+      });
+      if (details?.resolution === "switched") {
+        await store.delete(scopeKey);
+      }
+      return switchReply(details, decision.model, thai);
+    }
+    if (decision.kind === "offer") {
+      await store.register(scopeKey, {
+        version: 1,
+        scopeKey,
+        status: "offered",
+        models: [decision.model],
+        createdAt: now(),
+      });
+    } else if (decision.kind === "decline" || decision.models.length === 0) {
+      await store.delete(scopeKey);
+    }
+    return formatLineModelFollowUpReply(decision, thai);
+  };
+
   return async (
     event: LineBeforeDispatchEvent,
     ctx: LineBeforeDispatchContext,
@@ -436,13 +397,45 @@ export function createLineModelStateRouter(
     if (event.channel !== "line" || event.senderIsOwner !== true) {
       return undefined;
     }
-    const text = event.body ?? event.content ?? "";
-    const classified = classifyLineModelStateQuestion(text);
     const sessionKey = (ctx.sessionKey ?? event.sessionKey)?.trim();
-    if (!classified || !sessionKey) {
+    if (!sessionKey) {
       return undefined;
     }
-    const replies = THAI_SCRIPT.test(text) ? THAI_REPLIES : ENGLISH_REPLIES;
+    const text = event.body ?? event.content ?? "";
+    const thai = THAI_SCRIPT.test(text);
+    const senderId = event.senderId?.trim();
+    const scopeKey = senderId
+      ? resolveLineOwnerScopeKey({ sessionId: sessionKey, requesterSenderId: senderId })
+      : null;
+    const store = params.referenceStore;
+    if (store && scopeKey && senderId) {
+      const reference = await readReference(store, scopeKey);
+      const followUp = reference ? classifyLineModelFollowUp(text) : undefined;
+      if (reference && followUp) {
+        return {
+          handled: true,
+          text: await answerFollowUp({
+            store,
+            scopeKey,
+            reference,
+            followUp,
+            target: { sessionKey, agentId: ctx.agentId, senderId },
+            thai,
+          }),
+        };
+      }
+      if (reference) {
+        // Any other turn moves the conversation on: a later bare
+        // "เปลี่ยนให้หน่อย" must not reach back past it to a stale model.
+        await store.delete(scopeKey);
+      }
+    }
+
+    const classified = classifyLineModelStateQuestion(text);
+    if (!classified) {
+      return undefined;
+    }
+    const replies = thai ? THAI_REPLIES : ENGLISH_REPLIES;
     const cfg = readConfig();
     const entry = getSessionEntry({ agentId: ctx.agentId, sessionKey, readConsistency: "latest" });
     // The same resolver the Control UI's session views use for the selected model.
@@ -513,9 +506,15 @@ export function createLineModelStateRouter(
     if (!recognized && !aboutModels(familyWords)) {
       return undefined;
     }
-    return {
-      handled: true,
-      text: answerFromCatalog({ question, models, aliases, familyWords, replies }),
-    };
+    const answer = answerFromCatalog({ question, models, aliases, familyWords, replies });
+    if (store && scopeKey) {
+      await store.register(scopeKey, {
+        version: 1,
+        scopeKey,
+        ...answer.reference,
+        createdAt: now(),
+      });
+    }
+    return { handled: true, text: answer.text };
   };
 }

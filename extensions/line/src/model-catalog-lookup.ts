@@ -51,6 +51,11 @@ function catalogNames(model: OpenRouterAccountModel): string[] {
   return [model.id, slug, model.ref, model.name, model.name.replace(/^[^:]+:\s*/u, "")];
 }
 
+/** "OpenAI: GPT-5.6 Luna (openai/gpt-5.6-luna)", or the id alone when it is the name. */
+export function catalogModelLabel(model: { id: string; name: string }): string {
+  return model.name === model.id ? model.id : `${model.name} (${model.id})`;
+}
+
 /** The vendor segment of a canonical `vendor/model` id, e.g. "openai". */
 export function modelVendor(id: string): string | undefined {
   const slash = id.lastIndexOf("/");

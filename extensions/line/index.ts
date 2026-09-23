@@ -17,6 +17,12 @@ import {
   createLineModelSwitchGuard,
 } from "./src/model-catalog-tool.js";
 import {
+  LINE_MODEL_REFERENCE_MAX_ENTRIES,
+  LINE_MODEL_REFERENCE_NAMESPACE,
+  LINE_MODEL_REFERENCE_RETENTION_MS,
+  type LineModelReference,
+} from "./src/model-reference.js";
+import {
   LINE_VIDEO_DRAFT_MAX_ENTRIES,
   LINE_VIDEO_DRAFT_NAMESPACE,
   type LineVideoDraft,
@@ -86,10 +92,13 @@ function createLineModelSwitchIntentRouterLoader(
   });
 }
 
-function createLineModelStateRouterLoader() {
+function createLineModelStateRouterLoader(deps: {
+  referenceStore: PluginStateKeyedStore<LineModelReference>;
+  pendingStore: PluginStateKeyedStore<LinePendingModelSelection>;
+}) {
   return createLazyRuntimeModule<LineModelStateRouter>(async () => {
     const { createLineModelStateRouter } = await import("./src/model-state-router.js");
-    return createLineModelStateRouter();
+    return createLineModelStateRouter(deps);
   });
 }
 
@@ -251,7 +260,21 @@ export default defineBundledChannelEntry({
       },
       { priority: LINE_TURN_RESET_HOOK_PRIORITY },
     );
-    const loadModelStateRouter = createLineModelStateRouterLoader();
+    // One picker store for every LINE model-switch path: the AI-facing tool,
+    // the typed switch router and model-state follow-ups.
+    const pendingModelSelectionStore = api.runtime.state.openKeyedStore<LinePendingModelSelection>({
+      namespace: LINE_MODEL_SELECTION_NAMESPACE,
+      maxEntries: LINE_MODEL_SELECTION_MAX_ENTRIES,
+      defaultTtlMs: LINE_MODEL_SELECTION_TTL_MS,
+    });
+    const loadModelStateRouter = createLineModelStateRouterLoader({
+      referenceStore: api.runtime.state.openKeyedStore<LineModelReference>({
+        namespace: LINE_MODEL_REFERENCE_NAMESPACE,
+        maxEntries: LINE_MODEL_REFERENCE_MAX_ENTRIES,
+        defaultTtlMs: LINE_MODEL_REFERENCE_RETENTION_MS,
+      }),
+      pendingStore: pendingModelSelectionStore,
+    });
     api.on(
       "before_dispatch",
       async (event, ctx) => {
@@ -449,11 +472,6 @@ export default defineBundledChannelEntry({
       return router(event, ctx);
     });
 
-    const pendingModelSelectionStore = api.runtime.state.openKeyedStore<LinePendingModelSelection>({
-      namespace: LINE_MODEL_SELECTION_NAMESPACE,
-      maxEntries: LINE_MODEL_SELECTION_MAX_ENTRIES,
-      defaultTtlMs: LINE_MODEL_SELECTION_TTL_MS,
-    });
     api.registerTool(
       (ctx) =>
         createLineModelCatalogTool({

@@ -261,24 +261,62 @@ export function formatLineModelCatalogReply(
 type FetchLike = typeof fetch;
 
 /**
- * Builds the `before_dispatch` handler that deterministically routes owner
- * model-switch intents to the validated LINE catalog picker before the normal
- * agent runs. Shares the same pending-selection store as the AI-facing tool so
- * a numbered choice created by either path resolves the same way.
- *
  * `resolveApiKey`, `applySessionModel`, `fetchImpl`, and `now` default to the
  * live plugin-sdk/session-store implementations; tests inject fakes here
  * instead of reaching into module internals.
  */
-export function createLineModelSwitchIntentRouter(params: {
+export type LineModelSwitchDeps = {
   pendingStore?: PluginStateKeyedStore<LinePendingModelSelection>;
   resolveApiKey?: (providerId: string) => Promise<string | undefined>;
   buildSessionModelApplier?: typeof createLineSessionModelApplier;
   fetchImpl?: FetchLike;
   now?: () => number;
-}) {
-  const resolveApiKey = params.resolveApiKey ?? resolveLineProviderApiKey;
-  const buildSessionModelApplier = params.buildSessionModelApplier ?? createLineSessionModelApplier;
+};
+
+/**
+ * Runs one picker action for an owner's LINE session through the same
+ * `createLineModelCatalogTool` the AI-facing picker uses, so every switch --
+ * typed, numbered or a follow-up -- gets the fresh account catalog, the exact
+ * match rule and the session-only OpenRouter applier. Undefined when the
+ * action could not run (no tool, catalog or auth failure).
+ */
+export async function runLineModelCatalogAction(
+  deps: LineModelSwitchDeps,
+  target: { sessionKey: string; agentId?: string; senderId: string },
+  input: { action: "search"; query: string } | { action: "select"; selection: number },
+): Promise<Record<string, unknown> | undefined> {
+  const tool = createLineModelCatalogTool({
+    messageChannel: "line",
+    senderIsOwner: true,
+    requesterSenderId: target.senderId,
+    sessionId: target.sessionKey,
+    pendingStore: deps.pendingStore,
+    resolveApiKey: deps.resolveApiKey ?? resolveLineProviderApiKey,
+    applySessionModel: (deps.buildSessionModelApplier ?? createLineSessionModelApplier)({
+      agentId: target.agentId,
+      sessionKey: target.sessionKey,
+    }),
+    fetchImpl: deps.fetchImpl,
+    now: deps.now,
+  });
+  if (!tool) {
+    return undefined;
+  }
+  try {
+    const result = await tool.execute("line-model-switch-router", input);
+    return (result.details ?? {}) as Record<string, unknown>;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Builds the `before_dispatch` handler that deterministically routes owner
+ * model-switch intents to the validated LINE catalog picker before the normal
+ * agent runs. Shares the same pending-selection store as the AI-facing tool so
+ * a numbered choice created by either path resolves the same way.
+ */
+export function createLineModelSwitchIntentRouter(params: LineModelSwitchDeps) {
   return async (
     event: LineBeforeDispatchEvent,
     ctx: LineBeforeDispatchContext,
@@ -304,36 +342,18 @@ export function createLineModelSwitchIntentRouter(params: {
       return undefined;
     }
 
-    const tool = createLineModelCatalogTool({
-      messageChannel: "line",
-      senderIsOwner: true,
-      requesterSenderId,
-      sessionId: sessionKey,
-      pendingStore: params.pendingStore,
-      resolveApiKey,
-      applySessionModel: buildSessionModelApplier({ agentId: ctx.agentId, sessionKey }),
-      fetchImpl: params.fetchImpl,
-      now: params.now,
-    });
-    if (!tool) {
-      return undefined;
-    }
-
-    const input =
+    const details = await runLineModelCatalogAction(
+      params,
+      { sessionKey, agentId: ctx.agentId, senderId: requesterSenderId },
       intent.kind === "numeric"
-        ? { action: "select" as const, selection: intent.selection }
-        : { action: "search" as const, query: intent.query };
-
-    let toolResult: { details?: unknown };
-    try {
-      toolResult = await tool.execute("line-model-switch-router", input);
-    } catch {
+        ? { action: "select", selection: intent.selection }
+        : { action: "search", query: intent.query },
+    );
+    if (!details) {
       // Catalog/auth failures fail safe: fall through to ordinary chat rather
       // than surfacing a raw error outside the normal agent reply contract.
       return undefined;
     }
-
-    const details = (toolResult.details ?? {}) as Record<string, unknown>;
     if (intent.kind === "numeric" && details.resolution === "no_pending") {
       // No active pending selection for this session+owner: treat the bare
       // number as ordinary chat instead of a picker reply.

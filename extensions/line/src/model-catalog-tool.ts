@@ -250,7 +250,8 @@ function readInteger(
   return typeof value === "number" && Number.isSafeInteger(value) ? value : fallback;
 }
 
-function resolvePendingSelectionKey(params: {
+/** One owner in one LINE session: the scope of every piece of LINE model-control state. */
+export function resolveLineOwnerScopeKey(params: {
   sessionId?: string;
   requesterSenderId?: string;
 }): string | null {
@@ -468,7 +469,7 @@ export function createLineModelCatalogTool(params: CreateLineModelCatalogToolPar
   // own resolver, so model-switch routing semantics are unchanged.
   const resolveApiKey = params.resolveApiKey ?? resolveLineProviderApiKey;
 
-  const pendingKey = resolvePendingSelectionKey(params);
+  const pendingKey = resolveLineOwnerScopeKey(params);
 
   const applyVerifiedCatalogModel = async (model: OpenRouterAccountModel): Promise<boolean> => {
     if (!params.applySessionModel) {

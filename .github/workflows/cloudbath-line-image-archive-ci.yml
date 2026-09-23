@@ -144,6 +144,9 @@ jobs:
             extensions/line/src/video-ugc-scope.test.ts \
             extensions/line/src/model-catalog-tool.test.ts \
             extensions/line/src/model-state-router.test.ts \
+            extensions/line/src/model-state-follow-up.test.ts \
+            extensions/line/src/model-switch-router.test.ts \
+            extensions/line/src/model-switch-canonical-state.test.ts \
             test/line-model-state-dispatch.integration.test.ts \
             src/agents/tools/session-status-tool.line-owner-auth.test.ts \
             extensions/line/src/session-route.test.ts \
@@ -178,6 +181,10 @@ jobs:
             extensions/line/src/model-catalog-lookup.ts
             extensions/line/src/model-state-router.ts
             extensions/line/src/model-state-router.test.ts
+            extensions/line/src/model-state-replies.ts
+            extensions/line/src/model-reference.ts
+            extensions/line/src/model-state-follow-up.test.ts
+            extensions/line/src/model-switch-router.ts
             test/line-model-state-dispatch.integration.test.ts
             src/agents/tools/session-status-tool.ts
             src/agents/tools/session-status-tool.line-owner-auth.test.ts
@@ -232,6 +239,10 @@ jobs:
             extensions/line/src/model-catalog-lookup.ts \
             extensions/line/src/model-state-router.ts \
             extensions/line/src/model-state-router.test.ts \
+            extensions/line/src/model-state-replies.ts \
+            extensions/line/src/model-reference.ts \
+            extensions/line/src/model-state-follow-up.test.ts \
+            extensions/line/src/model-switch-router.ts \
             src/agents/tools/session-status-tool.ts \
             src/agents/tools/session-status-tool.line-owner-auth.test.ts \
             src/agents/openclaw-tools.ts \
