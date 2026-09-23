@@ -14,6 +14,12 @@ import path from "node:path";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk/plugin-entry";
 import type { PluginStateKeyedStore } from "openclaw/plugin-sdk/plugin-state-runtime";
 import { createTestPluginApi } from "openclaw/plugin-sdk/plugin-test-api";
+import {
+  clearSessionStoreCacheForTest,
+  getSessionEntry,
+  upsertSessionEntry,
+  type SessionEntry,
+} from "openclaw/plugin-sdk/session-store-runtime";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../src/config/types.openclaw.js";
 
@@ -271,6 +277,40 @@ describe("LINE model-state questions through the real dispatch", () => {
     expect(harness.beforeDispatchCalls).toEqual(["line:0", "line:1"]);
     expect(harness.replyResolver).not.toHaveBeenCalled();
     expect(harness.requestedUrls).toEqual([]);
+  });
+
+  it("switches on the production follow-up with no referent, agent or web call", async () => {
+    const harness = createHarness();
+    await upsertSessionEntry({
+      agentId: "main",
+      sessionKey: SESSION_KEY,
+      entry: {
+        sessionId: "sess-line-owner",
+        providerOverride: "openrouter",
+        modelOverride: "deepseek/deepseek-v4-flash-0731",
+        modelOverrideSource: "user",
+        updatedAt: 1,
+      } as SessionEntry,
+    });
+    await harness.ask("มี GPT-5.6 Luna ไหม");
+    harness.beforeDispatchCalls.length = 0;
+    harness.requestedUrls.length = 0;
+
+    const delivered = await harness.ask("เปลี่ยนให้หน่อย");
+
+    expect(delivered).toEqual(["เปลี่ยนเป็น OpenAI: GPT-5.6 Luna แล้ว"]);
+    expect(harness.beforeDispatchCalls).toEqual(["line:0", "line:1"]);
+    expect(harness.replyResolver).not.toHaveBeenCalled();
+    // The switch re-reads the account catalog before applying; nothing else.
+    expect(harness.requestedUrls).toEqual([CATALOG_URL]);
+    clearSessionStoreCacheForTest();
+    const entry = getSessionEntry({
+      agentId: "main",
+      sessionKey: SESSION_KEY,
+      readConsistency: "latest",
+    });
+    expect(entry?.providerOverride).toBe("openrouter");
+    expect(entry?.modelOverride).toBe("openai/gpt-5.6-luna");
   });
 
   it("still hands ordinary chat to Cloudbath and then the agent", async () => {
