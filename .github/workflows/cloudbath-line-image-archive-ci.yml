@@ -143,6 +143,8 @@ jobs:
             extensions/line/src/video-owner-flow.e2e.test.ts \
             extensions/line/src/video-ugc-scope.test.ts \
             extensions/line/src/model-catalog-tool.test.ts \
+            extensions/line/src/model-state-router.test.ts \
+            test/line-model-state-dispatch.integration.test.ts \
             src/agents/tools/session-status-tool.line-owner-auth.test.ts \
             extensions/line/src/session-route.test.ts \
             extensions/line/src/send.test.ts \
@@ -173,6 +175,10 @@ jobs:
             extensions/line/src/bot-handlers.test.ts
             extensions/line/src/model-catalog-tool.ts
             extensions/line/src/model-catalog-tool.test.ts
+            extensions/line/src/model-catalog-lookup.ts
+            extensions/line/src/model-state-router.ts
+            extensions/line/src/model-state-router.test.ts
+            test/line-model-state-dispatch.integration.test.ts
             src/agents/tools/session-status-tool.ts
             src/agents/tools/session-status-tool.line-owner-auth.test.ts
             src/agents/openclaw-tools.ts
@@ -211,7 +217,8 @@ jobs:
             --tsconfig config/tsconfig/oxlint.extensions.json \
             extensions/line/index.ts \
             extensions/cloudbath-line-image-archive \
-            test/cloudbath-workspace-policy-prewarm.integration.test.ts
+            test/cloudbath-workspace-policy-prewarm.integration.test.ts \
+            test/line-model-state-dispatch.integration.test.ts
 
       - name: Lint scoped LINE changes
         if: steps.dependencies.outcome == 'success' && !cancelled()
@@ -222,6 +229,9 @@ jobs:
             extensions/line/src/bot-handlers.test.ts \
             extensions/line/src/model-catalog-tool.ts \
             extensions/line/src/model-catalog-tool.test.ts \
+            extensions/line/src/model-catalog-lookup.ts \
+            extensions/line/src/model-state-router.ts \
+            extensions/line/src/model-state-router.test.ts \
             src/agents/tools/session-status-tool.ts \
             src/agents/tools/session-status-tool.line-owner-auth.test.ts \
             src/agents/openclaw-tools.ts \

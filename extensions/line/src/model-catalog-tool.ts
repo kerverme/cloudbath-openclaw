@@ -1,9 +1,16 @@
 import { createHash } from "node:crypto";
+import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import { applyModelOverrideToSessionEntry } from "openclaw/plugin-sdk/model-session-runtime";
 import type { PluginStateKeyedStore } from "openclaw/plugin-sdk/plugin-state-runtime";
 import { patchSessionEntry } from "openclaw/plugin-sdk/session-store-runtime";
 import { jsonResult } from "openclaw/plugin-sdk/tool-results";
 import { Type } from "typebox";
+import {
+  lookupCatalogModel,
+  modelVendor,
+  normalizeCatalogText,
+  readLineModelAliases,
+} from "./model-catalog-lookup.js";
 import { resolveLineProviderApiKey } from "./openrouter-auth.js";
 
 const OPENROUTER_USER_MODELS_URL = "https://openrouter.ai/api/v1/models/user";
@@ -54,6 +61,9 @@ type CreateLineModelCatalogToolParams = {
   /** Overrides canonical LINE OpenRouter credential resolution (tests/routers). */
   resolveApiKey?: (providerId: string) => Promise<string | undefined>;
   applySessionModel?: (model: OpenRouterAccountModel) => Promise<boolean>;
+  /** Source of the configured model aliases the read-only lookup honors. */
+  config?: OpenClawConfig;
+  agentId?: string;
   fetchImpl?: FetchLike;
   now?: () => number;
 };
@@ -78,10 +88,11 @@ const CatalogQuerySchema = Type.Object(
           Type.Literal("select"),
           Type.Literal("page"),
           Type.Literal("cancel"),
+          Type.Literal("lookup"),
         ],
         {
           description:
-            "search switches only a unique exact catalog match or creates a numbered candidate selection when multiple matches remain; select freshly validates and switches a numbered pending choice; page changes the displayed candidate page; cancel clears it.",
+            "lookup is read-only and never switches: it reports whether the catalog has a model under exactly that name or alias; search switches only a unique exact catalog match or creates a numbered candidate selection when multiple matches remain; select freshly validates and switches a numbered pending choice; page changes the displayed candidate page; cancel clears it.",
         },
       ),
     ),
@@ -218,16 +229,6 @@ export function createLineSessionModelApplier(params: {
     });
     return updated?.providerOverride === "openrouter" && updated.modelOverride === model.id;
   };
-}
-
-function normalizeCatalogText(value: string): string {
-  return value
-    .normalize("NFKD")
-    .toLocaleLowerCase("en-US")
-    .replace(/[\u0300-\u036f]/gu, "")
-    .replace(/[^\p{L}\p{N}]+/gu, " ")
-    .trim()
-    .replace(/\s+/gu, " ");
 }
 
 function isExactCatalogMatch(model: OpenRouterAccountModel, normalizedQuery: string): boolean {
@@ -484,7 +485,7 @@ export function createLineModelCatalogTool(params: CreateLineModelCatalogToolPar
     name: LINE_MODEL_CATALOG_TOOL_NAME,
     label: "OpenRouter Account Models",
     description:
-      "OWNER-ONLY OpenRouter catalog and session model picker for LINE. Semantically interpret the owner's wording yourself, but do not treat model comparisons, opinions, or ordinary discussion as a switch request. For a new clear switch request call action=search with literal model-family terms. Only a unique exact catalog match is switched directly; multiple matches are stored for this exact LINE session and owner and returned as numbered, paginated choices. A sole partial match requires clarification and cannot switch. For a numeric reply call action=select only when the conversation has an active picker; no_pending means treat the number as ordinary chat. Use action=page with the returned offset for more choices and action=cancel for cancellation. This tool re-fetches the authenticated catalog before a numbered switch and is the only AI-facing LINE model mutation path. Never construct or pass a model ID yourself.",
+      "OWNER-ONLY OpenRouter catalog and session model picker for LINE. Semantically interpret the owner's wording yourself, but do not treat model comparisons, opinions, or ordinary discussion as a switch request. To answer whether a model exists, is available, or who provides it, call action=lookup with the owner's literal wording: it never switches, and only its models list is availability -- similarModelsNotRequested are other models, never the one asked for. Never use web_search for this account's model catalog or the session's model. For a new clear switch request call action=search with literal model-family terms. Only a unique exact catalog match is switched directly; multiple matches are stored for this exact LINE session and owner and returned as numbered, paginated choices. A sole partial match requires clarification and cannot switch. For a numeric reply call action=select only when the conversation has an active picker; no_pending means treat the number as ordinary chat. Use action=page with the returned offset for more choices and action=cancel for cancellation. This tool re-fetches the authenticated catalog before a numbered switch and is the only AI-facing LINE model mutation path. Never construct or pass a model ID yourself.",
     parameters: CatalogQuerySchema,
     execute: async (_toolCallId: string, rawParams: unknown, signal?: AbortSignal) => {
       const input =
@@ -492,7 +493,10 @@ export function createLineModelCatalogTool(params: CreateLineModelCatalogToolPar
           ? (rawParams as Record<string, unknown>)
           : {};
       const action =
-        input.action === "select" || input.action === "page" || input.action === "cancel"
+        input.action === "select" ||
+        input.action === "page" ||
+        input.action === "cancel" ||
+        input.action === "lookup"
           ? input.action
           : "search";
 
@@ -524,6 +528,44 @@ export function createLineModelCatalogTool(params: CreateLineModelCatalogToolPar
         const nextPending = { ...pending, offset: requestedOffset };
         await params.pendingStore.register(pendingKey, nextPending);
         return jsonResult(pendingPageResult(nextPending));
+      }
+
+      if (action === "lookup") {
+        // Read-only by construction: no pending picker, no session applier.
+        const query = typeof input.query === "string" ? input.query.trim() : "";
+        if (!query) {
+          return jsonResult({ resolution: "query_required", readOnly: true });
+        }
+        const apiKey = await resolveApiKey("openrouter");
+        if (!apiKey?.trim()) {
+          throw new Error("OPENROUTER_ACCOUNT_CATALOG_AUTH_UNAVAILABLE");
+        }
+        const models = await loadOpenRouterAccountModels({
+          apiKey,
+          fetchImpl: params.fetchImpl,
+          signal,
+        });
+        const lookup = lookupCatalogModel({
+          query,
+          models,
+          aliases: readLineModelAliases(params.config, params.agentId),
+        });
+        return jsonResult({
+          source: "openrouter-user-account",
+          readOnly: true,
+          resolution: lookup.matches.length > 0 ? "available" : "not_available",
+          query,
+          ...(lookup.alias ? { alias: lookup.alias } : {}),
+          models: lookup.matches.map(({ id, name, ref }) => ({
+            id,
+            name,
+            ref,
+            vendor: modelVendor(id),
+          })),
+          // Other models with a similar name. They are not the one asked for.
+          similarModelsNotRequested: lookup.suggestions.map(({ id, name }) => ({ id, name })),
+          totalCatalogModels: models.length,
+        });
       }
 
       if (action === "select") {

@@ -4,6 +4,8 @@
 export { resolveChannelModelOverride } from "../channels/model-overrides.js";
 export { resolveAgentMaxConcurrent } from "../config/agent-limits.js";
 export { resolvePersistedSessionRuntimeId } from "../agents/session-runtime-compat.js";
+export { buildModelAliasIndex } from "../agents/model-selection.js";
+export { resolveSessionModelRef } from "../agents/session-model-ref.js";
 export {
   applyModelOverrideToSessionEntry,
   isModelSelectionLocked,

@@ -64,6 +64,9 @@ type RegisteredLineCardCommand = OpenClawPluginCommandDefinition;
 type LineModelSwitchIntentRouter = ReturnType<
   typeof import("./src/model-switch-router.js").createLineModelSwitchIntentRouter
 >;
+type LineModelStateRouter = ReturnType<
+  typeof import("./src/model-state-router.js").createLineModelStateRouter
+>;
 type LineVideoModelControlRouter = ReturnType<
   typeof import("./src/video-model-control.js").createLineVideoModelControlRouter
 >;
@@ -82,6 +85,24 @@ function createLineModelSwitchIntentRouterLoader(
     return createLineModelSwitchIntentRouter({ pendingStore });
   });
 }
+
+function createLineModelStateRouterLoader() {
+  return createLazyRuntimeModule<LineModelStateRouter>(async () => {
+    const { createLineModelStateRouter } = await import("./src/model-state-router.js");
+    return createLineModelStateRouter();
+  });
+}
+
+/**
+ * `before_dispatch` is first-claim-wins in priority order, then registration
+ * order across plugins. Model-state questions are answered from canonical
+ * state, so they must be claimed before Cloudbath's referent arbitration
+ * (default priority) spends a model call on them. The per-turn reset runs
+ * above that, and claims nothing: a turn claimed before it would still carry
+ * the previous turn's video-draft relay state, which cancels the reply.
+ */
+const LINE_TURN_RESET_HOOK_PRIORITY = 200;
+const LINE_MODEL_STATE_HOOK_PRIORITY = 100;
 
 function createLineVideoModelControlRouterLoader(deps: {
   preferenceStore: PluginStateKeyedStore<LineVideoModelPreferenceState>;
@@ -221,11 +242,24 @@ export default defineBundledChannelEntry({
     // Storyboard-first is the owner's default video flow, so the legacy draft
     // tool exists for one turn only when the owner asked for it by marker.
     const legacyVideoDraftGate = createLineLegacyVideoDraftGate();
-    api.on("before_dispatch", async (event, ctx) => {
-      legacyVideoDraftGate.beginTurn(event, ctx);
-      const relay = await loadVideoDraftReplyRelay();
-      relay.beginTurn(event, ctx);
-    });
+    api.on(
+      "before_dispatch",
+      async (event, ctx) => {
+        legacyVideoDraftGate.beginTurn(event, ctx);
+        const relay = await loadVideoDraftReplyRelay();
+        relay.beginTurn(event, ctx);
+      },
+      { priority: LINE_TURN_RESET_HOOK_PRIORITY },
+    );
+    const loadModelStateRouter = createLineModelStateRouterLoader();
+    api.on(
+      "before_dispatch",
+      async (event, ctx) => {
+        const router = await loadModelStateRouter();
+        return router(event, ctx);
+      },
+      { priority: LINE_MODEL_STATE_HOOK_PRIORITY },
+    );
 
     api.registerTool(
       (ctx) =>
@@ -436,6 +470,8 @@ export default defineBundledChannelEntry({
             agentId: ctx.agentId,
             sessionKey: ctx.sessionKey,
           }),
+          config: ctx.config,
+          agentId: ctx.agentId,
         }),
       {
         names: [LINE_MODEL_CATALOG_TOOL_NAME],
