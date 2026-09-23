@@ -554,6 +554,91 @@ describe("LINE OpenRouter account catalog adapter", () => {
   });
 });
 
+describe("read-only catalog lookup", () => {
+  const lunaCatalog = () =>
+    catalogResponse([
+      { id: "openai/gpt-5.6-luna", name: "OpenAI: GPT-5.6 Luna" },
+      { id: "deepseek/deepseek-v4-flash-0731", name: "DeepSeek: DeepSeek V4 Flash" },
+      { id: "deepseek/deepseek-v4-chat", name: "DeepSeek: DeepSeek V4 Chat" },
+    ]);
+
+  it("reports GPT-6 Luna as not available and GPT-5.6 Luna only as another model", async () => {
+    const applySessionModel = vi.fn(async () => true);
+    const pendingStore = createMemoryPendingStore();
+    const tool = ownerTool({
+      applySessionModel,
+      pendingStore,
+      fetchImpl: vi.fn(async () => lunaCatalog()),
+    });
+
+    const data = readJsonResult(
+      await tool!.execute("lookup", { action: "lookup", query: "OpenAI: GPT-6 Luna" }),
+    );
+
+    expect(data).toMatchObject({
+      readOnly: true,
+      resolution: "not_available",
+      models: [],
+      similarModelsNotRequested: [{ id: "openai/gpt-5.6-luna", name: "OpenAI: GPT-5.6 Luna" }],
+    });
+    expect(applySessionModel).not.toHaveBeenCalled();
+    expect(await pendingStore.entries()).toEqual([]);
+  });
+
+  it("reports an exact name as available and still does not switch", async () => {
+    const applySessionModel = vi.fn(async () => true);
+    const tool = ownerTool({ applySessionModel, fetchImpl: vi.fn(async () => lunaCatalog()) });
+
+    const data = readJsonResult(
+      await tool!.execute("lookup", { action: "lookup", query: "OpenAI: GPT-5.6 Luna" }),
+    );
+
+    expect(data).toMatchObject({
+      resolution: "available",
+      models: [
+        {
+          id: "openai/gpt-5.6-luna",
+          name: "OpenAI: GPT-5.6 Luna",
+          ref: "openrouter/openai/gpt-5.6-luna",
+          vendor: "openai",
+        },
+      ],
+      similarModelsNotRequested: [],
+    });
+    // The same exact wording through action=search would switch the session.
+    expect(applySessionModel).not.toHaveBeenCalled();
+  });
+
+  it("honors a configured alias", async () => {
+    const tool = ownerTool({
+      fetchImpl: vi.fn(async () => lunaCatalog()),
+      config: {
+        agents: { defaults: { models: { "openrouter/openai/gpt-5.6-luna": { alias: "luna" } } } },
+      },
+    });
+
+    const data = readJsonResult(await tool!.execute("lookup", { action: "lookup", query: "luna" }));
+
+    expect(data).toMatchObject({
+      resolution: "available",
+      alias: { alias: "luna", provider: "openrouter", model: "openai/gpt-5.6-luna" },
+      models: [expect.objectContaining({ id: "openai/gpt-5.6-luna" })],
+    });
+  });
+
+  it("leaves an open numbered picker untouched", async () => {
+    const pendingStore = createMemoryPendingStore();
+    const tool = ownerTool({ pendingStore, fetchImpl: vi.fn(async () => lunaCatalog()) });
+    await tool!.execute("search", { action: "search", query: "deepseek v4" });
+    const before = await pendingStore.entries();
+    expect(before).toHaveLength(1);
+
+    await tool!.execute("lookup", { action: "lookup", query: "GPT-6 Luna" });
+
+    expect(await pendingStore.entries()).toEqual(before);
+  });
+});
+
 describe("OpenRouter account catalog transport", () => {
   it("uses the authenticated account endpoint and never returns raw authorization data", async () => {
     const fetchImpl = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
