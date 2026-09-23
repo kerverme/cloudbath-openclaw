@@ -34,8 +34,20 @@ export type ChatFinalBranch =
   /** Final for a session the UI is not viewing; cached, not rendered. */
   | "cached_other_session";
 
+/** What the turn's language policy decided about one assistant text. */
+export type ChatProjectionDisposition = "valid" | "repaired" | "regenerated" | "fallback";
+
 export type ChatProjectionTraceFields = Readonly<{
   state?: ChatProjectionState;
+  /** The expected reply language for the turn, as a subtag. Never text. */
+  expectedLanguage?: string;
+  expectedLanguageSource?: string;
+  /** Why validation failed, from the closed reason set. Never a token. */
+  validationReason?: string;
+  /** Script NAMES only — never the characters that carried them. */
+  detectedScripts?: readonly string[];
+  violatingScripts?: readonly string[];
+  disposition?: string;
   /** The run id on the payload, which is what the UI matches against. */
   runId?: string;
   /** The agent run the payload came from, when it differs from `runId`. */
@@ -50,6 +62,12 @@ export type ChatProjectionTraceFields = Readonly<{
 
 const TRACE_FIELD_KEYS = [
   "state",
+  "expectedLanguage",
+  "expectedLanguageSource",
+  "validationReason",
+  "detectedScripts",
+  "violatingScripts",
+  "disposition",
   "runId",
   "sourceRunId",
   "seq",
