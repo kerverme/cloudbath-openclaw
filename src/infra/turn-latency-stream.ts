@@ -72,40 +72,73 @@ export function observeAssistantStreamLatency<T extends AssistantMessageEventStr
     }
   };
 
-  // Delegation rather than a rebuilt object: a provider stream may expose more
-  // than the read contract (`push`/`end` on a full contract, provider-specific
-  // members), and none of that may be dropped on the way through.
-  const observed = Object.create(stream) as T;
-  Object.defineProperty(observed, OBSERVED, { value: true });
-  Object.defineProperty(observed, "result", {
-    value: async (): Promise<AssistantMessage> => {
-      try {
-        const message = await stream.result();
-        // A non-streamed completion never emits `done` through this wrapper,
-        // so its result is the only place its totals exist.
-        if (!settled) {
-          settled = true;
-          resolveHandle()?.complete(completionTotals(message));
-        }
-        return message;
-      } catch (error) {
-        if (!settled) {
-          settled = true;
-          resolveHandle()?.fail();
-        }
-        throw error;
+  const observedResult = async (): Promise<AssistantMessage> => {
+    try {
+      const message = await stream.result();
+      // A non-streamed completion never emits `done` through this wrapper,
+      // so its result is the only place its totals exist.
+      if (!settled) {
+        settled = true;
+        resolveHandle()?.complete(completionTotals(message));
       }
+      return message;
+    } catch (error) {
+      if (!settled) {
+        settled = true;
+        resolveHandle()?.fail();
+      }
+      throw error;
+    }
+  };
+  const observedIterator = async function* (): AsyncGenerator<AssistantMessageEvent> {
+    for await (const event of stream) {
+      observe(event);
+      yield event;
+    }
+  };
+
+  // A Proxy, because the attempt re-wraps this stream IN PLACE: wrappers such
+  // as wrapStreamFnHandleSensitiveStopReason assign `result` and the async
+  // iterator on the object they are handed. Own properties defined here were
+  // non-writable, and the first assignment threw "Cannot assign to read only
+  // property 'result'", failing every main-agent turn with the profiler on.
+  //
+  // Assignments land in `assigned`, never on the provider's stream. Every other
+  // member is read from the provider's stream and its methods run with the
+  // provider's stream as `this`, so push/end change ITS state rather than a
+  // shadow copy on the wrapper.
+  const assigned = new Map<PropertyKey, unknown>();
+  const bound = new WeakMap<object, unknown>();
+  return new Proxy(stream, {
+    get(target, property) {
+      if (assigned.has(property)) {
+        return assigned.get(property);
+      }
+      if (property === OBSERVED) {
+        return true;
+      }
+      if (property === "result") {
+        return observedResult;
+      }
+      if (property === Symbol.asyncIterator) {
+        return observedIterator;
+      }
+      const value: unknown = Reflect.get(target, property, target);
+      if (typeof value !== "function") {
+        return value;
+      }
+      let method = bound.get(value);
+      if (!method) {
+        method = (value as (...args: unknown[]) => unknown).bind(target);
+        bound.set(value, method);
+      }
+      return method;
+    },
+    set(_target, property, value) {
+      assigned.set(property, value);
+      return true;
     },
   });
-  Object.defineProperty(observed, Symbol.asyncIterator, {
-    value: async function* (): AsyncGenerator<AssistantMessageEvent> {
-      for await (const event of stream) {
-        observe(event);
-        yield event;
-      }
-    },
-  });
-  return observed;
 }
 
 /** Observes a stream function's result, whether it resolves now or later. */

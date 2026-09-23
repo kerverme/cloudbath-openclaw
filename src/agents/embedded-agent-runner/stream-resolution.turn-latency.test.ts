@@ -1,242 +1,380 @@
 /**
- * The main agent's stream is the one the turn record could not see.
+ * The main agent's stream, observed end to end on the path production takes.
  *
- * Production, with the reply profiler on, reported `main_agent=?ms(ttft=?)`
- * while the pre-agent helper closed correctly. The helper runs through the
- * `src/llm/stream.ts` facade, which is where the observer was installed; an
- * embedded attempt almost never does. Every transport-aware API resolves to a
- * boundary-aware transport instead — `openai-completions` among them, which is
- * how OpenRouter models run — so the transport opened the request, recorded
- * headers, and nothing ever closed it: no first token, no completion, outcome
- * `abandoned`.
+ * Two production defects live here, and both needed the real path to show:
  *
- * These drive the real resolver with the network faked, so the branch selection
- * is production's and only the transport is a stub.
+ * 1. #92's observer sat on the `src/llm/stream.ts` facade, which an embedded
+ *    attempt almost never uses. `openai-completions` (how OpenRouter models run)
+ *    resolves to a boundary-aware transport instead, so the record showed
+ *    `main_agent=?ms(ttft=?)`: opened by the transport, never closed.
+ *
+ * 2. #93 moved the observer to `resolveEmbeddedAgentStreamFn`, and every
+ *    main-agent turn with the profiler on then failed immediately with
+ *
+ *      Cannot assign to read only property 'result' of object '#<AssistantMessageEventStream>'
+ *
+ *    because the attempt re-wraps the resolved stream IN PLACE — among others
+ *    `wrapStreamFnHandleSensitiveStopReason` assigns `result` and the async
+ *    iterator — and the observer had defined both as non-writable own
+ *    properties.
+ *
+ * Nothing here is module-mocked. A loopback server speaks OpenAI-compatible SSE,
+ * and the real resolver, the real boundary-aware transport, the real guarded
+ * fetch (which is what opens the ledger call and records headers), the real SSE
+ * parser and the real downstream wrapper all run. That is also what keeps this
+ * file safe in the non-isolated unit-fast lane: a second factory for
+ * provider-transport-stream.js would collide with stream-resolution.test.ts.
  */
-import type {
-  AssistantMessage,
-  AssistantMessageEvent,
-  AssistantMessageEventStreamLike,
+import { createServer, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
+import {
+  type AssistantMessage,
+  type AssistantMessageEvent,
+  type AssistantMessageEventStream,
+  createAssistantMessageEventStream,
 } from "@openclaw/llm-core";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import {
   createTurnLatencyLedger,
+  runWithLlmCallReason,
   runWithTurnLatencyLedger,
   type TurnLatencyLedger,
+  type TurnLatencyModelCall,
 } from "../../infra/turn-latency-ledger.js";
 import type { StreamFn } from "../runtime/index.js";
+import { wrapStreamFnHandleSensitiveStopReason } from "./run/attempt.stop-reason-recovery.js";
+import {
+  describeEmbeddedAgentStreamStrategy,
+  resolveEmbeddedAgentStreamFn,
+} from "./stream-resolution.js";
 
-const hoisted = vi.hoisted(() => ({
-  createBoundaryAwareStreamFnForModel: vi.fn(),
-  createTransportAwareStreamFnForModel: vi.fn(() => undefined),
-}));
-
-// Only the transport is faked. The resolver's own branch selection, which is
-// what sends production down this path, runs for real.
-vi.mock("../provider-transport-stream.js", () => ({
-  createBoundaryAwareStreamFnForModel: hoisted.createBoundaryAwareStreamFnForModel,
-  createTransportAwareStreamFnForModel: hoisted.createTransportAwareStreamFnForModel,
-}));
-
-const { describeEmbeddedAgentStreamStrategy, resolveEmbeddedAgentStreamFn } =
-  await import("./stream-resolution.js");
-
-/** The production model shape: an OpenRouter DeepSeek route. */
-const MODEL = {
-  provider: "openrouter",
-  id: "deepseek/deepseek-v4-flash-0731",
-  api: "openai-completions",
-} as Parameters<typeof resolveEmbeddedAgentStreamFn>[0]["model"];
+type ResolverModel = Parameters<typeof resolveEmbeddedAgentStreamFn>[0]["model"];
 
 const REPLY_TEXT = "เดือน 1-2: วิ่งสบาย ๆ";
+/** Long enough that headers-time and first-token time cannot coincide. */
+const FIRST_TOKEN_DELAY_MS = 80;
 
-function assistantMessage(): AssistantMessage {
-  return {
-    role: "assistant",
-    content: [{ type: "text", text: REPLY_TEXT }],
-    api: "openai-completions",
-    provider: "openrouter",
+let server: Server | undefined;
+
+afterEach(async () => {
+  const open = server;
+  server = undefined;
+  if (open) {
+    await new Promise<void>((resolve) => {
+      open.close(() => resolve());
+    });
+  }
+});
+
+function chunk(delta: Record<string, unknown>, extra: Record<string, unknown> = {}): string {
+  return `data: ${JSON.stringify({
+    id: "chatcmpl-turn-latency",
+    object: "chat.completion.chunk",
+    created: Math.floor(Date.now() / 1000),
     model: "deepseek/deepseek-v4-flash-0731",
-    usage: {
-      input: 4200,
-      output: 700,
-      cacheRead: 0,
-      cacheWrite: 0,
-      totalTokens: 4900,
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-    },
-    stopReason: "stop",
-    timestamp: 0,
-  } as AssistantMessage;
+    choices: [{ index: 0, delta, finish_reason: null }],
+    ...extra,
+  })}\n\n`;
 }
 
 /**
- * A boundary-aware transport, as the resolver would return one.
- *
- * Opening the ledger call is the real transport's job (`buildGuardedModelFetch`
- * does it before the request goes out), so the stub does the same thing at the
- * same point.
+ * An OpenAI-compatible endpoint that opens the stream, waits, and only then
+ * sends content — the shape that makes headers-time flatter first-token.
  */
-function fakeBoundaryAwareStreamFn(
-  ledger: TurnLatencyLedger,
-  events: AssistantMessageEvent[],
-): StreamFn {
-  return (() => {
-    const call = ledger.openModelCall({
-      provider: MODEL.provider,
-      model: MODEL.id,
-      callReason: "main_agent",
+async function startCompletionsServer(options: { status?: number } = {}): Promise<string> {
+  const listening = createServer((request, response) => {
+    request.resume();
+    request.on("end", () => {
+      if (options.status && options.status !== 200) {
+        response.writeHead(options.status, { "content-type": "application/json" });
+        response.end('{"error":{"message":"upstream unavailable"}}');
+        return;
+      }
+      response.writeHead(200, {
+        "content-type": "text/event-stream; charset=utf-8",
+        "cache-control": "no-cache",
+      });
+      response.flushHeaders();
+      // The role-only opener carries no text, so it must not count as first token.
+      response.write(chunk({ role: "assistant", content: "" }));
+      setTimeout(() => {
+        response.write(chunk({ content: REPLY_TEXT }));
+        response.write(
+          `data: ${JSON.stringify({
+            id: "chatcmpl-turn-latency",
+            object: "chat.completion.chunk",
+            created: Math.floor(Date.now() / 1000),
+            model: "deepseek/deepseek-v4-flash-0731",
+            choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+            usage: { prompt_tokens: 4200, completion_tokens: 700, total_tokens: 4900 },
+          })}\n\n`,
+        );
+        response.write("data: [DONE]\n\n");
+        response.end();
+      }, FIRST_TOKEN_DELAY_MS);
     });
-    call.responseHeaders();
-    const stream: AssistantMessageEventStreamLike = {
-      result: async () => assistantMessage(),
-      async *[Symbol.asyncIterator]() {
-        for (const event of events) {
-          yield event;
-        }
-      },
-    };
-    return stream;
-  }) as StreamFn;
+  });
+  server = listening;
+  await new Promise<void>((resolve, reject) => {
+    listening.once("error", reject);
+    listening.listen(0, "127.0.0.1", resolve);
+  });
+  return `http://127.0.0.1:${(listening.address() as AddressInfo).port}/v1`;
 }
+
+/** The production model shape, pointed at the loopback endpoint. */
+function productionModel(baseUrl: string): ResolverModel {
+  return {
+    id: "deepseek/deepseek-v4-flash-0731",
+    name: "DeepSeek Flash",
+    api: "openai-completions",
+    provider: "openrouter",
+    baseUrl,
+    reasoning: false,
+    input: ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 65_536,
+    maxTokens: 1024,
+  } as unknown as ResolverModel;
+}
+
+const CONTEXT = {
+  systemPrompt: "system",
+  messages: [{ role: "user", content: "hi", timestamp: 0 }],
+  tools: [],
+} as never;
 
 function newLedger(): TurnLatencyLedger {
   return createTurnLatencyLedger({ enabled: true, channel: "line", turnId: "line:m-1" });
 }
 
-beforeEach(() => {
-  hoisted.createBoundaryAwareStreamFnForModel.mockReset();
-  hoisted.createTransportAwareStreamFnForModel.mockReset();
-  hoisted.createTransportAwareStreamFnForModel.mockReturnValue(undefined);
-});
-
-describe("the embedded agent's resolved stream is on the turn record", () => {
-  it("takes the boundary-aware branch for the production model", () => {
-    hoisted.createBoundaryAwareStreamFnForModel.mockReturnValue((() => {}) as unknown as StreamFn);
-
-    // The strategy the record could not see: not the src/llm facade.
-    expect(describeEmbeddedAgentStreamStrategy({ currentStreamFn: undefined, model: MODEL })).toBe(
-      "boundary-aware:openai-completions",
-    );
-  });
-
-  it("records first token and completion for a streamed main-agent turn", async () => {
-    const ledger = newLedger();
-    hoisted.createBoundaryAwareStreamFnForModel.mockReturnValue(
-      fakeBoundaryAwareStreamFn(ledger, [
-        { type: "start", partial: assistantMessage() },
-        { type: "text_delta", contentIndex: 0, delta: "" },
-        { type: "text_delta", contentIndex: 0, delta: REPLY_TEXT },
-        { type: "done", reason: "stop", message: assistantMessage() },
-      ]),
-    );
-
-    await runWithTurnLatencyLedger(ledger, async () => {
-      const streamFn = resolveEmbeddedAgentStreamFn({
+/** One main-agent turn, composed the way the attempt composes it. */
+async function runMainAgentTurn(
+  ledger: TurnLatencyLedger,
+  model: ResolverModel,
+  options: { rewrap?: boolean } = {},
+): Promise<{ events: AssistantMessageEvent[]; message: AssistantMessage }> {
+  return await runWithTurnLatencyLedger(ledger, () =>
+    runWithLlmCallReason("main_agent", async () => {
+      const resolved = resolveEmbeddedAgentStreamFn({
         currentStreamFn: undefined,
         sessionId: "session-1",
-        model: MODEL,
+        model,
+        resolvedApiKey: "test-key",
       });
-      const stream = await streamFn(MODEL as never, { messages: [] } as never, undefined);
-      for await (const _event of stream) {
-        // The agent drives the stream; the observer only watches it pass.
+      const streamFn = options.rewrap ? wrapStreamFnHandleSensitiveStopReason(resolved) : resolved;
+      const stream = await streamFn(model as never, CONTEXT, undefined);
+      const events: AssistantMessageEvent[] = [];
+      for await (const event of stream) {
+        events.push(event);
       }
-    });
+      return { events, message: await stream.result() };
+    }),
+  );
+}
 
-    const [call] = ledger.finish({ outcome: "completed" })?.modelCalls ?? [];
+function onlyCall(ledger: TurnLatencyLedger): TurnLatencyModelCall | undefined {
+  const calls = ledger.finish({ outcome: "completed" })?.modelCalls ?? [];
+  // One provider request, one entry: wrapping must never double-count it.
+  expect(calls).toHaveLength(1);
+  return calls[0];
+}
+
+describe("the production branch", () => {
+  it("resolves the production model to the boundary-aware transport", () => {
+    expect(
+      describeEmbeddedAgentStreamStrategy({
+        currentStreamFn: undefined,
+        model: productionModel("http://127.0.0.1:1/v1"),
+      }),
+    ).toBe("boundary-aware:openai-completions");
+  });
+});
+
+describe("a streamed main-agent turn is on the record", () => {
+  it("records the whole call", async () => {
+    const ledger = newLedger();
+    await runMainAgentTurn(ledger, productionModel(await startCompletionsServer()));
+
+    const call = onlyCall(ledger);
 
     expect(call).toMatchObject({
       callReason: "main_agent",
       provider: "openrouter",
-      model: "deepseek/deepseek-v4-flash-0731",
       outcome: "completed",
       promptTokens: 4200,
       outputTokens: 700,
     });
-    expect(call?.requestStartMs).toEqual(expect.any(Number));
-    expect(call?.responseHeadersMs).toEqual(expect.any(Number));
-    expect(call?.ttftMs).toEqual(expect.any(Number));
-    expect(call?.completionMs).toEqual(expect.any(Number));
-    expect(call?.totalMs).toEqual(expect.any(Number));
+    for (const field of [
+      "requestStartMs",
+      "responseHeadersMs",
+      "ttftMs",
+      "completionMs",
+      "totalMs",
+    ] as const) {
+      expect(call?.[field]).toEqual(expect.any(Number));
+    }
   });
 
-  it("takes first token from the first NON-EMPTY delta, never from headers", async () => {
+  it("takes first token from the first NON-EMPTY delta, not from headers", async () => {
     const ledger = newLedger();
-    hoisted.createBoundaryAwareStreamFnForModel.mockReturnValue(
-      fakeBoundaryAwareStreamFn(ledger, [
-        // An SSE stream opens, and its opening events carry nothing to read.
-        { type: "start", partial: assistantMessage() },
-        { type: "text_start", contentIndex: 0, partial: assistantMessage() },
-        { type: "text_delta", contentIndex: 0, delta: "" },
-        { type: "done", reason: "stop", message: assistantMessage() },
-      ]),
+    await runMainAgentTurn(ledger, productionModel(await startCompletionsServer()));
+
+    const call = onlyCall(ledger);
+
+    // The server opens the stream, sends an empty role-only delta, and waits
+    // before any text. Headers-time would miss that whole wait.
+    expect((call?.ttftMs ?? 0) - (call?.responseHeadersMs ?? 0)).toBeGreaterThanOrEqual(
+      FIRST_TOKEN_DELAY_MS - 20,
+    );
+  });
+
+  it("closes a call whose provider request fails", async () => {
+    const ledger = newLedger();
+    // 400, not 5xx: the SDK retries 5xx, and each retry is its own request.
+    await runMainAgentTurn(ledger, productionModel(await startCompletionsServer({ status: 400 })));
+
+    expect(onlyCall(ledger)?.outcome).toBe("error");
+  });
+});
+
+describe("the attempt can still re-wrap the observed stream in place", () => {
+  it("lets the real downstream wrapper replace result and the iterator", async () => {
+    const ledger = newLedger();
+
+    const { message } = await runMainAgentTurn(
+      ledger,
+      productionModel(await startCompletionsServer()),
+      { rewrap: true },
     );
 
-    await runWithTurnLatencyLedger(ledger, async () => {
-      const streamFn = resolveEmbeddedAgentStreamFn({
-        currentStreamFn: undefined,
-        sessionId: "session-1",
-        model: MODEL,
-      });
-      const stream = await streamFn(MODEL as never, { messages: [] } as never, undefined);
-      for await (const _event of stream) {
-        // drain
-      }
+    expect(message.content).toContainEqual(expect.objectContaining({ text: REPLY_TEXT }));
+  });
+
+  it("still records the whole call after being re-wrapped", async () => {
+    const ledger = newLedger();
+    await runMainAgentTurn(ledger, productionModel(await startCompletionsServer()), {
+      rewrap: true,
     });
 
-    const [call] = ledger.finish({ outcome: "completed" })?.modelCalls ?? [];
+    const call = onlyCall(ledger);
 
-    expect(call?.responseHeadersMs).toEqual(expect.any(Number));
-    expect(call).not.toHaveProperty("ttftMs");
-    expect(call?.outcome).toBe("completed");
+    expect(call).toMatchObject({ callReason: "main_agent", outcome: "completed" });
+    for (const field of ["responseHeadersMs", "ttftMs", "completionMs", "totalMs"] as const) {
+      expect(call?.[field]).toEqual(expect.any(Number));
+    }
   });
 
-  it("closes a main-agent call whose stream ends in an error", async () => {
-    const ledger = newLedger();
-    hoisted.createBoundaryAwareStreamFnForModel.mockReturnValue(
-      fakeBoundaryAwareStreamFn(ledger, [
-        { type: "error", reason: "error", error: assistantMessage() },
-      ]),
-    );
-
-    await runWithTurnLatencyLedger(ledger, async () => {
-      const streamFn = resolveEmbeddedAgentStreamFn({
-        currentStreamFn: undefined,
-        sessionId: "session-1",
-        model: MODEL,
-      });
-      const stream = await streamFn(MODEL as never, { messages: [] } as never, undefined);
-      for await (const _event of stream) {
-        // drain
-      }
-    });
-
-    expect(ledger.finish({ outcome: "error" })?.modelCalls[0]?.outcome).toBe("error");
-  });
-
-  it("forwards the provider's own events unchanged", async () => {
-    const ledger = newLedger();
-    hoisted.createBoundaryAwareStreamFnForModel.mockReturnValue(
-      fakeBoundaryAwareStreamFn(ledger, [
-        { type: "text_delta", contentIndex: 0, delta: "a" },
-        { type: "done", reason: "stop", message: assistantMessage() },
-      ]),
-    );
-
-    const seen = await runWithTurnLatencyLedger(ledger, async () => {
-      const streamFn = resolveEmbeddedAgentStreamFn({
-        currentStreamFn: undefined,
-        sessionId: "session-1",
-        model: MODEL,
-      });
-      const stream = await streamFn(MODEL as never, { messages: [] } as never, undefined);
-      const collected: string[] = [];
+  it("yields exactly the events an unobserved turn yields", async () => {
+    const model = productionModel(await startCompletionsServer());
+    const observed = await runMainAgentTurn(newLedger(), model, { rewrap: true });
+    // Same transport, same server, no ledger: nothing is wrapped at all.
+    const plain = await runWithLlmCallReason("main_agent", async () => {
+      const streamFn = wrapStreamFnHandleSensitiveStopReason(
+        resolveEmbeddedAgentStreamFn({
+          currentStreamFn: undefined,
+          sessionId: "session-1",
+          model,
+          resolvedApiKey: "test-key",
+        }),
+      );
+      const stream = await streamFn(model as never, CONTEXT, undefined);
+      const types: string[] = [];
       for await (const event of stream) {
-        collected.push(event.type);
+        types.push(event.type);
       }
-      return collected;
+      return types;
     });
 
-    expect(seen).toStrictEqual(["text_delta", "done"]);
+    expect(observed.events.map((event) => event.type)).toStrictEqual(plain);
+  });
+});
+
+describe("the observed stream is the provider's stream, not a copy", () => {
+  /** A provider-owned stream, as a provider plugin hands one over. */
+  function providerOwnedTurn(stream: AssistantMessageEventStream): {
+    model: ResolverModel;
+    providerStreamFn: StreamFn;
+  } {
+    return {
+      model: productionModel("http://127.0.0.1:1/v1"),
+      providerStreamFn: (() => stream) as unknown as StreamFn,
+    };
+  }
+
+  it("never writes a downstream replacement onto the provider's stream", async () => {
+    const providerStream = createAssistantMessageEventStream();
+    const { model, providerStreamFn } = providerOwnedTurn(providerStream);
+
+    await runWithTurnLatencyLedger(newLedger(), async () => {
+      const streamFn = wrapStreamFnHandleSensitiveStopReason(
+        resolveEmbeddedAgentStreamFn({
+          currentStreamFn: undefined,
+          providerStreamFn,
+          sessionId: "session-1",
+          model,
+        }),
+      );
+      await streamFn(model as never, CONTEXT, undefined);
+    });
+
+    expect(Object.hasOwn(providerStream, "result")).toBe(false);
+    expect(Object.hasOwn(providerStream, Symbol.asyncIterator)).toBe(false);
+  });
+
+  it("keeps push, end and provider-specific members acting on the provider's stream", async () => {
+    const providerStream = createAssistantMessageEventStream() as AssistantMessageEventStream & {
+      providerRequestId?: string;
+    };
+    providerStream.providerRequestId = "req-1";
+    const { model, providerStreamFn } = providerOwnedTurn(providerStream);
+
+    const observed = (await runWithTurnLatencyLedger(newLedger(), async () =>
+      resolveEmbeddedAgentStreamFn({
+        currentStreamFn: undefined,
+        providerStreamFn,
+        sessionId: "session-1",
+        model,
+      })(model as never, CONTEXT, undefined),
+    )) as AssistantMessageEventStream & { providerRequestId?: string };
+
+    expect(observed.providerRequestId).toBe("req-1");
+    observed.push({
+      type: "done",
+      reason: "stop",
+      message: { role: "assistant", content: [] } as unknown as AssistantMessage,
+    });
+    observed.end();
+
+    // The provider's own iterator only terminates if ITS state was closed. With
+    // push/end running against a shadow object it drains and then waits forever.
+    const drained = (async () => {
+      const types: string[] = [];
+      for await (const event of providerStream) {
+        types.push(event.type);
+      }
+      return types;
+    })();
+    const stalled = new Promise<"stalled">((resolve) => {
+      setTimeout(() => resolve("stalled"), 200);
+    });
+    await expect(Promise.race([drained, stalled])).resolves.toStrictEqual(["done"]);
+  });
+});
+
+describe("with nothing recording, nothing is wrapped", () => {
+  it("returns a caller's own stream function unchanged", () => {
+    const providerStream = createAssistantMessageEventStream();
+    const customStreamFn = (() => providerStream) as unknown as StreamFn;
+
+    // Diagnostics off is the production default; the path must then be exactly
+    // what it was before the observer existed.
+    expect(
+      resolveEmbeddedAgentStreamFn({
+        currentStreamFn: customStreamFn,
+        sessionId: "session-1",
+        model: { provider: "custom", id: "m", api: "custom-api" } as unknown as ResolverModel,
+      }),
+    ).toBe(customStreamFn);
   });
 });
