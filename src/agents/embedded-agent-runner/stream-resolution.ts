@@ -3,6 +3,7 @@
  */
 import { getApiProvider } from "@openclaw/ai/internal/runtime";
 import { stripSystemPromptCacheBoundary } from "@openclaw/ai/internal/shared";
+import { currentTurnLatencyLedger } from "../../infra/turn-latency-ledger.js";
 import { observeAssistantStreamLatencyResult } from "../../infra/turn-latency-stream.js";
 import { streamSimple } from "../../llm/stream.js";
 import { createAnthropicVertexStreamFnForModel } from "../anthropic-vertex-stream.js";
@@ -130,6 +131,13 @@ export async function resolveEmbeddedAgentApiKey(params: {
  * one place that decides which stream the agent runs on.
  */
 function observedStreamFn(streamFn: StreamFn): StreamFn {
+  // Only a recording turn gets a wrapper. Otherwise the resolved function is
+  // returned as-is, so with diagnostics off this path is exactly what it was
+  // before the observer existed — including the identity of a caller's own
+  // custom stream function.
+  if (!currentTurnLatencyLedger()?.enabled) {
+    return streamFn;
+  }
   return (model, context, options) =>
     observeAssistantStreamLatencyResult(streamFn(model, context, options));
 }
