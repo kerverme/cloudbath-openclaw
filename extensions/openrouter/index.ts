@@ -16,6 +16,7 @@ import {
   loadOpenRouterModelCapabilities,
 } from "openclaw/plugin-sdk/provider-stream-family";
 import { truncateUtf16Safe } from "openclaw/plugin-sdk/text-utility-runtime";
+import { buildOpenrouterAccountProvider } from "./account-catalog.js";
 import { buildOpenRouterImageGenerationProvider } from "./image-generation-provider.js";
 import { openrouterMediaUnderstandingProvider } from "./media-understanding-provider.js";
 import { isOpenRouterMistralModelId, normalizeOpenRouterApiModelId } from "./models.js";
@@ -312,16 +313,11 @@ export default definePluginEntry({
       catalog: {
         order: "simple",
         run: async (ctx) => {
-          const apiKey = ctx.resolveProviderApiKey(PROVIDER_ID).apiKey;
+          const { apiKey, discoveryApiKey } = ctx.resolveProviderApiKey(PROVIDER_ID);
           if (!apiKey) {
             return null;
           }
-          return {
-            provider: {
-              ...buildOpenrouterProvider(),
-              apiKey,
-            },
-          };
+          return { provider: await buildOpenrouterAccountProvider({ apiKey, discoveryApiKey }) };
         },
       },
       staticCatalog: {

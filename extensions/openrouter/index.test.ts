@@ -6,11 +6,12 @@ import {
   registerSingleProviderPlugin,
   resolveProviderPluginChoice,
 } from "openclaw/plugin-sdk/plugin-test-runtime";
+import { clearLiveCatalogCacheForTests } from "openclaw/plugin-sdk/provider-catalog-live-runtime";
 import {
   expectPassthroughReplayPolicy,
   expectUnifiedModelCatalogProviderRegistration,
 } from "openclaw/plugin-sdk/provider-test-contracts";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const { getOpenRouterModelCapabilitiesMock, loadOpenRouterModelCapabilitiesMock } = vi.hoisted(
   () => ({
@@ -1230,5 +1231,91 @@ describe("openrouter provider hooks", () => {
     expect(payloads[0]).not.toHaveProperty("reasoning");
     expect(payloads[1]?.messages).toHaveLength(2);
     expect(payloads[1]?.reasoning).toEqual({ effort: "high" });
+  });
+});
+
+describe("openrouter account catalog discovery", () => {
+  const accountRows = [
+    {
+      id: "openai/gpt-6-luna",
+      name: "OpenAI: GPT-6 Luna",
+      context_length: 400_000,
+      architecture: { input_modalities: ["text", "image"], output_modalities: ["text"] },
+      pricing: { prompt: "0.000002", completion: "0.000008" },
+      top_provider: { context_length: 400_000, max_completion_tokens: 128_000 },
+      supported_parameters: ["reasoning", "tools"],
+    },
+  ];
+
+  function catalogContext(apiKey: string | undefined) {
+    return {
+      config: {},
+      agentDir: "/agent",
+      workspaceDir: "/workspace",
+      env: {},
+      resolveProviderApiKey: () => ({ apiKey, discoveryApiKey: apiKey }),
+      resolveProviderAuth: () => ({
+        apiKey,
+        discoveryApiKey: apiKey,
+        mode: "api_key" as const,
+        source: "env" as const,
+      }),
+    };
+  }
+
+  function stubAccountFetch(response: () => Response) {
+    const fetchMock = vi.fn(async () => response());
+    vi.stubGlobal("fetch", fetchMock as unknown as typeof fetch);
+    return fetchMock;
+  }
+
+  function requestedUrl(fetchMock: ReturnType<typeof stubAccountFetch>): string {
+    const input = (fetchMock.mock.calls[0] as unknown[] | undefined)?.[0];
+    return input instanceof Request ? input.url : String(input);
+  }
+
+  beforeEach(() => {
+    clearLiveCatalogCacheForTests();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("publishes the key's account models from the runtime catalog", async () => {
+    const fetchMock = stubAccountFetch(() => Response.json({ data: accountRows, links: {} }));
+    const provider = await registerSingleProviderPlugin(openrouterPlugin);
+
+    const result = await provider.catalog?.run(catalogContext("sk-or-test") as never);
+
+    if (!result || !("provider" in result)) {
+      throw new Error("expected OpenRouter catalog provider result");
+    }
+    expect(requestedUrl(fetchMock)).toBe("https://openrouter.ai/api/v1/models/user");
+    expect(result.provider.apiKey).toBe("sk-or-test");
+    expect(result.provider.models.map((model) => model.id)).toEqual([
+      ...buildOpenrouterProvider().models.map((model) => model.id),
+      "openai/gpt-6-luna",
+    ]);
+  });
+
+  it("keeps the static runtime catalog when account discovery fails", async () => {
+    stubAccountFetch(() => new Response("upstream error", { status: 502 }));
+    const provider = await registerSingleProviderPlugin(openrouterPlugin);
+
+    const result = await provider.catalog?.run(catalogContext("sk-or-test") as never);
+
+    expect(result).toEqual({ provider: { ...buildOpenrouterProvider(), apiKey: "sk-or-test" } });
+  });
+
+  it("does not call OpenRouter without a key or for the static catalog", async () => {
+    const fetchMock = stubAccountFetch(() => Response.json({ data: accountRows }));
+    const provider = await registerSingleProviderPlugin(openrouterPlugin);
+
+    await expect(provider.catalog?.run(catalogContext(undefined) as never)).resolves.toBeNull();
+    await expect(provider.staticCatalog?.run({} as never)).resolves.toEqual({
+      provider: buildOpenrouterProvider(),
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
