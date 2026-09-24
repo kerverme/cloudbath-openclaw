@@ -5,6 +5,8 @@ on:
     paths:
       - "extensions/cloudbath-line-image-archive/**"
       - "extensions/line/**"
+      - "extensions/openrouter/**"
+      - "test/openrouter-account-catalog.integration.test.ts"
       - "scripts/cloudbath/setup-notion-image-archive*"
       - "scripts/cloudbath/docker-cozyclay-removal.test.ts"
       - "Dockerfile"
@@ -155,6 +157,18 @@ jobs:
             extensions/line/src/webhook-node.test.ts \
             src/auto-reply/reply/commands-models.test.ts
 
+      - name: Run OpenRouter account catalog tests
+        if: steps.dependencies.outcome == 'success' && !cancelled()
+        run: |
+          node scripts/run-vitest.mjs run \
+            extensions/openrouter/account-catalog.test.ts \
+            extensions/openrouter/index.test.ts \
+            test/openrouter-account-catalog.integration.test.ts \
+            src/plugin-sdk/provider-catalog-live-runtime.test.ts \
+            src/agents/model-catalog.test.ts \
+            src/agents/model-catalog-visibility.test.ts \
+            src/gateway/server-methods/models.test.ts
+
       - name: Typecheck core
         if: steps.dependencies.outcome == 'success' && !cancelled()
         run: pnpm tsgo:core
@@ -210,6 +224,11 @@ jobs:
             scripts/cloudbath/setup-notion-image-archive.test.ts
             scripts/cloudbath/docker-cozyclay-removal.test.ts
             src/auto-reply/reply/commands-models.ts
+            extensions/openrouter/account-catalog.ts
+            extensions/openrouter/account-catalog.test.ts
+            extensions/openrouter/index.ts
+            extensions/openrouter/index.test.ts
+            test/openrouter-account-catalog.integration.test.ts
           )
           if ! pnpm exec oxfmt --check --threads=1 "${paths[@]}"; then
             pnpm exec oxfmt --write --threads=1 "${paths[@]}"
@@ -226,6 +245,17 @@ jobs:
             extensions/cloudbath-line-image-archive \
             test/cloudbath-workspace-policy-prewarm.integration.test.ts \
             test/line-model-state-dispatch.integration.test.ts
+
+      - name: Lint OpenRouter account catalog
+        if: steps.dependencies.outcome == 'success' && !cancelled()
+        run: |
+          node scripts/run-oxlint.mjs \
+            --tsconfig config/tsconfig/oxlint.extensions.json \
+            extensions/openrouter/account-catalog.ts \
+            extensions/openrouter/account-catalog.test.ts \
+            extensions/openrouter/index.ts \
+            extensions/openrouter/index.test.ts \
+            test/openrouter-account-catalog.integration.test.ts
 
       - name: Lint scoped LINE changes
         if: steps.dependencies.outcome == 'success' && !cancelled()
