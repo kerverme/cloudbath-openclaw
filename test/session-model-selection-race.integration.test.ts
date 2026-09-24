@@ -11,7 +11,7 @@
  * the embedded model call is controlled, so a turn stays genuinely in flight
  * while the selection changes.
  */
-import { describe, expect, it, vi } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import { findModelCatalogEntry } from "../src/agents/model-catalog-lookup.js";
 import { getExistingFollowupQueue } from "../src/auto-reply/reply/queue/state.js";
 import { resolveStorePath } from "../src/config/sessions/paths.js";
@@ -196,6 +196,13 @@ async function switchModelLikeLine(group: LineGroup, text: string) {
 
 type RunCall = { provider?: string; model?: string; sessionKey?: string };
 
+function ranModel(params: RunCall) {
+  return {
+    payloads: [{ text: `ran ${params.provider}/${params.model}` }],
+    meta: { durationMs: 1, agentMeta: { sessionId: "s", provider: "p", model: "m" } },
+  };
+}
+
 /**
  * Turn A holds the session busy inside its model call until released; Turn B
  * then arrives and is queued by the real follow-up queue with its model captured.
@@ -203,22 +210,22 @@ type RunCall = { provider?: string; model?: string; sessionKey?: string };
 async function queueTurnBehindBusyRun(cfg: OpenClawConfig, group: LineGroup) {
   const runEmbeddedAgent = getRunEmbeddedAgentMock();
   const release = createDeferred();
-  runEmbeddedAgent.mockReset();
+  // Scoped to this case's session so a turn another case left running cannot skew counts.
+  const calls = () =>
+    runEmbeddedAgent.mock.calls
+      .map((call: unknown[]) => call[0] as RunCall)
+      .filter((call: RunCall) => call.sessionKey === group.sessionKey);
   runEmbeddedAgent.mockImplementation(async (params: RunCall) => {
-    if (runEmbeddedAgent.mock.calls.length === 1) {
+    if (params.sessionKey === group.sessionKey && calls().length === 1) {
       await release.promise;
     }
-    return {
-      payloads: [{ text: `ran ${params.provider}/${params.model}` }],
-      meta: { durationMs: 1, agentMeta: { sessionId: "s", provider: "p", model: "m" } },
-    };
+    return ranModel(params);
   });
   const turnA = getReply!(lineGroupTurn(group, "สรุปงานวันนี้ให้หน่อย", "m-a"), {}, cfg);
-  await vi.waitFor(() => expect(runEmbeddedAgent).toHaveBeenCalledTimes(1), { timeout: 60_000 });
+  await vi.waitFor(() => expect(calls()).toHaveLength(1), { timeout: 60_000 });
   await expect(getReply!(lineGroupTurn(group, "กี่โมงแล้ว", "m-b"), {}, cfg)).resolves.toBeUndefined();
   expect(getExistingFollowupQueue(group.sessionKey)?.items).toHaveLength(1);
 
-  const calls = () => runEmbeddedAgent.mock.calls.map((call: unknown[]) => call[0] as RunCall);
   let released = false;
   return {
     calls,
@@ -231,9 +238,7 @@ async function queueTurnBehindBusyRun(cfg: OpenClawConfig, group: LineGroup) {
         release.resolve();
         await turnA;
       }
-      await vi.waitFor(() => expect(runEmbeddedAgent).toHaveBeenCalledTimes(2), {
-        timeout: 60_000,
-      });
+      await vi.waitFor(() => expect(calls()).toHaveLength(2), { timeout: 60_000 });
       return calls()[1];
     },
     async settle() {
@@ -280,6 +285,20 @@ async function withQueuedLineTurn(
 }
 
 describe("explicit model selection reaches a user turn queued behind an active run", () => {
+  // Without a built dist/ (CI), bundled plugins are transpiled from source on first use:
+  // over a minute for the LINE channel and OpenRouter provider. Pay that once here, as a
+  // running gateway has, so no case's in-flight window is spent loading plugins.
+  beforeAll(async () => {
+    const group = lineGroup();
+    await withTempHome(async (home) => {
+      const cfg = productionConfig(home);
+      await seedSession(group);
+      getRunEmbeddedAgentMock().mockImplementation(async (params: RunCall) => ranModel(params));
+      await getReply!(lineGroupTurn(group, "สวัสดี", "m-warm"), {}, cfg);
+      expect(await patchModelLikeControlUi(cfg, group, "openrouter/openai/gpt-6-luna")).toBe(true);
+    });
+  }, 600_000);
+
   it("Control UI sessions.patch retargets the queued LINE turn; the running turn is untouched", async () => {
     await withQueuedLineTurn({}, async ({ cfg, group, queued }) => {
       expect(queued.calls()[0]).toMatchObject(QWEN);
@@ -387,7 +406,8 @@ describe("explicit model selection reaches a user turn queued behind an active r
 
   it("a rejected sessions.patch leaves the queued turn on its captured model", async () => {
     await withQueuedLineTurn({}, async ({ cfg, group, queued }) => {
-      expect(await patchModelLikeControlUi(cfg, group, "anthropic/claude-opus-4-7")).toBe(false);
+      // Outside the openrouter/* allowlist.
+      expect(await patchModelLikeControlUi(cfg, group, "deepseek/deepseek-chat")).toBe(false);
       expect(queued.queuedRun()).toMatchObject(QWEN);
       expect(await queued.drain()).toMatchObject(QWEN);
     });
