@@ -1,7 +1,12 @@
 import { createHash } from "node:crypto";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
-import { applyModelOverrideToSessionEntry } from "openclaw/plugin-sdk/model-session-runtime";
+import {
+  applyModelOverrideToSessionEntry,
+  refreshQueuedFollowupModelSelection,
+  resolveSessionModelRef,
+} from "openclaw/plugin-sdk/model-session-runtime";
 import type { PluginStateKeyedStore } from "openclaw/plugin-sdk/plugin-state-runtime";
+import { getRuntimeConfig } from "openclaw/plugin-sdk/runtime-config-snapshot";
 import { patchSessionEntry } from "openclaw/plugin-sdk/session-store-runtime";
 import { jsonResult } from "openclaw/plugin-sdk/tool-results";
 import { Type } from "typebox";
@@ -206,6 +211,7 @@ export function createLineModelSwitchGuard() {
 export function createLineSessionModelApplier(params: {
   agentId?: string;
   sessionKey?: string;
+  config?: OpenClawConfig;
 }): (model: OpenRouterAccountModel) => Promise<boolean> {
   return async (model) => {
     const sessionKey = params.sessionKey?.trim();
@@ -227,7 +233,20 @@ export function createLineSessionModelApplier(params: {
         return entry;
       },
     });
-    return updated?.providerOverride === "openrouter" && updated.modelOverride === model.id;
+    if (updated?.providerOverride !== "openrouter" || updated.modelOverride !== model.id) {
+      return false;
+    }
+    // A turn queued behind an active run captured the previous model; retarget
+    // it through the same propagation `/model` and sessions.patch use.
+    const cfg = params.config ?? getRuntimeConfig();
+    refreshQueuedFollowupModelSelection({
+      cfg,
+      sessionKey,
+      selection: resolveSessionModelRef(cfg, updated, params.agentId),
+      entry: updated,
+      agentId: params.agentId,
+    });
+    return true;
   };
 }
 

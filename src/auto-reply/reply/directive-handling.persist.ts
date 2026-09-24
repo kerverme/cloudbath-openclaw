@@ -38,7 +38,7 @@ import {
 } from "./directive-handling.shared.js";
 import type { ElevatedLevel, ReasoningLevel, ThinkLevel } from "./directives.js";
 import { resolveContextTokens } from "./model-selection.js";
-import { refreshQueuedFollowupSession } from "./queue.js";
+import { refreshQueuedFollowupModelSelection } from "./queue/model-selection.js";
 import { persistReplySessionEntry } from "./session-entry-persistence.js";
 
 export type PersistedThinkingLevelRemap = {
@@ -425,25 +425,13 @@ export async function persistInlineDirectives(params: {
           sessionKey,
           patch: { key: sessionKey, model: modelDirective },
         });
-        refreshQueuedFollowupSession({
-          key: sessionKey,
-          nextProvider: provider,
-          nextModel: model,
-          nextModelOverrideSource: "user",
-          nextAuthProfileId: appliedSessionEntry.authProfileOverride,
-          nextAuthProfileIdSource: appliedSessionEntry.authProfileOverrideSource,
-          nextThinking: {
-            level: appliedSessionEntry.thinkingLevel,
-            catalog: thinkingCatalog,
-            agentRuntime: resolveEffectiveAgentRuntime({
-              cfg,
-              provider,
-              modelId: model,
-              agentId: activeAgentId,
-              sessionKey,
-              sessionEntry: appliedSessionEntry,
-            }),
-          },
+        refreshQueuedFollowupModelSelection({
+          cfg,
+          sessionKey,
+          selection: { provider, model },
+          entry: appliedSessionEntry,
+          agentId: activeAgentId,
+          thinkingCatalog,
         });
       }
       if (sessionChangesApplied) {

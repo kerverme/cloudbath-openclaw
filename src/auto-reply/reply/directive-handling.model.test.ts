@@ -358,7 +358,10 @@ vi.mock("../../infra/system-events.js", () => ({
   enqueueSystemEvent: vi.fn(),
 }));
 
-vi.mock("./queue.js", () => ({
+vi.mock("./queue/state.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./queue/state.js")>()),
+  // Every session has a queue here, so assertions see each refresh payload.
+  getExistingFollowupQueue: () => ({}),
   refreshQueuedFollowupSession: (...args: unknown[]) =>
     queueMocks.refreshQueuedFollowupSession(...args),
 }));

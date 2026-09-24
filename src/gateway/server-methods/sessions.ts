@@ -49,6 +49,7 @@ import { resolveIngressWorkspaceOverrideForSessionRun } from "../../agents/spawn
 import { insideGitCheckout } from "../../agents/worktrees/git.js";
 import { managedWorktrees } from "../../agents/worktrees/service.js";
 import { clearSessionQueues } from "../../auto-reply/reply/queue/cleanup.js";
+import { refreshQueuedFollowupModelSelection } from "../../auto-reply/reply/queue/model-selection.js";
 import { replyRunRegistry } from "../../auto-reply/reply/reply-run-registry.js";
 import { normalizeReasoningLevel, normalizeThinkLevel } from "../../auto-reply/thinking.js";
 import {
@@ -2355,6 +2356,18 @@ export const sessionsHandlers: GatewayRequestHandlers = {
         : (parsed?.agentId ?? resolveDefaultAgentId(cfg)),
     );
     const resolved = resolveSessionModelRef(cfg, applied.entry, agentId);
+    if (p.model !== undefined) {
+      // Turns queued behind an active run captured their model before this save;
+      // retarget them exactly as `/model` does, or they run the superseded model.
+      refreshQueuedFollowupModelSelection({
+        cfg,
+        sessionKey: target.canonicalKey ?? key,
+        selection: resolved,
+        entry: applied.entry,
+        agentId,
+        thinkingCatalog: patchModelCatalog,
+      });
+    }
     const resolvedDisplayModel = resolveSessionDisplayModelIdentityRef({
       cfg,
       agentId,

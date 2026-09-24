@@ -6,6 +6,7 @@ export { resolveAgentMaxConcurrent } from "../config/agent-limits.js";
 export { resolvePersistedSessionRuntimeId } from "../agents/session-runtime-compat.js";
 export { buildModelAliasIndex } from "../agents/model-selection.js";
 export { resolveSessionModelRef } from "../agents/session-model-ref.js";
+export { refreshQueuedFollowupModelSelection } from "../auto-reply/reply/queue/model-selection.js";
 export {
   applyModelOverrideToSessionEntry,
   isModelSelectionLocked,

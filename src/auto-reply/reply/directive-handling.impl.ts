@@ -51,7 +51,7 @@ import {
   withOptions,
 } from "./directive-handling.shared.js";
 import type { ElevatedLevel, ReasoningLevel, ThinkLevel } from "./directives.js";
-import { refreshQueuedFollowupSession } from "./queue.js";
+import { refreshQueuedFollowupModelSelection } from "./queue/model-selection.js";
 import { resolveRuntimePolicySessionKey } from "./runtime-policy-session-key.js";
 import { persistReplySessionEntry } from "./session-entry-persistence.js";
 
@@ -615,25 +615,14 @@ export async function handleDirectiveOnly(
       // `/model` should retarget queued/future work without interrupting the
       // active run. Refresh queued followups so they pick up the persisted
       // selection once the current turn finishes.
-      refreshQueuedFollowupSession({
-        key: sessionKey,
-        nextProvider: modelSelection.provider,
-        nextModel: modelSelection.model,
-        nextModelOverrideSource: "user",
-        nextAuthProfileId: appliedSessionEntry.authProfileOverride,
-        nextAuthProfileIdSource: appliedSessionEntry.authProfileOverrideSource,
-        nextThinking: {
-          level: appliedSessionEntry.thinkingLevel,
-          catalog: thinkingCatalog,
-          agentRuntime: resolveEffectiveAgentRuntime({
-            cfg: params.cfg,
-            provider: modelSelection.provider,
-            modelId: modelSelection.model,
-            agentId: activeAgentId,
-            sessionKey: runtimePolicySessionKey,
-            sessionEntry: appliedSessionEntry,
-          }),
-        },
+      refreshQueuedFollowupModelSelection({
+        cfg: params.cfg,
+        sessionKey,
+        selection: modelSelection,
+        entry: appliedSessionEntry,
+        agentId: activeAgentId,
+        runtimePolicySessionKey,
+        thinkingCatalog,
       });
     }
   }
