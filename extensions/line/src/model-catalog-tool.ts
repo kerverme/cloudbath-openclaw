@@ -1,12 +1,13 @@
 import { createHash } from "node:crypto";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import {
-  applyModelOverrideToSessionEntry,
+  applyUserSessionModelSelection,
   refreshQueuedFollowupModelSelection,
   resolveSessionModelRef,
 } from "openclaw/plugin-sdk/model-session-runtime";
 import type { PluginStateKeyedStore } from "openclaw/plugin-sdk/plugin-state-runtime";
 import { getRuntimeConfig } from "openclaw/plugin-sdk/runtime-config-snapshot";
+import { resolveAgentIdFromSessionKey } from "openclaw/plugin-sdk/session-key-runtime";
 import { patchSessionEntry } from "openclaw/plugin-sdk/session-store-runtime";
 import { jsonResult } from "openclaw/plugin-sdk/tool-results";
 import { Type } from "typebox";
@@ -23,7 +24,8 @@ const OPENROUTER_CATALOG_TIMEOUT_MS = 10_000;
 const OPENROUTER_CATALOG_MAX_PAGES = 50;
 const DEFAULT_CATALOG_PAGE_SIZE = 8;
 const MAX_CATALOG_PAGE_SIZE = 20;
-const MAX_PENDING_CANDIDATES = 250;
+/** More candidates than this are a request to narrow the wording, not a listing. */
+export const LINE_MODEL_MAX_PENDING_CANDIDATES = 250;
 
 export const LINE_MODEL_CATALOG_TOOL_NAME = "openrouter_account_models";
 export const LINE_MODEL_SELECTION_NAMESPACE = "model-selection-v1";
@@ -111,7 +113,7 @@ const CatalogQuerySchema = Type.Object(
     selection: Type.Optional(
       Type.Integer({
         minimum: 1,
-        maximum: MAX_PENDING_CANDIDATES,
+        maximum: LINE_MODEL_MAX_PENDING_CANDIDATES,
         description: "One-based choice number from the active pending list.",
       }),
     ),
@@ -203,10 +205,11 @@ export function createLineModelSwitchGuard() {
 }
 
 /**
- * Builds a session-only model applier for one LINE conversation. Shared by the
- * AI-facing catalog tool and the deterministic model-switch intent router so
- * both apply verified catalog selections through the exact same session-store
- * mutation — never global config, never a Gateway restart.
+ * Builds the session-only model applier for one conversation's session key.
+ * Shared by the AI-facing catalog tool and every deterministic switch (typed,
+ * numbered, follow-up; LINE and webchat) so each applies a verified catalog
+ * selection through the same mutation as the Control UI picker's
+ * sessions.patch -- never global config, never a Gateway restart.
  */
 export function createLineSessionModelApplier(params: {
   agentId?: string;
@@ -218,33 +221,42 @@ export function createLineSessionModelApplier(params: {
     if (!sessionKey) {
       return false;
     }
+    const cfg = params.config ?? getRuntimeConfig();
+    // sessions.patch resolves the default for the agent that owns the key; a
+    // before_dispatch context may omit agentId, and the key still names it.
+    const agentId = params.agentId ?? resolveAgentIdFromSessionKey(sessionKey);
+    const selection = { provider: "openrouter", model: model.id };
+    const defaultModel = resolveSessionModelRef(cfg, undefined, agentId);
     const updated = await patchSessionEntry({
-      agentId: params.agentId,
+      agentId,
       sessionKey,
       readConsistency: "latest",
       replaceEntry: true,
       requireWriteSuccess: true,
       update: (entry) => {
-        applyModelOverrideToSessionEntry({
-          entry,
-          selection: { provider: "openrouter", model: model.id, isDefault: false },
-          markLiveSwitchPending: true,
-        });
+        applyUserSessionModelSelection({ cfg, entry, selection, defaultModel });
         return entry;
       },
     });
-    if (updated?.providerOverride !== "openrouter" || updated.modelOverride !== model.id) {
+    if (!updated) {
+      return false;
+    }
+    // The row must now select exactly this model: pinned, or -- being the
+    // agent's default -- reached by clearing the override.
+    const selected = updated.modelOverride
+      ? updated.providerOverride === selection.provider && updated.modelOverride === selection.model
+      : selection.provider === defaultModel.provider && selection.model === defaultModel.model;
+    if (!selected) {
       return false;
     }
     // A turn queued behind an active run captured the previous model; retarget
     // it through the same propagation `/model` and sessions.patch use.
-    const cfg = params.config ?? getRuntimeConfig();
     refreshQueuedFollowupModelSelection({
       cfg,
       sessionKey,
-      selection: resolveSessionModelRef(cfg, updated, params.agentId),
+      selection: resolveSessionModelRef(cfg, updated, agentId),
       entry: updated,
-      agentId: params.agentId,
+      agentId,
     });
     return true;
   };
@@ -334,6 +346,35 @@ function statelessPageResult(candidates: PendingModelCandidate[], offset: number
     nextOffset: safeOffset + models.length < candidates.length ? safeOffset + models.length : null,
     models,
   };
+}
+
+/**
+ * Stores a numbered listing for one owner scope and returns its first page.
+ * The AI-facing search and the deterministic router list choices through this
+ * one path, so a numbered reply to either resolves against the same entry.
+ */
+export async function registerLineModelChoices(params: {
+  pendingStore: PluginStateKeyedStore<LinePendingModelSelection>;
+  scopeKey: string;
+  query: string;
+  candidates: readonly OpenRouterAccountModel[];
+  offset?: number;
+  pageSize?: number;
+  now: number;
+}) {
+  const pending: LinePendingModelSelection = {
+    version: 1,
+    scopeKey: params.scopeKey,
+    query: params.query,
+    candidates: params.candidates.map(({ id, name, supportsTools }) =>
+      supportsTools === undefined ? { id, name } : { id, name, supportsTools },
+    ),
+    offset: params.offset ?? 0,
+    pageSize: params.pageSize ?? DEFAULT_CATALOG_PAGE_SIZE,
+    createdAt: params.now,
+  };
+  await params.pendingStore.register(params.scopeKey, pending);
+  return pendingPageResult(pending);
 }
 
 async function readScopedPendingSelection(params: {
@@ -747,7 +788,7 @@ export function createLineModelCatalogTool(params: CreateLineModelCatalogToolPar
         });
       }
 
-      if (matching.length > MAX_PENDING_CANDIDATES) {
+      if (matching.length > LINE_MODEL_MAX_PENDING_CANDIDATES) {
         return jsonResult({
           source: "openrouter-user-account",
           authoritativeForCandidateIds: true,
@@ -756,30 +797,26 @@ export function createLineModelCatalogTool(params: CreateLineModelCatalogToolPar
           pendingSelection: false,
           totalCatalogModels: models.length,
           totalMatches: matching.length,
-          maximumSafePendingCandidates: MAX_PENDING_CANDIDATES,
+          maximumSafePendingCandidates: LINE_MODEL_MAX_PENDING_CANDIDATES,
           ...statelessPageResult(matching, offset, limit),
         });
       }
 
-      const safeOffset = offset < matching.length ? offset : 0;
-      const pending: LinePendingModelSelection = {
-        version: 1,
+      const choices = await registerLineModelChoices({
+        pendingStore: params.pendingStore,
         scopeKey: pendingKey,
         query,
-        candidates: matching.map(({ id, name, supportsTools }) =>
-          supportsTools === undefined ? { id, name } : { id, name, supportsTools },
-        ),
-        offset: safeOffset,
+        candidates: matching,
+        offset: offset < matching.length ? offset : 0,
         pageSize: limit,
-        createdAt: (params.now ?? Date.now)(),
-      };
-      await params.pendingStore.register(pendingKey, pending);
+        now: (params.now ?? Date.now)(),
+      });
       return jsonResult({
         source: "openrouter-user-account",
         authoritativeForCandidateIds: true,
         currentModelAuthoritativeSource: "session_status",
         totalCatalogModels: models.length,
-        ...pendingPageResult(pending),
+        ...choices,
       });
     },
   };

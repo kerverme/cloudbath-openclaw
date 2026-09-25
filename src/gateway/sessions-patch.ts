@@ -23,7 +23,6 @@ import {
   resolveDefaultModelForAgent,
   resolveSubagentConfiguredModelSelection,
 } from "../agents/model-selection.js";
-import { resolveProviderIdForAuth } from "../agents/provider-auth-aliases.js";
 import { resolveEffectiveAgentRuntime } from "../agents/thinking-runtime.js";
 import { normalizeGroupActivation } from "../auto-reply/group-activation.js";
 import {
@@ -62,6 +61,10 @@ import {
 } from "../sessions/model-overrides.js";
 import { normalizeSendPolicy } from "../sessions/send-policy.js";
 import { parseSessionLabel, SESSION_LABEL_MAX_LENGTH } from "../sessions/session-label.js";
+import {
+  applyUserSessionModelSelection,
+  shouldPreserveSessionAuthProfileOverride,
+} from "../sessions/session-model-selection.js";
 
 function invalid(message: string): { ok: false; error: ErrorShape } {
   return { ok: false, error: errorShape(ErrorCodes.INVALID_REQUEST, message) };
@@ -81,43 +84,6 @@ function normalizeExecAsk(raw: string): "off" | "on-miss" | "always" | undefined
     return normalized;
   }
   return undefined;
-}
-
-function shouldPreserveSessionAuthProfileOverride(params: {
-  cfg: OpenClawConfig;
-  entry: SessionEntry;
-  currentProvider: string;
-  provider: string;
-}): boolean {
-  const profileOverride = normalizeOptionalString(params.entry.authProfileOverride);
-  if (!profileOverride) {
-    return false;
-  }
-  const provider = normalizeOptionalLowercaseString(params.provider);
-  if (!provider) {
-    return false;
-  }
-  const resolvesToTargetProvider = (rawProvider: string | undefined): boolean => {
-    const candidate = normalizeOptionalLowercaseString(rawProvider);
-    if (!candidate) {
-      return false;
-    }
-    return (
-      resolveProviderIdForAuth(candidate, { config: params.cfg }) ===
-      resolveProviderIdForAuth(provider, { config: params.cfg })
-    );
-  };
-  const delimiterIndex = profileOverride.indexOf(":");
-  if (delimiterIndex < 0) {
-    return resolvesToTargetProvider(params.currentProvider);
-  }
-  const profileProvider = normalizeOptionalLowercaseString(
-    profileOverride.slice(0, delimiterIndex),
-  );
-  if (!profileProvider) {
-    return false;
-  }
-  return resolvesToTargetProvider(profileProvider);
 }
 
 function supportsSpawnLineage(storeKey: string): boolean {
@@ -655,24 +621,12 @@ export async function projectSessionsPatchEntry(params: {
       if ("error" in resolved) {
         return invalid(resolved.error);
       }
-      const isDefault =
-        resolved.ref.provider === resolvedDefault.provider &&
-        resolved.ref.model === resolvedDefault.model;
-      applyModelOverrideToSessionEntry({
+      applyUserSessionModelSelection({
+        cfg,
         entry: next,
-        selection: {
-          provider: resolved.ref.provider,
-          model: resolved.ref.model,
-          isDefault,
-        },
+        selection: resolved.ref,
+        defaultModel: resolvedDefault,
         profileOverride: trailingProfile || undefined,
-        preserveAuthProfileOverride: shouldPreserveSessionAuthProfileOverride({
-          cfg,
-          currentProvider: next.providerOverride ?? next.modelProvider ?? resolvedDefault.provider,
-          entry: next,
-          provider: resolved.ref.provider,
-        }),
-        markLiveSwitchPending: true,
       });
     }
   }

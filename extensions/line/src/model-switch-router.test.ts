@@ -1,13 +1,13 @@
+import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import type { PluginStateKeyedStore } from "openclaw/plugin-sdk/plugin-state-runtime";
 import { describe, expect, it, vi } from "vitest";
 import {
   LINE_MODEL_SELECTION_TTL_MS,
   type LinePendingModelSelection,
 } from "./model-catalog-tool.js";
-import {
-  classifyLineModelControlIntent,
-  createLineModelSwitchIntentRouter,
-} from "./model-switch-router.js";
+import { createLineModelControlRouter, type LineModelControlDeps } from "./model-control-router.js";
+import { LINE_MODEL_REFERENCE_RETENTION_MS, type LineModelReference } from "./model-reference.js";
+import { classifyLineModelControlIntent } from "./model-switch-router.js";
 
 const SECRET = "test-secret-never-log";
 
@@ -47,8 +47,15 @@ function ambiguousLunaProCatalog(): CatalogFixture[] {
 function createMemoryPendingStore(params?: {
   now?: () => number;
 }): PluginStateKeyedStore<LinePendingModelSelection> {
-  const now = params?.now ?? Date.now;
-  const values = new Map<string, { value: LinePendingModelSelection; expiresAt: number }>();
+  return createMemoryStore<LinePendingModelSelection>(LINE_MODEL_SELECTION_TTL_MS, params?.now);
+}
+
+function createMemoryStore<T>(
+  defaultTtlMs: number,
+  nowFn?: () => number,
+): PluginStateKeyedStore<T> {
+  const now = nowFn ?? Date.now;
+  const values = new Map<string, { value: T; expiresAt: number }>();
   const read = (key: string) => {
     const entry = values.get(key);
     if (entry && entry.expiresAt <= now()) {
@@ -61,7 +68,7 @@ function createMemoryPendingStore(params?: {
     async register(key, value, options) {
       values.set(key, {
         value,
-        expiresAt: now() + (options?.ttlMs ?? LINE_MODEL_SELECTION_TTL_MS),
+        expiresAt: now() + (options?.ttlMs ?? defaultTtlMs),
       });
     },
     async registerIfAbsent(key, value, options) {
@@ -96,6 +103,23 @@ function createMemoryPendingStore(params?: {
 
 type SessionModelApplier = (model: { id: string }) => Promise<boolean>;
 
+/**
+ * Both model-control handlers in before_dispatch order: `early` claims above
+ * Cloudbath, `late` (numbered replies) after the video gates.
+ */
+function controlRouter(deps: LineModelControlDeps) {
+  const { early, late } = createLineModelControlRouter({
+    readConfig: () => ({}) as OpenClawConfig,
+    referenceStore: createMemoryStore<LineModelReference>(
+      LINE_MODEL_REFERENCE_RETENTION_MS,
+      deps.now,
+    ),
+    ...deps,
+  });
+  return async (event: Parameters<typeof early>[0], ctx: Parameters<typeof early>[1]) =>
+    (await early(event, ctx)) ?? (await late(event, ctx));
+}
+
 function createRouter(overrides?: {
   pendingStore?: PluginStateKeyedStore<LinePendingModelSelection>;
   catalog?: CatalogFixture[];
@@ -106,7 +130,7 @@ function createRouter(overrides?: {
   const applySessionModel =
     overrides?.applySessionModel ?? vi.fn(async (_model: { id: string }) => true);
   const fetchImpl = vi.fn(async () => catalogResponse(overrides?.catalog ?? defaultCatalog()));
-  const router = createLineModelSwitchIntentRouter({
+  const router = controlRouter({
     pendingStore,
     resolveApiKey: async () => SECRET,
     buildSessionModelApplier: () => applySessionModel,
@@ -163,6 +187,30 @@ describe("classifyLineModelControlIntent", () => {
     expect(classifyLineModelControlIntent(text)).toEqual({ kind: "none" });
   });
 
+  it.each([
+    ["เอา Luna", "Luna", false],
+    ["เอาตัว openai", "openai", false],
+    ["use Luna", "Luna", false],
+    ["switch to luna", "luna", true],
+    ["เปลี่ยนเป็น openai luna หน่อย", "openai luna", true],
+    ["เปลี่ยนโมเดลเป็น GPT-6 Luna", "GPT-6 Luna", true],
+    ["เปลี่ยนเป็น GPT-6 Luna ได้ไหมครับ", "GPT-6 Luna", true],
+    ["ใช้ Luna ได้ไหม", "Luna ได้ไหม", false],
+  ])("reads the switch term from %s", (text, expectedQuery, expectedExplicit) => {
+    expect(classifyLineModelControlIntent(text)).toEqual({
+      kind: "switch",
+      query: expectedQuery,
+      explicit: expectedExplicit,
+    });
+  });
+
+  it.each(["user profile settings", "switch toggles", "useful tips"])(
+    "reads English verbs as whole words: %s",
+    (text) => {
+      expect(classifyLineModelControlIntent(text)).toEqual({ kind: "none" });
+    },
+  );
+
   it("classifies a bare number as a numeric selection", () => {
     expect(classifyLineModelControlIntent("2")).toEqual({ kind: "numeric", selection: 2 });
   });
@@ -198,12 +246,12 @@ describe("LINE model-switch intent router (before_dispatch)", () => {
     );
   });
 
-  it("2: routes an explicit English switch request to the validated picker", async () => {
+  it("2: routes an explicit English switch request to the validated picker, answering in English", async () => {
     const { router, applySessionModel } = createRouter();
     const result = await router(ownerEvent("switch to Claude"), ctxFor());
 
     expect(result?.handled).toBe(true);
-    expect(result?.text).toBe("เปลี่ยนเป็น Anthropic Claude แล้ว");
+    expect(result?.text).toBe("Switched to Anthropic Claude (anthropic/claude).");
     expect(applySessionModel).toHaveBeenCalledWith(
       expect.objectContaining({ id: "anthropic/claude" }),
     );
@@ -311,7 +359,7 @@ describe("LINE model-switch intent router (before_dispatch)", () => {
       // account catalog by the time the numbered reply re-fetches it.
       return catalogResponse(fetchCall === 1 ? initialCatalog : [initialCatalog[0]!]);
     });
-    const router = createLineModelSwitchIntentRouter({
+    const router = controlRouter({
       pendingStore,
       resolveApiKey: async () => SECRET,
       buildSessionModelApplier: () => applySessionModel,
@@ -355,11 +403,9 @@ describe("LINE model-switch intent router (before_dispatch)", () => {
       const { router, applySessionModel, fetchImpl } = createRouter();
       const result = await router(ownerEvent(text), ctxFor());
 
-      // The tentative verb still triggers a live catalog search (this is the
-      // whole point — resolving via the live catalog rather than a static
-      // model-name list) but a no_match result on a tentative message must
-      // fall through instead of hijacking the reply.
-      expect(fetchImpl).toHaveBeenCalled();
+      // Catalog model names are Latin script: Thai-only wording names no model,
+      // so it falls through without even a catalog read.
+      expect(fetchImpl).not.toHaveBeenCalled();
       expect(result).toBeUndefined();
       expect(applySessionModel).not.toHaveBeenCalled();
     });
@@ -430,7 +476,7 @@ describe("LINE model-switch intent router (before_dispatch)", () => {
     );
   });
 
-  it("ignores non-LINE channels entirely", async () => {
+  it("ignores surfaces model control does not serve", async () => {
     const { router, applySessionModel, fetchImpl } = createRouter();
     const result = await router(ownerEvent("switch to Claude", { channel: "telegram" }), ctxFor());
 
@@ -439,9 +485,9 @@ describe("LINE model-switch intent router (before_dispatch)", () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
-  it("fails safe and falls through when catalog auth is unavailable", async () => {
+  it("fails closed when catalog auth is unavailable: an explicit switch is never handed to the agent", async () => {
     const pendingStore = createMemoryPendingStore();
-    const router = createLineModelSwitchIntentRouter({
+    const router = controlRouter({
       pendingStore,
       resolveApiKey: async () => undefined,
       fetchImpl: vi.fn(async () => catalogResponse(defaultCatalog())),
@@ -449,6 +495,207 @@ describe("LINE model-switch intent router (before_dispatch)", () => {
 
     const result = await router(ownerEvent("switch to Claude"), ctxFor());
 
-    expect(result).toBeUndefined();
+    expect(result).toEqual({
+      handled: true,
+      text: "I can't read the OpenRouter model catalog right now, so I can't switch models yet. Please try again shortly.",
+    });
+  });
+});
+
+// The production catalog shape: OpenRouter's "Vendor: Name" display names.
+const LUNA_6 = { id: "openai/gpt-6-luna", name: "OpenAI: GPT-6 Luna" };
+const LUNA_5_6 = { id: "openai/gpt-5.6-luna", name: "OpenAI: GPT-5.6 Luna" };
+const DEEPSEEK = { id: "deepseek/deepseek-v4-flash-0731", name: "DeepSeek: DeepSeek V4 Flash" };
+
+function appliedIds(applySessionModel: SessionModelApplier) {
+  return vi.mocked(applySessionModel).mock.calls.map(([model]) => model.id);
+}
+
+describe("switch resolution: a version is identity, a unique name is the model", () => {
+  it.each([
+    "เปลี่ยนเป็น openai luna หน่อย",
+    "switch to luna",
+    "use luna",
+    "เอา Luna",
+    "ใช้ openai luna",
+  ])("%s switches straight to the one Luna in the catalog", async (text) => {
+    const { router, applySessionModel } = createRouter({ catalog: [LUNA_6, DEEPSEEK] });
+
+    const result = await router(ownerEvent(text), ctxFor());
+
+    expect(result?.handled).toBe(true);
+    expect(result?.text).toMatch(
+      /^(?:เปลี่ยนเป็น OpenAI: GPT-6 Luna แล้ว|Switched to OpenAI: GPT-6 Luna)/u,
+    );
+    expect(appliedIds(applySessionModel)).toEqual([LUNA_6.id]);
+  });
+
+  it("an exact versioned name switches to exactly that version beside a sibling", async () => {
+    const { router, applySessionModel } = createRouter({ catalog: [LUNA_5_6, LUNA_6] });
+
+    expect((await router(ownerEvent("เปลี่ยนเป็น GPT-6 Luna"), ctxFor()))?.text).toBe(
+      "เปลี่ยนเป็น OpenAI: GPT-6 Luna แล้ว",
+    );
+    expect((await router(ownerEvent("switch to GPT-5.6 Luna"), ctxFor()))?.text).toBe(
+      "Switched to OpenAI: GPT-5.6 Luna (openai/gpt-5.6-luna).",
+    );
+    expect(appliedIds(applySessionModel)).toEqual([LUNA_6.id, LUNA_5_6.id]);
+  });
+
+  it("an absent version is never silently substituted: it is offered, and ใช่ confirms it", async () => {
+    const { router, applySessionModel } = createRouter({ catalog: [LUNA_5_6, DEEPSEEK] });
+
+    const offer = await router(ownerEvent("เปลี่ยนเป็น GPT-6 Luna"), ctxFor());
+
+    expect(offer?.text).toBe(
+      'ไม่มี "GPT-6 Luna" ในแคตตาล็อก OpenRouter ของบัญชีนี้ แต่มี OpenAI: GPT-5.6 Luna (openai/gpt-5.6-luna)\nต้องการเปลี่ยนเป็น OpenAI: GPT-5.6 Luna ไหมครับ?',
+    );
+    expect(applySessionModel).not.toHaveBeenCalled();
+
+    expect((await router(ownerEvent("ใช่"), ctxFor()))?.text).toBe(
+      "เปลี่ยนเป็น OpenAI: GPT-5.6 Luna แล้ว",
+    );
+    expect(appliedIds(applySessionModel)).toEqual([LUNA_5_6.id]);
+  });
+
+  it("the offer is confirmed in English too, and can be declined", async () => {
+    const { router, applySessionModel } = createRouter({ catalog: [LUNA_5_6, DEEPSEEK] });
+
+    expect((await router(ownerEvent("switch to GPT-6 Luna"), ctxFor()))?.text).toBe(
+      '"GPT-6 Luna" is not in this account\'s OpenRouter catalog, but OpenAI: GPT-5.6 Luna (openai/gpt-5.6-luna) is.\nSwitch to OpenAI: GPT-5.6 Luna?',
+    );
+    expect((await router(ownerEvent("no"), ctxFor()))?.text).toBe("OK, the model stays as it is.");
+    expect(applySessionModel).not.toHaveBeenCalled();
+  });
+
+  it("several Luna models are a numbered choice, never a guess", async () => {
+    const { router, applySessionModel } = createRouter({ catalog: [LUNA_6, LUNA_5_6, DEEPSEEK] });
+
+    expect((await router(ownerEvent("use luna"), ctxFor()))?.text).toBe(
+      'Several models match "luna":\n1. OpenAI: GPT-5.6 Luna\n2. OpenAI: GPT-6 Luna\nReply with a number to choose one.',
+    );
+    expect(applySessionModel).not.toHaveBeenCalled();
+
+    expect((await router(ownerEvent("2"), ctxFor()))?.text).toBe("เปลี่ยนเป็น OpenAI: GPT-6 Luna แล้ว");
+    expect(appliedIds(applySessionModel)).toEqual([LUNA_6.id]);
+  });
+
+  it("an absent version with several nearby models asks which, and switches nothing", async () => {
+    const { router, applySessionModel } = createRouter({ catalog: [LUNA_6, LUNA_5_6, DEEPSEEK] });
+
+    const result = await router(ownerEvent("เปลี่ยนเป็น GPT-7 Luna"), ctxFor());
+
+    expect(result?.text).toBe(
+      'ไม่มี "GPT-7 Luna" ในแคตตาล็อก OpenRouter ของบัญชีนี้\nรุ่นอื่นที่มีชื่อคล้ายกัน (ไม่ใช่รุ่นที่ถาม): OpenAI: GPT-5.6 Luna (openai/gpt-5.6-luna), OpenAI: GPT-6 Luna (openai/gpt-6-luna)\nต้องการเปลี่ยนเป็นโมเดลไหนครับ?',
+    );
+    // A bare follow-up still has two models to choose between.
+    expect((await router(ownerEvent("ใช่"), ctxFor()))?.text).toMatch(
+      /^ต้องการเปลี่ยนเป็นโมเดลไหนครับ\?\n• /u,
+    );
+    expect(applySessionModel).not.toHaveBeenCalled();
+  });
+
+  it("an explicit request for a model the catalog lacks gets a deterministic not-found", async () => {
+    const { router, applySessionModel } = createRouter({ catalog: [LUNA_6, DEEPSEEK] });
+
+    expect((await router(ownerEvent("switch to Llama 5"), ctxFor()))?.text).toBe(
+      'No model matching "Llama 5" is in this account\'s OpenRouter catalog. Could you give the exact model name?',
+    );
+    expect(applySessionModel).not.toHaveBeenCalled();
+  });
+
+  it.each(["เปลี่ยนเพลงให้หน่อย", "เปลี่ยนสีพื้นหลัง", "ใช้คำนี้แทน", "ช่วยค้นข่าว Luna", "เปลี่ยนเป็นภาษาอังกฤษ"])(
+    "%s is not claimed and reads no catalog",
+    async (text) => {
+      const { router, applySessionModel, fetchImpl } = createRouter({ catalog: [LUNA_6] });
+
+      expect(await router(ownerEvent(text), ctxFor())).toBeUndefined();
+      expect(fetchImpl).not.toHaveBeenCalled();
+      expect(applySessionModel).not.toHaveBeenCalled();
+    },
+  );
+
+  it("a bare verb over words no model uses skips the read once the catalog is known", async () => {
+    const { router, fetchImpl } = createRouter({ catalog: [LUNA_6, DEEPSEEK] });
+    await router(ownerEvent("use luna"), ctxFor());
+    fetchImpl.mockClear();
+
+    expect(await router(ownerEvent("use bullet points"), ctxFor())).toBeUndefined();
+    expect(await router(ownerEvent("ใช้ Excel ทำตาราง"), ctxFor())).toBeUndefined();
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("a polite question after a bare verb is left to the other handlers", async () => {
+    const { router, fetchImpl } = createRouter({ catalog: [LUNA_6] });
+
+    expect(await router(ownerEvent("ใช้ Luna ได้ไหม"), ctxFor())).toBeUndefined();
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("wording about another domain stays with its own handler", async () => {
+    const { router, fetchImpl } = createRouter({ catalog: [LUNA_6] });
+
+    for (const text of ["เปลี่ยน video model เป็น veo", "ใช้ภาพ Luna", "switch to video model Kling"]) {
+      expect(await router(ownerEvent(text), ctxFor())).toBeUndefined();
+    }
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("defers to an open video-model picker, then takes the switch once the video router passes", async () => {
+    const applySessionModel = vi.fn(async (_model: { id: string }) => true);
+    const { early, late } = createLineModelControlRouter({
+      readConfig: () => ({}) as OpenClawConfig,
+      pendingStore: createMemoryPendingStore(),
+      resolveApiKey: async () => SECRET,
+      buildSessionModelApplier: () => applySessionModel,
+      fetchImpl: vi.fn(async () => catalogResponse([LUNA_6])),
+      videoModelPickerOpen: async () => true,
+    });
+
+    expect(await early(ownerEvent("use luna"), ctxFor())).toBeUndefined();
+    expect(applySessionModel).not.toHaveBeenCalled();
+    expect((await late(ownerEvent("use luna"), ctxFor()))?.handled).toBe(true);
+    expect(appliedIds(applySessionModel)).toEqual([LUNA_6.id]);
+  });
+});
+
+describe("the Control UI (webchat) drives the same model control", () => {
+  function webchatEvent(body: string) {
+    // chat.send: no sender id for operator UI clients; owner by operator.admin scope.
+    return { content: body, body, channel: "webchat", senderIsOwner: true };
+  }
+
+  it("switches the viewed session with the operator as principal", async () => {
+    const { router, applySessionModel } = createRouter({ catalog: [LUNA_6, DEEPSEEK] });
+
+    const result = await router(webchatEvent("เปลี่ยนเป็น openai luna หน่อย"), ctxFor());
+
+    expect(result).toEqual({ handled: true, text: "เปลี่ยนเป็น OpenAI: GPT-6 Luna แล้ว" });
+    expect(appliedIds(applySessionModel)).toEqual([LUNA_6.id]);
+  });
+
+  it("keeps a picker for the operator apart from the LINE owner's in the same session", async () => {
+    const pendingStore = createMemoryPendingStore();
+    const { router, applySessionModel } = createRouter({
+      pendingStore,
+      catalog: [LUNA_6, LUNA_5_6],
+    });
+
+    await router(webchatEvent("use luna"), ctxFor());
+    // The LINE owner's "1" in the same session has no listing of its own.
+    expect(await router(ownerEvent("1"), ctxFor())).toBeUndefined();
+    expect((await router(webchatEvent("1"), ctxFor()))?.text).toBe(
+      "เปลี่ยนเป็น OpenAI: GPT-5.6 Luna แล้ว",
+    );
+    expect(appliedIds(applySessionModel)).toEqual([LUNA_5_6.id]);
+  });
+
+  it("ignores a webchat turn that is not the owner's", async () => {
+    const { router, fetchImpl } = createRouter({ catalog: [LUNA_6] });
+
+    expect(
+      await router({ ...webchatEvent("switch to luna"), senderIsOwner: false }, ctxFor()),
+    ).toBeUndefined();
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 });

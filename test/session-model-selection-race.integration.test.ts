@@ -7,7 +7,7 @@
  * Qwen captured -- still requested Qwen.
  *
  * Real reply pipeline, follow-up queue and drain, SQLite session store,
- * sessions.patch handler, LINE model-state router and LINE switch router; only
+ * sessions.patch handler and the LINE/Control UI model-control router; only
  * the embedded model call is controlled, so a turn stays genuinely in flight
  * while the selection changes.
  */
@@ -149,49 +149,54 @@ async function patchModelLikeControlUi(
   return respond.mock.calls[0]?.[0] === true;
 }
 
-/** LINE deterministic model-state question, answered from the session row. */
-async function askModelStateLikeLine(cfg: OpenClawConfig, group: LineGroup) {
-  const { createLineModelStateRouter } =
-    await import("../extensions/line/src/model-state-router.js");
-  const result = await createLineModelStateRouter({
+/**
+ * LINE's and the Control UI's deterministic model control: the real router,
+ * catalog matching and session-model applier, as `before_dispatch` runs it.
+ */
+async function modelControl(
+  surface: "line" | "webchat",
+  cfg: OpenClawConfig,
+  group: LineGroup,
+  text: string,
+) {
+  const { createLineModelControlRouter } =
+    await import("../extensions/line/src/model-control-router.js");
+  const result = await createLineModelControlRouter({
     readConfig: () => cfg,
-    resolveApiKey: async () => "test-openrouter-key",
-  })(
-    {
-      channel: "line",
-      senderIsOwner: true,
-      sessionKey: group.sessionKey,
-      senderId: OWNER_ID,
-      body: "ตอนนี้ใช้โมเดลอะไร",
-    } as never,
-    { sessionKey: group.sessionKey, agentId: "main" } as never,
-  );
-  return result?.text;
-}
-
-/** LINE typed switch: the real switch router and session-model applier. */
-async function switchModelLikeLine(group: LineGroup, text: string) {
-  const { createLineModelSwitchIntentRouter } =
-    await import("../extensions/line/src/model-switch-router.js");
-  const result = await createLineModelSwitchIntentRouter({
     resolveApiKey: async () => "test-openrouter-key",
     fetchImpl: async () =>
       new Response(JSON.stringify({ data: ACCOUNT_CATALOG }), {
         status: 200,
         headers: { "content-type": "application/json" },
       }),
-  })(
-    {
-      channel: "line",
-      content: text,
-      body: text,
-      senderId: OWNER_ID,
-      senderIsOwner: true,
-      sessionKey: group.sessionKey,
-    } as never,
-    { sessionKey: group.sessionKey, agentId: "main" } as never,
+  }).early(
+    surface === "line"
+      ? {
+          channel: "line",
+          content: text,
+          body: text,
+          senderId: OWNER_ID,
+          senderIsOwner: true,
+          sessionKey: group.sessionKey,
+        }
+      : // chat.send on the viewed session: no sender id for the Control UI,
+        // owner through the operator.admin scope.
+        { channel: "webchat", content: text, body: text, senderIsOwner: true },
+    { sessionKey: group.sessionKey, agentId: "main" },
   );
   return result?.text;
+}
+
+/** The session fields a model selection writes. */
+function storedModelFields(entry: SessionEntry | undefined) {
+  return {
+    providerOverride: entry?.providerOverride,
+    modelOverride: entry?.modelOverride,
+    modelOverrideSource: entry?.modelOverrideSource,
+    liveModelSwitchPending: entry?.liveModelSwitchPending,
+    modelProvider: entry?.modelProvider,
+    model: entry?.model,
+  };
 }
 
 type RunCall = { provider?: string; model?: string; sessionKey?: string };
@@ -309,7 +314,9 @@ describe("explicit model selection reaches a user turn queued behind an active r
         providerOverride: "openrouter",
         modelOverride: LUNA.model,
       });
-      expect(await askModelStateLikeLine(cfg, group)).toContain("openai/gpt-6-luna");
+      expect(await modelControl("line", cfg, group, "ตอนนี้ใช้โมเดลอะไร")).toContain(
+        "openai/gpt-6-luna",
+      );
 
       expect(await queued.drain()).toMatchObject(LUNA);
       // Turn A was already sending its request: it kept Qwen and was not re-run.
@@ -318,15 +325,16 @@ describe("explicit model selection reaches a user turn queued behind an active r
     });
   });
 
-  it("/model, sessions.patch and the LINE typed switch leave identical queued-run state", async () => {
+  it("/model, sessions.patch and the LINE and Control UI switches leave identical state", async () => {
     const seed: Partial<SessionEntry> = {
       thinkingLevel: "low",
       authProfileOverride: "openrouter:work",
       authProfileOverrideSource: "user",
     };
     const selections: Record<string, ReturnType<typeof queuedSelection>> = {};
-    // Each writer decides what it saves (only sessions.patch keeps a same-provider
-    // auth profile); propagation must carry exactly the saved profile.
+    const stored: Record<string, ReturnType<typeof storedModelFields>> = {};
+    // Each writer decides what it saves for the pinned auth profile;
+    // propagation must carry exactly the saved profile.
     const authProfiles: Record<string, { queued?: string; saved?: string }> = {};
     const record = (
       writer: string,
@@ -334,6 +342,7 @@ describe("explicit model selection reaches a user turn queued behind an active r
       queued: Awaited<ReturnType<typeof queueTurnBehindBusyRun>>,
     ) => {
       selections[writer] = queuedSelection(queued.queuedRun());
+      stored[writer] = storedModelFields(readSession(group));
       authProfiles[writer] = {
         queued: queued.queuedRun()?.authProfileId,
         saved: readSession(group)?.authProfileOverride,
@@ -351,9 +360,20 @@ describe("explicit model selection reaches a user turn queued behind an active r
       expect(await queued.drain()).toMatchObject(LUNA);
     });
     await withQueuedLineTurn(seed, async ({ cfg, group, queued }) => {
-      expect(await switchModelLikeLine(group, "เปลี่ยนโมเดลเป็น gpt-6-luna")).toContain("GPT-6 Luna");
-      expect(await askModelStateLikeLine(cfg, group)).toContain("openai/gpt-6-luna");
+      expect(await modelControl("line", cfg, group, "เปลี่ยนโมเดลเป็น gpt-6-luna")).toContain(
+        "GPT-6 Luna",
+      );
+      expect(await modelControl("line", cfg, group, "ตอนนี้ใช้โมเดลอะไร")).toContain(
+        "openai/gpt-6-luna",
+      );
       record("lineSwitch", group, queued);
+      expect(await queued.drain()).toMatchObject(LUNA);
+    });
+    await withQueuedLineTurn(seed, async ({ cfg, group, queued }) => {
+      expect(await modelControl("webchat", cfg, group, "เปลี่ยนเป็น openai luna หน่อย")).toBe(
+        "เปลี่ยนเป็น OpenAI: GPT-6 Luna แล้ว",
+      );
+      record("webchatSwitch", group, queued);
       expect(await queued.drain()).toMatchObject(LUNA);
     });
 
@@ -365,9 +385,69 @@ describe("explicit model selection reaches a user turn queued behind an active r
     });
     expect(selections.sessionsPatch).toEqual(selections.model);
     expect(selections.lineSwitch).toEqual(selections.model);
+    expect(selections.webchatSwitch).toEqual(selections.model);
+    expect(stored.model).toMatchObject({
+      providerOverride: LUNA.provider,
+      modelOverride: LUNA.model,
+      modelOverrideSource: "user",
+    });
+    expect(stored.sessionsPatch).toEqual(stored.model);
+    expect(stored.lineSwitch).toEqual(stored.model);
+    expect(stored.webchatSwitch).toEqual(stored.model);
     for (const profile of Object.values(authProfiles)) {
       expect(profile.queued).toBe(profile.saved);
     }
+    // The natural-language switches save whatever the picker saves for the
+    // pinned profile (the preservation rule itself: session-model-selection.test.ts).
+    expect(authProfiles.lineSwitch?.saved).toBe(authProfiles.sessionsPatch?.saved);
+    expect(authProfiles.webchatSwitch?.saved).toBe(authProfiles.sessionsPatch?.saved);
+  });
+
+  it("a Control UI natural-language switch retargets the queued turn, and the next turn runs it", async () => {
+    await withQueuedLineTurn({}, async ({ cfg, group, queued }) => {
+      expect(queued.queuedRun()).toMatchObject(QWEN);
+
+      expect(await modelControl("webchat", cfg, group, "เปลี่ยนเป็น openai luna หน่อย")).toBe(
+        "เปลี่ยนเป็น OpenAI: GPT-6 Luna แล้ว",
+      );
+      expect(readSession(group)).toMatchObject({
+        providerOverride: "openrouter",
+        modelOverride: LUNA.model,
+        liveModelSwitchPending: true,
+      });
+      expect(queued.queuedRun()).toMatchObject(LUNA);
+      expect(await queued.drain()).toMatchObject(LUNA);
+
+      // Nothing queued any more: the next ordinary turn runs the selection too.
+      await getReply!(lineGroupTurn(group, "ขอบคุณ", "m-next"), {}, cfg);
+      expect(queued.calls()).toHaveLength(3);
+      expect(queued.calls()[2]).toMatchObject(LUNA);
+    });
+  });
+
+  it("naming the default model resets the override exactly as the picker does", async () => {
+    const lunaOverride = {
+      providerOverride: LUNA.provider,
+      modelOverride: LUNA.model,
+      modelOverrideSource: "user" as const,
+    };
+    const stored: Record<string, ReturnType<typeof storedModelFields>> = {};
+    await withQueuedLineTurn(lunaOverride, async ({ cfg, group, queued }) => {
+      expect(await patchModelLikeControlUi(cfg, group, "openrouter/qwen/qwen3.8-27b")).toBe(true);
+      stored.picker = storedModelFields(readSession(group));
+      expect(await queued.drain()).toMatchObject(QWEN);
+    });
+    await withQueuedLineTurn(lunaOverride, async ({ cfg, group, queued }) => {
+      expect(await modelControl("webchat", cfg, group, "switch to Qwen3.8 27B")).toBe(
+        "Switched to Qwen: Qwen3.8 27B (qwen/qwen3.8-27b).",
+      );
+      stored.webchat = storedModelFields(readSession(group));
+      expect(await queued.drain()).toMatchObject(QWEN);
+    });
+
+    // A reset, not a pinned copy of the default: the override is gone.
+    expect(stored.picker?.modelOverride).toBeUndefined();
+    expect(stored.webchat).toEqual(stored.picker);
   });
 
   it("carries an explicitly selected auth profile into the queued turn", async () => {

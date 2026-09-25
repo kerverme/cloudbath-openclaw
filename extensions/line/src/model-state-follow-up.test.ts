@@ -20,14 +20,13 @@ import {
 } from "openclaw/plugin-sdk/session-store-runtime";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { LinePendingModelSelection } from "./model-catalog-tool.js";
+import { createLineModelControlRouter } from "./model-control-router.js";
 import {
   classifyLineModelFollowUp,
   LINE_MODEL_REFERENCE_RETENTION_MS,
   LINE_MODEL_REFERENCE_TTL_MS,
   type LineModelReference,
 } from "./model-reference.js";
-import { createLineModelStateRouter } from "./model-state-router.js";
-import { createLineModelSwitchIntentRouter } from "./model-switch-router.js";
 
 const AGENT_ID = "main";
 const OWNER = "U-owner";
@@ -105,11 +104,11 @@ const deps = () => ({
 });
 
 function conversation() {
-  const router = createLineModelStateRouter({
+  const router = createLineModelControlRouter({
     ...deps(),
     referenceStore: memoryStore<LineModelReference>(LINE_MODEL_REFERENCE_RETENTION_MS),
     readConfig: () => CONFIG,
-  });
+  }).early;
   return async (text: string, senderIsOwner = true) =>
     await router(
       { content: text, body: text, channel: "line", senderId: OWNER, senderIsOwner },
@@ -338,7 +337,7 @@ describe("the follow-up switch is the typed switch", () => {
     await say("มี GPT-5.6 Luna ไหม");
     await say("เปลี่ยนให้หน่อย");
 
-    const typed = await createLineModelSwitchIntentRouter(deps())(
+    const typed = await createLineModelControlRouter({ ...deps(), readConfig: () => CONFIG }).early(
       {
         content: `เปลี่ยนเป็น ${LUNA}`,
         body: `เปลี่ยนเป็น ${LUNA}`,

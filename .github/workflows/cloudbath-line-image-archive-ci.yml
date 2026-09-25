@@ -8,6 +8,10 @@ on:
       - "extensions/openrouter/**"
       - "test/openrouter-account-catalog.integration.test.ts"
       - "test/session-model-selection-race.integration.test.ts"
+      - "test/model-control-dispatch.integration.test.ts"
+      - "src/sessions/session-model-selection*.ts"
+      - "src/gateway/sessions-patch.ts"
+      - "src/plugin-sdk/model-session-runtime.ts"
       - "src/auto-reply/reply/queue/model-selection*.ts"
       - "ui/src/pages/chat/chat-pane.ts"
       - "ui/src/e2e/chat-session-continuity.e2e.test.ts"
@@ -149,11 +153,11 @@ jobs:
             extensions/line/src/video-owner-flow.e2e.test.ts \
             extensions/line/src/video-ugc-scope.test.ts \
             extensions/line/src/model-catalog-tool.test.ts \
-            extensions/line/src/model-state-router.test.ts \
+            extensions/line/src/model-control-router.test.ts \
             extensions/line/src/model-state-follow-up.test.ts \
             extensions/line/src/model-switch-router.test.ts \
             extensions/line/src/model-switch-canonical-state.test.ts \
-            test/line-model-state-dispatch.integration.test.ts \
+            test/model-control-dispatch.integration.test.ts \
             src/agents/tools/session-status-tool.line-owner-auth.test.ts \
             extensions/line/src/session-route.test.ts \
             extensions/line/src/send.test.ts \
@@ -183,6 +187,7 @@ jobs:
             src/auto-reply/reply/directive-handling.model.test.ts \
             src/auto-reply/reply/directive-handling.mixed-inline.test.ts \
             src/gateway/sessions-patch.test.ts \
+            src/sessions/session-model-selection.test.ts \
             extensions/line/src/model-switch-canonical-state.test.ts
 
       - name: Install Playwright Chromium
@@ -229,13 +234,16 @@ jobs:
             extensions/line/src/model-catalog-tool.ts
             extensions/line/src/model-catalog-tool.test.ts
             extensions/line/src/model-catalog-lookup.ts
-            extensions/line/src/model-state-router.ts
-            extensions/line/src/model-state-router.test.ts
+            extensions/line/src/model-control-router.ts
+            extensions/line/src/model-control-router.test.ts
+            extensions/line/src/model-control-surface.ts
             extensions/line/src/model-state-replies.ts
             extensions/line/src/model-reference.ts
             extensions/line/src/model-state-follow-up.test.ts
             extensions/line/src/model-switch-router.ts
-            test/line-model-state-dispatch.integration.test.ts
+            extensions/line/src/model-switch-router.test.ts
+            extensions/line/src/model-switch-canonical-state.test.ts
+            test/model-control-dispatch.integration.test.ts
             src/agents/tools/session-status-tool.ts
             src/agents/tools/session-status-tool.line-owner-auth.test.ts
             src/agents/openclaw-tools.ts
@@ -268,6 +276,10 @@ jobs:
             src/auto-reply/reply/queue/model-selection.ts
             src/auto-reply/reply/queue/model-selection.test.ts
             test/session-model-selection-race.integration.test.ts
+            src/sessions/session-model-selection.ts
+            src/sessions/session-model-selection.test.ts
+            src/gateway/sessions-patch.ts
+            src/plugin-sdk/model-session-runtime.ts
             ui/src/pages/chat/chat-pane.ts
             ui/src/e2e/chat-session-continuity.e2e.test.ts
           )
@@ -285,7 +297,7 @@ jobs:
             extensions/line/index.ts \
             extensions/cloudbath-line-image-archive \
             test/cloudbath-workspace-policy-prewarm.integration.test.ts \
-            test/line-model-state-dispatch.integration.test.ts
+            test/model-control-dispatch.integration.test.ts
 
       - name: Lint OpenRouter account catalog
         if: steps.dependencies.outcome == 'success' && !cancelled()
@@ -307,6 +319,10 @@ jobs:
             src/auto-reply/reply/directive-handling.persist.ts \
             src/auto-reply/reply/directive-handling.impl.ts \
             src/gateway/server-methods/sessions.ts \
+            src/gateway/sessions-patch.ts \
+            src/sessions/session-model-selection.ts \
+            src/sessions/session-model-selection.test.ts \
+            src/plugin-sdk/model-session-runtime.ts \
             test/session-model-selection-race.integration.test.ts
 
       - name: Lint Control UI session continuity
@@ -326,12 +342,15 @@ jobs:
             extensions/line/src/model-catalog-tool.ts \
             extensions/line/src/model-catalog-tool.test.ts \
             extensions/line/src/model-catalog-lookup.ts \
-            extensions/line/src/model-state-router.ts \
-            extensions/line/src/model-state-router.test.ts \
+            extensions/line/src/model-control-router.ts \
+            extensions/line/src/model-control-router.test.ts \
+            extensions/line/src/model-control-surface.ts \
             extensions/line/src/model-state-replies.ts \
             extensions/line/src/model-reference.ts \
             extensions/line/src/model-state-follow-up.test.ts \
             extensions/line/src/model-switch-router.ts \
+            extensions/line/src/model-switch-router.test.ts \
+            extensions/line/src/model-switch-canonical-state.test.ts \
             src/agents/tools/session-status-tool.ts \
             src/agents/tools/session-status-tool.line-owner-auth.test.ts \
             src/agents/openclaw-tools.ts \

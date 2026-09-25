@@ -19,8 +19,8 @@ import {
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   classifyLineModelStateQuestion,
-  createLineModelStateRouter,
-} from "./model-state-router.js";
+  createLineModelControlRouter,
+} from "./model-control-router.js";
 
 const AGENT_ID = "main";
 const SESSION_KEY = "agent:main:line:group:c-owner-group";
@@ -48,7 +48,7 @@ let previousStateDir: string | undefined;
 let catalogRequests = 0;
 
 function router(options: { catalogStatus?: number } = {}) {
-  return createLineModelStateRouter({
+  return createLineModelControlRouter({
     resolveApiKey: async () => "test-openrouter-key",
     readConfig: () => CONFIG,
     fetchImpl: async () => {
@@ -57,12 +57,19 @@ function router(options: { catalogStatus?: number } = {}) {
         ? new Response("unavailable", { status: options.catalogStatus })
         : new Response(JSON.stringify({ data: CATALOG }), { status: 200 });
     },
-  });
+  }).early;
 }
 
 function ownerTurn(text: string, senderIsOwner = true) {
   return [
-    { content: text, body: text, channel: "line", senderIsOwner, sessionKey: SESSION_KEY },
+    {
+      content: text,
+      body: text,
+      channel: "line",
+      senderId: "U-owner",
+      senderIsOwner,
+      sessionKey: SESSION_KEY,
+    },
     { sessionKey: SESSION_KEY, agentId: AGENT_ID },
   ] as const;
 }
@@ -253,18 +260,13 @@ describe("an unreadable catalog is claimed and answered, never handed to the age
 });
 
 describe("everything else is left to the other handlers", () => {
-  it.each([
-    "มีข้าวไหม",
-    "มีเวลาไหม",
-    "ใช้โมเดลอะไรดี",
-    "ตอนนี้ใช้โมเดลวิดีโออะไร",
-    "เปลี่ยนเป็น GPT-5.6 Luna",
-    "1",
-    "สวัสดีครับ",
-  ])("%s is not claimed and reads no catalog", async (text) => {
-    expect(await ask(text)).toBeUndefined();
-    expect(catalogRequests).toBe(0);
-  });
+  it.each(["มีข้าวไหม", "มีเวลาไหม", "ใช้โมเดลอะไรดี", "ตอนนี้ใช้โมเดลวิดีโออะไร", "1", "สวัสดีครับ"])(
+    "%s is not claimed and reads no catalog",
+    async (text) => {
+      expect(await ask(text)).toBeUndefined();
+      expect(catalogRequests).toBe(0);
+    },
+  );
 
   it("does not claim Latin words the catalog does not use, and remembers that", async () => {
     const handle = router();

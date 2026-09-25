@@ -165,6 +165,33 @@ function resolvePendingKey(scopeKey: string): string {
   return createHash("sha256").update(scopeKey).digest("hex");
 }
 
+/**
+ * Whether this LINE conversation has a video-model picker open. While it does,
+ * untriggered wording ("MiniMax H3") refines that picker, so the chat model
+ * control that runs before this router must leave such turns to it.
+ */
+export async function hasOpenLineVideoModelPicker(params: {
+  pendingStore: LinePendingVideoModelSelectionStore;
+  accountId?: string;
+  conversationId?: string;
+  now?: () => number;
+}): Promise<boolean> {
+  const accountId = params.accountId?.trim();
+  const conversationId = params.conversationId?.trim();
+  const scopeKey =
+    accountId && conversationId
+      ? buildLineVideoConversationKey({ accountId, conversationId })
+      : undefined;
+  if (!scopeKey) {
+    return false;
+  }
+  const pending = await params.pendingStore.lookup(resolvePendingKey(scopeKey));
+  return (
+    pending !== undefined &&
+    pending.createdAt + LINE_VIDEO_MODEL_SELECTION_TTL_MS > (params.now ?? Date.now)()
+  );
+}
+
 const COMBINING_DIACRITICS_PATTERN = new RegExp("[̀-ͯ]", "gu");
 
 function normalizeSearchText(value: string): string {
