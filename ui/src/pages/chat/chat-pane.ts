@@ -1142,7 +1142,11 @@ class ChatPane extends OpenClawLightDomElement {
   }
 
   override willUpdate(changedProperties: Map<PropertyKey, unknown>) {
-    if (changedProperties.has("sessionKey") && this.state) {
+    // An empty key is the container's "no opinion yet" (its route data is still
+    // resolving), not a request for the default session: resolving it would
+    // switch the pane to the main session and bind its transcript until the
+    // real key lands, so the pane stays on its current session instead.
+    if (changedProperties.has("sessionKey") && this.state && this.sessionKey.trim()) {
       const catalogKey = parseCatalogSessionKey(this.sessionKey);
       const nextSessionKey = catalogKey
         ? this.sessionKey
