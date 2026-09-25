@@ -9,6 +9,8 @@ on:
       - "test/openrouter-account-catalog.integration.test.ts"
       - "test/session-model-selection-race.integration.test.ts"
       - "src/auto-reply/reply/queue/model-selection*.ts"
+      - "ui/src/pages/chat/chat-pane.ts"
+      - "ui/src/e2e/chat-session-continuity.e2e.test.ts"
       - "scripts/cloudbath/setup-notion-image-archive*"
       - "scripts/cloudbath/docker-cozyclay-removal.test.ts"
       - "Dockerfile"
@@ -183,6 +185,20 @@ jobs:
             src/gateway/sessions-patch.test.ts \
             extensions/line/src/model-switch-canonical-state.test.ts
 
+      - name: Install Playwright Chromium
+        if: steps.dependencies.outcome == 'success' && !cancelled()
+        run: node scripts/ensure-playwright-chromium.mjs
+
+      - name: Run Control UI session continuity tests
+        if: steps.dependencies.outcome == 'success' && !cancelled()
+        run: |
+          node scripts/run-vitest.mjs run \
+            ui/src/e2e/chat-session-continuity.e2e.test.ts \
+            ui/src/pages/chat/chat-pane.test.ts \
+            ui/src/pages/chat/chat-page.test.ts \
+            ui/src/lib/sessions/navigation.test.ts \
+            ui/src/app/gateway-store.test.ts
+
       - name: Typecheck core
         if: steps.dependencies.outcome == 'success' && !cancelled()
         run: pnpm tsgo:core
@@ -194,6 +210,12 @@ jobs:
       - name: Typecheck scripts
         if: steps.dependencies.outcome == 'success' && !cancelled()
         run: pnpm tsgo:scripts
+
+      - name: Typecheck Control UI
+        if: steps.dependencies.outcome == 'success' && !cancelled()
+        run: |
+          pnpm tsgo:ui
+          pnpm tsgo:test:ui
 
       - name: Check formatting
         if: steps.dependencies.outcome == 'success' && !cancelled()
@@ -246,6 +268,8 @@ jobs:
             src/auto-reply/reply/queue/model-selection.ts
             src/auto-reply/reply/queue/model-selection.test.ts
             test/session-model-selection-race.integration.test.ts
+            ui/src/pages/chat/chat-pane.ts
+            ui/src/e2e/chat-session-continuity.e2e.test.ts
           )
           if ! pnpm exec oxfmt --check --threads=1 "${paths[@]}"; then
             pnpm exec oxfmt --write --threads=1 "${paths[@]}"
@@ -284,6 +308,13 @@ jobs:
             src/auto-reply/reply/directive-handling.impl.ts \
             src/gateway/server-methods/sessions.ts \
             test/session-model-selection-race.integration.test.ts
+
+      - name: Lint Control UI session continuity
+        if: steps.dependencies.outcome == 'success' && !cancelled()
+        run: |
+          node scripts/run-oxlint.mjs \
+            ui/src/pages/chat/chat-pane.ts \
+            ui/src/e2e/chat-session-continuity.e2e.test.ts
 
       - name: Lint scoped LINE changes
         if: steps.dependencies.outcome == 'success' && !cancelled()
