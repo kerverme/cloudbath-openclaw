@@ -1,19 +1,18 @@
+import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import type { PluginStateKeyedStore } from "openclaw/plugin-sdk/plugin-state-runtime";
 /**
- * Deterministic LINE model-switch intent router.
+ * Deterministic model-switch wording and the numbered-picker action.
  *
- * Registered on the shared `before_dispatch` hook so an owner's natural-language
- * model-control request ("เปลี่ยนเป็น gemini หน่อย", "switch to Claude") is routed
- * to the existing catalog-validated picker (`model-catalog-tool.ts`) before the
- * normal main agent ever runs — instead of depending on the active LLM deciding
- * to call the AI-facing picker tool. Ordinary model discussion ("Gemini ดีไหม",
- * "Claude กับ Gemini ต่างกันยังไง") never matches the deterministic classifier
- * below and falls through to the normal agent unchanged.
+ * `classifyLineModelControlIntent` reads an owner's switch request
+ * ("เปลี่ยนเป็น gemini หน่อย", "เอา Luna", "switch to Claude") or a numbered
+ * picker reply out of the literal text; model-control-router.ts resolves it
+ * against the catalog and answers before the main agent ever runs. Ordinary
+ * model discussion ("Gemini ดีไหม", "Claude กับ Gemini ต่างกันยังไง") never
+ * matches and falls through to the normal agent unchanged.
  *
- * This module does not implement a second picker: it builds and calls the same
- * `createLineModelCatalogTool` used by the AI-facing tool, so catalog search,
- * exact-match switching, numbered pending choices, TTL, fresh catalog
- * revalidation, and session/owner isolation are identical on both paths.
+ * Numbered replies run through the same `createLineModelCatalogTool` the
+ * AI-facing picker uses, so pending choices, TTL, fresh catalog revalidation
+ * and session/owner isolation are identical on both paths.
  */
 import {
   createLineModelCatalogTool,
@@ -22,28 +21,6 @@ import {
 } from "./model-catalog-tool.js";
 import { resolveLineProviderApiKey } from "./openrouter-auth.js";
 
-/** Minimal structural shape of the shared `before_dispatch` hook event this router reads. */
-type LineBeforeDispatchEvent = {
-  content: string;
-  body?: string;
-  channel?: string;
-  sessionKey?: string;
-  senderId?: string;
-  senderIsOwner?: boolean;
-};
-
-/** Minimal structural shape of the shared `before_dispatch` hook context this router reads. */
-type LineBeforeDispatchContext = {
-  sessionKey?: string;
-  agentId?: string;
-};
-
-/** Minimal structural shape of the shared `before_dispatch` hook result this router returns. */
-type LineBeforeDispatchResult = {
-  handled: boolean;
-  text?: string;
-};
-
 export type LineModelControlIntent =
   | { kind: "switch"; query: string; explicit: boolean }
   | { kind: "numeric"; selection: number }
@@ -51,16 +28,20 @@ export type LineModelControlIntent =
 
 // Leading verb phrases that mark a tentative switch request. Longest-first so
 // "เปลี่ยนเป็น" is matched whole instead of leaving a stray "เป็น" behind after
-// the shorter "เปลี่ยน" prefix consumes part of it.
-const THAI_SWITCH_PREFIXES = ["เปลี่ยนเป็น", "เปลี่ยน", "ลองใช้", "ลอง", "ใช้"].toSorted(
+// the shorter "เปลี่ยน" prefix consumes part of it ("เอาตัว" before "เอา").
+const THAI_SWITCH_PREFIXES = ["เปลี่ยนเป็น", "เปลี่ยน", "ลองใช้", "ลอง", "ใช้", "เอาตัว", "เอา"].toSorted(
   (a, b) => b.length - a.length,
 );
-const ENGLISH_SWITCH_PREFIXES = ["switch to", "change to"].toSorted((a, b) => b.length - a.length);
+// English verbs are whole words: "user profile" must not read as "use r profile".
+const ENGLISH_SWITCH_PREFIXES: ReadonlyArray<{ pattern: RegExp; strong: boolean }> = [
+  { pattern: /^(?:switch|change)\s+to\s+/iu, strong: true },
+  { pattern: /^use\s+/iu, strong: false },
+];
 // "เปลี่ยนเป็น"/"switch to"/"change to" are unambiguous "become X" constructions
 // with low false-positive risk on their own (see explicit-vs-tentative below).
-// The bare verbs "เปลี่ยน"/"ลอง"/"ใช้"/"ลองใช้" are extremely common Thai words
-// used constantly outside any model-control context ("ลองคิดดูหน่อย" = "try to
-// think about it", "ใช้เวลานานไหม" = "does it take long") — NOT in this set.
+// The bare verbs "เปลี่ยน"/"ลอง"/"ใช้"/"ลองใช้"/"เอา"/"use" are extremely common
+// words used constantly outside any model-control context ("ลองคิดดูหน่อย" =
+// "try to think about it", "เอาไว้ก่อน" = "leave it for now") — NOT in this set.
 const STRONG_THAI_SWITCH_PREFIXES = new Set(["เปลี่ยนเป็น"]);
 // Connector words between the verb and the model term ("เปลี่ยน model เป็น GPT").
 const LEADING_CONNECTOR_WORDS = ["model", "โมเดล", "เป็น"];
@@ -68,9 +49,24 @@ const LEADING_CONNECTOR_WORDS = ["model", "โมเดล", "เป็น"];
 // even behind a bare/tentative verb ("เปลี่ยน model เป็น claude").
 const MODEL_CONNECTOR_WORDS = new Set(["model", "โมเดล"]);
 // Thai softeners/fillers the user tacks on around the model term.
-const TRAILING_FILLER_PHRASES = ["ให้หน่อย", "ตัวใหม่", "ให้ที", "ดูหน่อย", "หน่อย", "เลย"].toSorted(
-  (a, b) => b.length - a.length,
-);
+const TRAILING_FILLER_PHRASES = [
+  "ให้หน่อย",
+  "ตัวใหม่",
+  "ให้ที",
+  "ดูหน่อย",
+  "หน่อย",
+  "เลย",
+  "ครับ",
+  "ค่ะ",
+  "คะ",
+  "นะ",
+  "จ้า",
+  "จ้ะ",
+].toSorted((a, b) => b.length - a.length);
+// "เปลี่ยนเป็น X ได้ไหม" is the polite form of the command, not a question
+// about X. Only an explicit switch sheds it; after a bare verb ("ใช้ X ได้ไหม")
+// it stays, and the router leaves that question alone.
+const POLITE_REQUEST_TAILS = ["ได้ไหม", "ได้มั้ย", "ได้มั๊ย", "ได้ป่ะ", "ได้ปะ", "ได้หรือเปล่า"];
 const NUMERIC_SELECTION_PATTERN = /^\d+$/u;
 const MAX_CLASSIFIER_STRIP_ITERATIONS = 4;
 
@@ -86,11 +82,11 @@ function matchLeadingSwitchPrefix(text: string): PrefixMatch | null {
       };
     }
   }
-  const lower = text.toLowerCase();
-  for (const prefix of ENGLISH_SWITCH_PREFIXES) {
-    if (lower.startsWith(prefix)) {
+  for (const { pattern, strong } of ENGLISH_SWITCH_PREFIXES) {
+    const match = pattern.exec(text);
+    if (match) {
       // "switch to"/"change to" are as unambiguous in English as "เปลี่ยนเป็น" is in Thai.
-      return { remainder: text.slice(prefix.length), strong: true };
+      return { remainder: text.slice(match[0].length), strong };
     }
   }
   return null;
@@ -117,7 +113,10 @@ function stripLeadingConnectors(text: string): { remainder: string; sawModelWord
 }
 
 function stripTrailingFillers(text: string): string {
-  let remainder = text.trim();
+  let remainder = text
+    .trim()
+    .replace(/[.!]+$/u, "")
+    .trim();
   for (let guard = 0; guard < MAX_CLASSIFIER_STRIP_ITERATIONS; guard += 1) {
     const before = remainder;
     for (const filler of TRAILING_FILLER_PHRASES) {
@@ -151,8 +150,13 @@ function extractSwitchQuery(rawText: string): { query: string; explicit: boolean
   const { remainder: afterConnectors, sawModelWord } = stripLeadingConnectors(
     prefixMatch.remainder,
   );
-  const query = stripTrailingFillers(afterConnectors);
-  return query.length > 0 ? { query, explicit: prefixMatch.strong || sawModelWord } : null;
+  const explicit = prefixMatch.strong || sawModelWord;
+  const filled = stripTrailingFillers(afterConnectors);
+  const tail = explicit
+    ? POLITE_REQUEST_TAILS.find((phrase) => filled.endsWith(phrase))
+    : undefined;
+  const query = tail ? stripTrailingFillers(filled.slice(0, -tail.length)) : filled;
+  return query.length > 0 ? { query, explicit } : null;
 }
 
 /**
@@ -163,11 +167,11 @@ function extractSwitchQuery(rawText: string): { query: string; explicit: boolean
  * ("Gemini ดีไหม", "Grok เก่งกว่า Claude ไหม") never match and continue to the
  * normal agent unchanged.
  *
- * The leading verb alone is not proof of intent: "เปลี่ยน"/"ลอง"/"ใช้"/"ลองใช้"
- * are ordinary Thai words used constantly outside any model context, so a
- * match through one of those bare verbs is only `explicit: false` — tentative
- * — and the caller must corroborate it against the live catalog before
- * claiming the message (see createLineModelSwitchIntentRouter). Only the
+ * The leading verb alone is not proof of intent: "เปลี่ยน"/"ลอง"/"ใช้"/"ลองใช้"/
+ * "เอา"/"use" are ordinary words used constantly outside any model context, so
+ * a match through one of those bare verbs is only `explicit: false` —
+ * tentative — and the caller must corroborate it against the live catalog
+ * before claiming the message (see model-control-router.ts). Only the
  * unambiguous "เปลี่ยนเป็น"/"switch to"/"change to" constructions, or wording
  * that explicitly names "model"/"โมเดล", are trusted as `explicit: true`.
  */
@@ -274,18 +278,19 @@ export type LineModelSwitchDeps = {
 };
 
 /**
- * Runs one picker action for an owner's LINE session through the same
- * `createLineModelCatalogTool` the AI-facing picker uses, so every switch --
- * typed, numbered or a follow-up -- gets the fresh account catalog, the exact
- * match rule and the session-only OpenRouter applier. Undefined when the
+ * Resolves a numbered reply against the owner's pending listing through the
+ * same `createLineModelCatalogTool` the AI-facing picker uses, so it gets the
+ * fresh account catalog and the shared session applier. Undefined when the
  * action could not run (no tool, catalog or auth failure).
  */
 export async function runLineModelCatalogAction(
   deps: LineModelSwitchDeps,
-  target: { sessionKey: string; agentId?: string; senderId: string },
-  input: { action: "search"; query: string } | { action: "select"; selection: number },
+  target: { sessionKey: string; agentId?: string; senderId: string; config?: OpenClawConfig },
+  input: { action: "select"; selection: number },
 ): Promise<Record<string, unknown> | undefined> {
   const tool = createLineModelCatalogTool({
+    // The tool's own gate guards its AI-facing registration; this caller has
+    // already admitted the turn through resolveModelControlTurn, on any surface.
     messageChannel: "line",
     senderIsOwner: true,
     requesterSenderId: target.senderId,
@@ -295,6 +300,7 @@ export async function runLineModelCatalogAction(
     applySessionModel: (deps.buildSessionModelApplier ?? createLineSessionModelApplier)({
       agentId: target.agentId,
       sessionKey: target.sessionKey,
+      config: target.config,
     }),
     fetchImpl: deps.fetchImpl,
     now: deps.now,
@@ -308,68 +314,4 @@ export async function runLineModelCatalogAction(
   } catch {
     return undefined;
   }
-}
-
-/**
- * Builds the `before_dispatch` handler that deterministically routes owner
- * model-switch intents to the validated LINE catalog picker before the normal
- * agent runs. Shares the same pending-selection store as the AI-facing tool so
- * a numbered choice created by either path resolves the same way.
- */
-export function createLineModelSwitchIntentRouter(params: LineModelSwitchDeps) {
-  return async (
-    event: LineBeforeDispatchEvent,
-    ctx: LineBeforeDispatchContext,
-  ): Promise<LineBeforeDispatchResult | undefined> => {
-    if (event.channel !== "line") {
-      return undefined;
-    }
-    // Owner-only privileged control: any other sender's message — including
-    // one that reads like a switch request — falls straight through to
-    // ordinary agent chat, matching the AI-facing picker's own owner gate.
-    if (event.senderIsOwner !== true) {
-      return undefined;
-    }
-
-    const intent = classifyLineModelControlIntent(event.body ?? event.content ?? "");
-    if (intent.kind === "none") {
-      return undefined;
-    }
-
-    const sessionKey = (ctx.sessionKey ?? event.sessionKey)?.trim();
-    const requesterSenderId = event.senderId?.trim();
-    if (!sessionKey || !requesterSenderId) {
-      return undefined;
-    }
-
-    const details = await runLineModelCatalogAction(
-      params,
-      { sessionKey, agentId: ctx.agentId, senderId: requesterSenderId },
-      intent.kind === "numeric"
-        ? { action: "select", selection: intent.selection }
-        : { action: "search", query: intent.query },
-    );
-    if (!details) {
-      // Catalog/auth failures fail safe: fall through to ordinary chat rather
-      // than surfacing a raw error outside the normal agent reply contract.
-      return undefined;
-    }
-    if (intent.kind === "numeric" && details.resolution === "no_pending") {
-      // No active pending selection for this session+owner: treat the bare
-      // number as ordinary chat instead of a picker reply.
-      return undefined;
-    }
-    if (intent.kind === "switch" && !intent.explicit && details.resolution === "no_match") {
-      // A tentative match (bare "เปลี่ยน"/"ลอง"/"ใช้"/"ลองใช้", no "model"/"โมเดล"
-      // wording) found zero credible evidence in the live catalog that the
-      // extracted text names a real model — e.g. "ลองคิดดูหน่อย" ("try to think
-      // about it") vs "ลอง gemini". Fall through to ordinary chat instead of
-      // hijacking the message with an irrelevant "model not found" reply.
-      // Explicit wording ("เปลี่ยนเป็น X", "เปลี่ยน model เป็น X") still reports
-      // no_match normally, since the user unambiguously asked to switch.
-      return undefined;
-    }
-
-    return { handled: true, text: formatLineModelCatalogReply(details, intent) };
-  };
 }

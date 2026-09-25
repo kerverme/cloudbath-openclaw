@@ -43,6 +43,7 @@ import {
   type LineVideoJob,
 } from "./src/video-job-store.js";
 import {
+  hasOpenLineVideoModelPicker,
   LINE_VIDEO_MODEL_SELECTION_MAX_ENTRIES,
   LINE_VIDEO_MODEL_SELECTION_NAMESPACE,
   type LinePendingVideoModelSelection,
@@ -67,11 +68,8 @@ type RegisteredLineCardCommand = OpenClawPluginCommandDefinition;
 // import/export line referencing "./src/" here, the same reason the card
 // command below is loaded through `createLazyRuntimeModule` instead of a
 // top-level import.
-type LineModelSwitchIntentRouter = ReturnType<
-  typeof import("./src/model-switch-router.js").createLineModelSwitchIntentRouter
->;
-type LineModelStateRouter = ReturnType<
-  typeof import("./src/model-state-router.js").createLineModelStateRouter
+type LineModelControlRouter = ReturnType<
+  typeof import("./src/model-control-router.js").createLineModelControlRouter
 >;
 type LineVideoModelControlRouter = ReturnType<
   typeof import("./src/video-model-control.js").createLineVideoModelControlRouter
@@ -83,35 +81,28 @@ type LineVideoDraftReplyRelay = ReturnType<
   typeof import("./src/video-draft-reply-relay.js").createLineVideoDraftReplyRelay
 >;
 
-function createLineModelSwitchIntentRouterLoader(
-  pendingStore: PluginStateKeyedStore<LinePendingModelSelection>,
-) {
-  return createLazyRuntimeModule<LineModelSwitchIntentRouter>(async () => {
-    const { createLineModelSwitchIntentRouter } = await import("./src/model-switch-router.js");
-    return createLineModelSwitchIntentRouter({ pendingStore });
-  });
-}
-
-function createLineModelStateRouterLoader(deps: {
+function createLineModelControlRouterLoader(deps: {
   referenceStore: PluginStateKeyedStore<LineModelReference>;
   pendingStore: PluginStateKeyedStore<LinePendingModelSelection>;
+  videoModelPickerOpen: (ctx: { accountId?: string; conversationId?: string }) => Promise<boolean>;
 }) {
-  return createLazyRuntimeModule<LineModelStateRouter>(async () => {
-    const { createLineModelStateRouter } = await import("./src/model-state-router.js");
-    return createLineModelStateRouter(deps);
+  return createLazyRuntimeModule<LineModelControlRouter>(async () => {
+    const { createLineModelControlRouter } = await import("./src/model-control-router.js");
+    return createLineModelControlRouter(deps);
   });
 }
 
 /**
  * `before_dispatch` is first-claim-wins in priority order, then registration
- * order across plugins. Model-state questions are answered from canonical
- * state, so they must be claimed before Cloudbath's referent arbitration
- * (default priority) spends a model call on them. The per-turn reset runs
- * above that, and claims nothing: a turn claimed before it would still carry
- * the previous turn's video-draft relay state, which cancels the reply.
+ * order across plugins. Model control (switches, their follow-ups and
+ * model-state questions, from LINE or the Control UI) is answered from
+ * canonical state, so it must be claimed before Cloudbath's referent
+ * arbitration (default priority) spends a model call on it. The per-turn reset
+ * runs above that, and claims nothing: a turn claimed before it would still
+ * carry the previous turn's video-draft relay state, which cancels the reply.
  */
 const LINE_TURN_RESET_HOOK_PRIORITY = 200;
-const LINE_MODEL_STATE_HOOK_PRIORITY = 100;
+const LINE_MODEL_CONTROL_HOOK_PRIORITY = 100;
 
 function createLineVideoModelControlRouterLoader(deps: {
   preferenceStore: PluginStateKeyedStore<LineVideoModelPreferenceState>;
@@ -260,28 +251,34 @@ export default defineBundledChannelEntry({
       },
       { priority: LINE_TURN_RESET_HOOK_PRIORITY },
     );
-    // One picker store for every LINE model-switch path: the AI-facing tool,
-    // the typed switch router and model-state follow-ups.
+    // One picker store for every model-switch path: the AI-facing tool, typed
+    // switches, numbered replies and follow-ups, on LINE and in the Control UI.
     const pendingModelSelectionStore = api.runtime.state.openKeyedStore<LinePendingModelSelection>({
       namespace: LINE_MODEL_SELECTION_NAMESPACE,
       maxEntries: LINE_MODEL_SELECTION_MAX_ENTRIES,
       defaultTtlMs: LINE_MODEL_SELECTION_TTL_MS,
     });
-    const loadModelStateRouter = createLineModelStateRouterLoader({
+    const loadModelControlRouter = createLineModelControlRouterLoader({
       referenceStore: api.runtime.state.openKeyedStore<LineModelReference>({
         namespace: LINE_MODEL_REFERENCE_NAMESPACE,
         maxEntries: LINE_MODEL_REFERENCE_MAX_ENTRIES,
         defaultTtlMs: LINE_MODEL_REFERENCE_RETENTION_MS,
       }),
       pendingStore: pendingModelSelectionStore,
+      videoModelPickerOpen: (ctx) =>
+        hasOpenLineVideoModelPicker({
+          pendingStore: videoModelSelectionStore,
+          accountId: ctx.accountId,
+          conversationId: ctx.conversationId,
+        }),
     });
     api.on(
       "before_dispatch",
       async (event, ctx) => {
-        const router = await loadModelStateRouter();
-        return router(event, ctx);
+        const router = await loadModelControlRouter();
+        return router.early(event, ctx);
       },
-      { priority: LINE_MODEL_STATE_HOOK_PRIORITY },
+      { priority: LINE_MODEL_CONTROL_HOOK_PRIORITY },
     );
 
     api.registerTool(
@@ -432,12 +429,13 @@ export default defineBundledChannelEntry({
       },
     });
 
-    // Deterministic pre-agent routing, registered before the chat model-switch
-    // router below (before_dispatch is first-claim-wins): the exact "ยืนยัน
-    // VIDEO <code>" confirmation, then "video model" wording, must be claimed
-    // here before the chat router's much broader tentative-verb matching ever
-    // sees the message. Both are loaded lazily for the same reason as the
-    // chat router (see createLineModelSwitchIntentRouterLoader above) — no
+    // Deterministic pre-agent routing, registered before the late model-control
+    // handler below (before_dispatch is first-claim-wins): the exact "ยืนยัน
+    // VIDEO <code>" confirmation, then "video model" wording and an open video
+    // picker's numbered replies and refinements, must be claimed here first.
+    // The early model-control handler leaves video wording and open-picker
+    // refinements alone for the same reason. Both are loaded lazily like the
+    // model-control router (see createLineModelControlRouterLoader above) — no
     // static "./src/" import for these heavier modules from this entrypoint.
     const loadVideoConfirmationGate = createLineVideoConfirmationGateLoader({
       draftStore: videoDraftStore,
@@ -498,19 +496,13 @@ export default defineBundledChannelEntry({
       },
     );
 
-    // Deterministic pre-agent routing: an owner's explicit switch request
-    // ("เปลี่ยนเป็น gemini หน่อย", "switch to Claude") or a numeric reply to an
-    // active pending picker is handled here, before the main agent ever runs,
-    // so the flow no longer depends on the active LLM deciding to call the
-    // AI-facing picker tool above. Ordinary model discussion is untouched.
-    // Loaded lazily (see createLineModelSwitchIntentRouterLoader) so this
-    // entrypoint has no static "./src/" import for the router module.
-    const loadModelSwitchIntentRouter = createLineModelSwitchIntentRouterLoader(
-      pendingModelSelectionStore,
-    );
+    // Model control's late handler: a numbered reply to an open model picker,
+    // and a typed switch the early handler deferred while a video picker was
+    // open. Registered after Cloudbath and the video gates, whose own numbered
+    // questions and refinements claim first.
     api.on("before_dispatch", async (event, ctx) => {
-      const router = await loadModelSwitchIntentRouter();
-      return router(event, ctx);
+      const router = await loadModelControlRouter();
+      return router.late(event, ctx);
     });
 
     const loadLineCardCommand = createLineCardCommandLoader(api);

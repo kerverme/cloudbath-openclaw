@@ -12,6 +12,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import type { PluginStateKeyedStore } from "openclaw/plugin-sdk/plugin-state-runtime";
 import {
   clearSessionStoreCacheForTest,
@@ -25,7 +26,7 @@ import {
   LINE_MODEL_SELECTION_TTL_MS,
   type LinePendingModelSelection,
 } from "./model-catalog-tool.js";
-import { createLineModelSwitchIntentRouter } from "./model-switch-router.js";
+import { createLineModelControlRouter } from "./model-control-router.js";
 
 const AGENT_ID = "main";
 const SESSION_KEY = "agent:main:line:U6b";
@@ -34,6 +35,7 @@ const QWEN = "qwen/qwen3.8-27b";
 const DEEPSEEK_FLASH = "deepseek/deepseek-v4-flash-0731";
 const DEEPSEEK_CHAT = "deepseek/deepseek-v4-chat";
 const LUNA = "openai/gpt-5.6-luna";
+const SOL = "openai/gpt-5.6-sol";
 
 type CatalogFixture = { id: string; name: string };
 
@@ -97,12 +99,13 @@ let clock = Date.parse("2026-09-21T09:00:00.000Z");
 
 const now = () => clock;
 
-/** The real router, wired to the real session-store applier. */
+/** The real model-control handlers, in before_dispatch order, on the real session-store applier. */
 function createRouter(catalog: CatalogFixture[] = FULL_CATALOG) {
-  return createLineModelSwitchIntentRouter({
+  const { early, late } = createLineModelControlRouter({
     pendingStore: createMemoryPendingStore(now),
     resolveApiKey: async () => SECRET,
     buildSessionModelApplier: createLineSessionModelApplier,
+    readConfig: () => ({}) as OpenClawConfig,
     fetchImpl: async () =>
       new Response(JSON.stringify({ data: catalog }), {
         status: 200,
@@ -110,6 +113,8 @@ function createRouter(catalog: CatalogFixture[] = FULL_CATALOG) {
       }),
     now,
   });
+  return async (event: Parameters<typeof early>[0], ctx: Parameters<typeof early>[1]) =>
+    (await early(event, ctx)) ?? (await late(event, ctx));
 }
 
 function ownerEvent(body: string) {
@@ -214,21 +219,68 @@ describe("a completed LINE switch leaves exactly one selected model", () => {
   });
 });
 
+describe("the switch writes what the Control UI picker writes", () => {
+  it("keeps a pinned OpenRouter auth profile across an OpenRouter switch", async () => {
+    await upsertSessionEntry({
+      agentId: AGENT_ID,
+      sessionKey: SESSION_KEY,
+      entry: {
+        sessionId: "sess-1",
+        authProfileOverride: "openrouter:work",
+        authProfileOverrideSource: "user",
+        updatedAt: now(),
+      } as SessionEntry,
+    });
+
+    const result = await createRouter()(ownerEvent("switch to gpt-5.6-luna"), CTX);
+
+    expect(result?.handled).toBe(true);
+    expect(readEntry()).toMatchObject({
+      modelOverride: LUNA,
+      authProfileOverride: "openrouter:work",
+      authProfileOverrideSource: "user",
+    });
+  });
+
+  it("naming the default model resets the override instead of pinning it", async () => {
+    await seedSelectedModel(LUNA);
+    const { early } = createLineModelControlRouter({
+      pendingStore: createMemoryPendingStore(now),
+      resolveApiKey: async () => SECRET,
+      buildSessionModelApplier: createLineSessionModelApplier,
+      readConfig: () =>
+        ({
+          agents: { defaults: { model: { primary: `openrouter/${DEEPSEEK_FLASH}` } } },
+        }) as OpenClawConfig,
+      fetchImpl: async () => new Response(JSON.stringify({ data: FULL_CATALOG }), { status: 200 }),
+      now,
+    });
+
+    const result = await early(ownerEvent("switch to deepseek-v4-flash-0731"), CTX);
+
+    expect(result?.handled).toBe(true);
+    const entry = readEntry();
+    expect(entry?.providerOverride).toBeUndefined();
+    expect(entry?.modelOverride).toBeUndefined();
+    expect(entry?.liveModelSwitchPending).toBe(true);
+  });
+});
+
 describe("a stale numbered choice cannot select a model", () => {
   it("binds the number to the newest listing, not the one it replaced", async () => {
     await seedSelectedModel(QWEN);
-    const router = createRouter();
+    const router = createRouter([...FULL_CATALOG, { id: SOL, name: "GPT-5.6 Sol" }]);
 
     await router(ownerEvent("เปลี่ยนโมเดลเป็น deepseek หน่อย"), CTX);
     // A second request replaces the first listing before any number is sent.
     const second = await router(ownerEvent("เปลี่ยนโมเดลเป็น gpt หน่อย"), CTX);
-    expect(second?.handled).toBe(true);
+    expect(second?.text).toContain("1. GPT-5.6 Luna");
 
     await router(ownerEvent("1"), CTX);
 
-    // "1" must resolve against the GPT listing; the DeepSeek listing it
-    // replaced can no longer supply a candidate for it.
-    expect(readEntry()?.modelOverride).not.toBe(DEEPSEEK_FLASH);
+    // "1" resolves against the GPT listing; the DeepSeek listing it replaced
+    // can no longer supply a candidate for it.
+    expect(readEntry()?.modelOverride).toBe(LUNA);
   });
 
   it("leaves the session untouched once the listing has expired", async () => {

@@ -126,6 +126,73 @@ export function listCatalogFamily(
   });
 }
 
+export type LineModelSwitchTarget =
+  /** One catalog model: the wording named it exactly, or uniquely without a version. */
+  | { kind: "switch"; model: OpenRouterAccountModel }
+  /** Several catalog models answer to the wording: the owner picks one. */
+  | { kind: "choose"; models: OpenRouterAccountModel[] }
+  /** The versioned model asked for is absent; this is the one nearby model. */
+  | { kind: "confirm"; model: OpenRouterAccountModel; lookup: LineCatalogLookup }
+  /** The versioned model asked for is absent; several models are nearby. */
+  | { kind: "clarify"; lookup: LineCatalogLookup }
+  | { kind: "none"; lookup: LineCatalogLookup };
+
+/**
+ * What a switch request names in the catalog.
+ *
+ * A version is identity: "GPT-6 Luna" is never "GPT-5.6 Luna" (its "6" is a
+ * word of "5.6"), so a versioned name that is not an exact match can only be
+ * offered, never switched to. Without a version the owner is naming a model
+ * the way people talk ("openai luna", "luna"); when exactly one catalog model
+ * carries every one of those words there is nothing to guess, so it is the
+ * model, and several are a choice.
+ */
+export function resolveCatalogSwitchTarget(params: {
+  query: string;
+  models: readonly OpenRouterAccountModel[];
+  aliases: readonly LineModelAlias[];
+}): LineModelSwitchTarget {
+  const lookup = lookupCatalogModel(params);
+  const [exact] = lookup.matches;
+  if (exact) {
+    return lookup.matches.length === 1
+      ? { kind: "switch", model: exact }
+      : { kind: "choose", models: lookup.matches };
+  }
+  if (/\d/u.test(params.query)) {
+    const [nearby] = lookup.suggestions;
+    if (!nearby) {
+      return { kind: "none", lookup };
+    }
+    return lookup.suggestions.length === 1
+      ? { kind: "confirm", model: nearby, lookup }
+      : { kind: "clarify", lookup };
+  }
+  const named = listCatalogFamily(params.models, params.query);
+  const [only] = named;
+  if (!only) {
+    return { kind: "none", lookup };
+  }
+  return named.length === 1 ? { kind: "switch", model: only } : { kind: "choose", models: named };
+}
+
+/**
+ * Every lettered word the catalog's model ids and names use. A switch request
+ * sharing none of them cannot resolve to any model, so it needs no catalog read.
+ */
+export function catalogNameWords(models: readonly OpenRouterAccountModel[]): Set<string> {
+  return new Set(
+    models.flatMap((model) =>
+      words(`${model.id} ${model.name}`).filter((word) => word.length > 1 && hasLetter(word)),
+    ),
+  );
+}
+
+/** The lettered words of a request, which is all a catalog match can hinge on. */
+export function letteredWords(value: string): string[] {
+  return words(value).filter(hasLetter);
+}
+
 /**
  * Vendor and family words a set of model ids uses -- "openai", "gpt",
  * "deepseek" -- so a question can be recognized as being about models

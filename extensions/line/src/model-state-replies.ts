@@ -55,7 +55,18 @@ export function readSelectionState(
   };
 }
 
+type NamedModel = { id: string; name: string };
+type NumberedChoice = { selection: number; name: string };
+
 export type Replies = {
+  switched(model: NamedModel): string;
+  switchFailed(model: NamedModel): string;
+  /** A referenced model that the fresh catalog no longer has. */
+  modelGone(model: NamedModel): string;
+  switchNotFound(query: string): string;
+  switchCatalogUnavailable(): string;
+  choices(query: string, choices: readonly NumberedChoice[]): string;
+  tooManyChoices(query: string, count: number): string;
   current(selected: SelectedModel, state: SelectionState): string;
   currentProvider(selected: SelectedModel): string;
   available(lookup: LineCatalogLookup): string;
@@ -81,6 +92,10 @@ function vendorCounts(models: readonly OpenRouterAccountModel[]): string {
     .join("\n");
 }
 
+function numbered(choices: readonly NumberedChoice[]): string {
+  return choices.map((choice) => `${choice.selection}. ${choice.name}`).join("\n");
+}
+
 function aliasNote(alias: LineModelAlias | undefined, thai: boolean): string {
   if (!alias) {
     return "";
@@ -91,6 +106,17 @@ function aliasNote(alias: LineModelAlias | undefined, thai: boolean): string {
 }
 
 export const THAI_REPLIES: Replies = {
+  // The picker's own wording, so every switch reads the same on every path.
+  switched: (model) => `เปลี่ยนเป็น ${model.name} แล้ว`,
+  switchFailed: () => "เปลี่ยนโมเดลไม่สำเร็จ ลองใหม่อีกครั้งได้ไหม?",
+  modelGone: (model) =>
+    `ตอนนี้ไม่มี ${catalogModelLabel(model)} ในแคตตาล็อก OpenRouter ของบัญชีนี้แล้ว จึงไม่ได้เปลี่ยนโมเดล`,
+  switchNotFound: (query) => `ไม่เจอโมเดลที่ตรงกับ "${query}" ในบัญชี OpenRouter ลองพิมพ์ชื่อรุ่นให้ชัดขึ้นได้ไหม?`,
+  switchCatalogUnavailable: () =>
+    "ตอนนี้อ่านแคตตาล็อกโมเดลของ OpenRouter ไม่ได้ จึงยังเปลี่ยนโมเดลไม่ได้ ลองใหม่อีกครั้งภายหลัง",
+  choices: (query, choices) => `เจอ ${query} หลายรุ่น:\n${numbered(choices)}\nต้องการใช้รุ่นไหน?`,
+  tooManyChoices: (query, count) =>
+    `เจอ ${query} ${count} รุ่น มากเกินกว่าจะแสดงเป็นตัวเลือก กรุณาพิมพ์ชื่อรุ่นให้ชัดขึ้น`,
   current: (selected, state) =>
     [
       `ตอนนี้ใช้โมเดล ${selected.model} ผ่าน ${selected.provider}`,
@@ -139,6 +165,18 @@ export const THAI_REPLIES: Replies = {
 };
 
 export const ENGLISH_REPLIES: Replies = {
+  switched: (model) => `Switched to ${catalogModelLabel(model)}.`,
+  switchFailed: (model) => `Switching to ${model.name} did not go through. Please try again.`,
+  modelGone: (model) =>
+    `${catalogModelLabel(model)} is no longer in this account's OpenRouter catalog, so the model was not changed.`,
+  switchNotFound: (query) =>
+    `No model matching "${query}" is in this account's OpenRouter catalog. Could you give the exact model name?`,
+  switchCatalogUnavailable: () =>
+    "I can't read the OpenRouter model catalog right now, so I can't switch models yet. Please try again shortly.",
+  choices: (query, choices) =>
+    `Several models match "${query}":\n${numbered(choices)}\nReply with a number to choose one.`,
+  tooManyChoices: (query, count) =>
+    `${count} models match "${query}", too many to list. Please give a more specific model name.`,
   current: (selected, state) =>
     [
       `Current model: ${selected.model} via ${selected.provider}`,
