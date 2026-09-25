@@ -13,5 +13,6 @@ export {
   MODEL_SELECTION_LOCKED_MESSAGE,
   ModelSelectionLockedError,
 } from "../sessions/model-overrides.js";
+export { applyUserSessionModelSelection } from "../sessions/session-model-selection.js";
 export { loadSessionStore, updateSessionStore } from "../config/sessions/store.js";
 export type { SessionEntry } from "../config/sessions/types.js";
