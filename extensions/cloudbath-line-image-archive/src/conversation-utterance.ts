@@ -52,6 +52,18 @@ const DEIXIS_SAME = /(?:ตัว|อัน|แบบ|ของ)?\s*เดิม
 const DEIXIS_PREVIOUS =
   /เมื่อกี้|เมื่อกี๊|ล่าสุด|ที่แล้ว|ก่อนหน้า|\b(?:last|latest|previous)\s+(?:one|version)?\b/iu;
 
+/**
+ * The same markers dating ordinary talk rather than pointing back at work.
+ *
+ * "อาทิตย์ที่แล้ว", "ข่าวล่าสุด" and "last week" are when, not which: after a
+ * unit of time the marker is part of a date, and a message about the news is
+ * not about anything this flow made. Left in, they read as a reference back
+ * and ordinary chat was answered with "which work do you mean?".
+ */
+const DATED_RECENCY =
+  /(?:วัน|อาทิตย์|สัปดาห์|เดือน|ปี|ชั่วโมง|นาที|เทอม|ไตรมาส)\s*(?:ที่แล้ว|ก่อนหน้า(?:นี้)?|ล่าสุด)|เดิมที|\b(?:last|previous|past)\s+(?:week|weekend|month|year|night|day|hour)s?\b/giu;
+const NEWS_TOPIC = /ข่าว|\b(?:news|headlines?)\b/iu;
+
 /** A bare number: the one unambiguous way to pick from a numbered menu. */
 const BARE_ORDINAL = /^(\d{1,2})$/u;
 
@@ -124,9 +136,10 @@ export function classifyConversationUtterance(content: string): ConversationUtte
       : AFFIRMATION.test(text)
         ? "affirm"
         : undefined;
-  const deixis: ConversationDeixis | undefined = DEIXIS_SAME.test(text)
+  const deicticText = text.replace(DATED_RECENCY, " ");
+  const deixis: ConversationDeixis | undefined = DEIXIS_SAME.test(deicticText)
     ? "same"
-    : DEIXIS_PREVIOUS.test(text)
+    : DEIXIS_PREVIOUS.test(deicticText) && !NEWS_TOPIC.test(text)
       ? "previous"
       : undefined;
   // A negation is never a request to render or to proceed: "ไม่เอาภาพ" asks for

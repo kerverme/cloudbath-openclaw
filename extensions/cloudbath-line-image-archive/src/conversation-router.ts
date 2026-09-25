@@ -77,6 +77,7 @@ import {
   type StoryboardDispatchContext,
   type StoryboardDispatchEvent,
   type StoryboardProjectResolver,
+  type StoryboardTurnReading,
 } from "./storyboard-line-router.js";
 import {
   tryGetStoryboardPaidDraftRuntime,
@@ -87,6 +88,7 @@ import { readStoryboardEnvironment } from "./storyboard-request.js";
 import { activeStoryboardKey } from "./storyboard-store.js";
 import type { ActiveStoryboardContext, StoryboardAccessClaim } from "./storyboard-types.js";
 import type { AsyncKeyedStore, SafeLogger } from "./types.js";
+import { claimsUgcCharacterTurn } from "./ugc-character-image.js";
 
 /** A `VIDEO ####` code named outright. The only paid identifier owners see. */
 const VIDEO_CODE = /\bVIDEO\s*(\d{4})\b/iu;
@@ -147,10 +149,10 @@ export type ConversationRouterDeps = Readonly<{
     storyboardId: string;
     claim: StoryboardAccessClaim;
   }): Promise<ResolvedStoryboardReferent | undefined>;
-  isStoryboardRevisionCandidate?(params: {
+  classifyStoryboardTurn?(params: {
     request: string;
     claim: StoryboardAccessClaim;
-  }): Promise<boolean>;
+  }): Promise<StoryboardTurnReading | undefined>;
   resolver: StoryboardProjectResolver;
   /**
    * LINE's paid seam, for the one job this conversation may be waiting on.
@@ -171,6 +173,9 @@ export type ConversationRouterDeps = Readonly<{
   randomId: () => string;
   logger?: Pick<SafeLogger, "info" | "warn">;
 }>;
+
+/** LINE's placeholder body for a message that carries only media. */
+const MEDIA_ONLY_TURN = /^\s*<media:[^>]+>/u;
 
 type EntityMention = Readonly<{ kind: SemanticReferentType; id: string; label: string }>;
 
@@ -265,7 +270,28 @@ export class CloudbathConversationRouter {
       isStoryboardConfirmation(content) ||
       /^\s*\//u.test(content) ||
       /^ยืนยัน\s+VIDEO\s+\d{4}$/iu.test(content.trim());
-    const earlyResolver = protocolTurn ? undefined : this.deps.semanticResolver;
+    // Both reads are shared with the steps below, so a turn pays for each once.
+    let entityRead: Promise<readonly EntityMention[]> | undefined;
+    const readEntities = () => (entityRead ??= this.detectEntities(content, claim));
+    let storyboardRead: Promise<StoryboardTurnReading | undefined> | undefined;
+    const readStoryboardTurn = () =>
+      (storyboardRead ??= (
+        this.deps.classifyStoryboardTurn?.({ request: utterance.text, claim }) ??
+        Promise.resolve(undefined)
+      ).catch(() => undefined));
+    const earlyResolver =
+      protocolTurn ||
+      !this.deps.semanticResolver ||
+      !(await this.referentMayMatter({
+        content,
+        utterance,
+        stored,
+        claim,
+        readEntities,
+        readStoryboardTurn,
+      }))
+        ? undefined
+        : this.deps.semanticResolver;
     const semantic = earlyResolver
       ? await earlyResolver.resolve({
           message: content,
@@ -295,7 +321,7 @@ export class CloudbathConversationRouter {
     if (mediaIntent?.kind === "source_storyboard") {
       return { kind: "pass" };
     }
-    const entities = await this.detectEntities(content, claim);
+    const entities = await readEntities();
 
     // 2. Something named outright outranks anything remembered. "F99 บันทึกเสร็จยัง"
     // is about F99 whatever job is running, so the video path must not take it.
@@ -397,11 +423,8 @@ export class CloudbathConversationRouter {
     // reference back) yet did not resolve. A message with no such marker is new
     // work, and classifying new work is the storyboard router's job, not this
     // one's, so it is passed through untouched.
-    const revisionCandidate = stored.activeStoryboardId
-      ? await this.deps
-          .isStoryboardRevisionCandidate?.({ request: utterance.text, claim })
-          .catch(() => false)
-      : false;
+    const revisionCandidate =
+      stored.activeStoryboardId !== undefined && (await readStoryboardTurn()) === "revision";
     const conversational =
       utterance.polarity !== undefined ||
       utterance.ordinal !== undefined ||
@@ -422,6 +445,12 @@ export class CloudbathConversationRouter {
       return utterance.deixis
         ? { kind: "clarify", text: AMBIGUOUS_REFERENT_REPLY }
         : { kind: "pass" };
+    }
+    // Only a protocol turn skipped the early call for its exact wording; any
+    // other turn without one was declined by `referentMayMatter`, and a late
+    // call here would spend the model on it after all.
+    if (!earlyResolver && !protocolTurn) {
+      return { kind: "pass" };
     }
     // Every named-entity case returned above (including video jobs), so this
     // fallback still has no entity candidates and can reuse the early result.
@@ -776,6 +805,67 @@ export class CloudbathConversationRouter {
   /** Names both readings in one line, using the owner's own words for each. */
   private clarifyBetween(job: StoryboardVideoJobSnapshot, question: ConversationQuestion): string {
     return ["ถามถึงอันไหน?", `1. สถานะของ VIDEO ${job.draftId}`, `2. ${question.prompt}`].join("\n");
+  }
+
+  /**
+   * Whether the referent model could change how this turn is handled.
+   *
+   * Its result only matters when a Cloudbath question is waiting, when a
+   * Cloudbath handler below would claim the turn, or when the turn points back
+   * at Cloudbath work that exists. Otherwise every handler declines and the
+   * turn reaches the main agent whatever the model says, so asking it is a
+   * wasted call on ordinary chat. An active storyboard alone is deliberately
+   * not a reason: it outlives the conversation about it, and a polite or
+   * yes/no word ("ครับ", "ได้", "ไม่") appears in most Thai sentences.
+   */
+  private async referentMayMatter(turn: {
+    content: string;
+    utterance: ConversationUtterance;
+    stored: ActiveConversationContext;
+    claim: StoryboardAccessClaim;
+    readEntities: () => Promise<readonly EntityMention[]>;
+    readStoryboardTurn: () => Promise<StoryboardTurnReading | undefined>;
+  }): Promise<boolean> {
+    const { content, utterance, stored, claim } = turn;
+    if (stored.question?.stance === "asked") {
+      return true;
+    }
+    // The authoritative stores, not the derived question: a step opened
+    // without a handled turn (or a free-text dialogue slot) has no question.
+    const [director, modelStep] = await Promise.all([
+      this.deps.director?.lookup(storyboardDirectorKey(claim)),
+      this.deps.modelSelection?.lookup(storyboardModelSelectionKey(claim)),
+    ]);
+    if ((director && !director.closed) || (modelStep && !modelStep.closed)) {
+      return true;
+    }
+    if (
+      utterance.visualRequest ||
+      utterance.continuation ||
+      utterance.videoRequest ||
+      utterance.progressInquiry ||
+      // An image-only LINE turn: the source-image flow and the Character
+      // workflow's acknowledgement both act on it.
+      MEDIA_ONLY_TURN.test(content) ||
+      parseStoryboardMediaIntent(content) !== undefined ||
+      claimsUgcCharacterTurn(content)
+    ) {
+      return true;
+    }
+    // A reference back or a menu pick is a referent question only while there
+    // is Cloudbath work to point at.
+    const referable =
+      stored.activeStoryboardId !== undefined ||
+      stored.currentWork?.status === "open" ||
+      stored.latestGeneratedImage !== undefined ||
+      unresolvedConversationTasks(stored).length > 0;
+    if (referable && (utterance.deixis !== undefined || utterance.ordinal !== undefined)) {
+      return true;
+    }
+    if ((await turn.readEntities()).length > 0) {
+      return true;
+    }
+    return (await turn.readStoryboardTurn()) !== undefined;
   }
 
   /**

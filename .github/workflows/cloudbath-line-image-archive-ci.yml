@@ -9,6 +9,7 @@ on:
       - "test/openrouter-account-catalog.integration.test.ts"
       - "test/session-model-selection-race.integration.test.ts"
       - "test/model-control-dispatch.integration.test.ts"
+      - "test/cloudbath-referent-gate.integration.test.ts"
       - "src/sessions/session-model-selection*.ts"
       - "src/gateway/sessions-patch.ts"
       - "src/plugin-sdk/model-session-runtime.ts"
@@ -95,6 +96,8 @@ jobs:
             extensions/cloudbath-line-image-archive/src/storyboard-line-router.test.ts \
             extensions/cloudbath-line-image-archive/src/storyboard-first-owner-video.test.ts \
             extensions/cloudbath-line-image-archive/src/conversation-arbitration.test.ts \
+            extensions/cloudbath-line-image-archive/src/conversation-context-handoff.test.ts \
+            extensions/cloudbath-line-image-archive/src/conversation-referent-gate.test.ts \
             extensions/cloudbath-line-image-archive/src/ugc-character-image.test.ts \
             extensions/cloudbath-line-image-archive/src/ugc-character-lock.test.ts \
             extensions/cloudbath-line-image-archive/src/ugc-character-notion.test.ts \
@@ -158,6 +161,7 @@ jobs:
             extensions/line/src/model-switch-router.test.ts \
             extensions/line/src/model-switch-canonical-state.test.ts \
             test/model-control-dispatch.integration.test.ts \
+            test/cloudbath-referent-gate.integration.test.ts \
             src/agents/tools/session-status-tool.line-owner-auth.test.ts \
             extensions/line/src/session-route.test.ts \
             extensions/line/src/send.test.ts \
@@ -244,6 +248,7 @@ jobs:
             extensions/line/src/model-switch-router.test.ts
             extensions/line/src/model-switch-canonical-state.test.ts
             test/model-control-dispatch.integration.test.ts
+            test/cloudbath-referent-gate.integration.test.ts
             src/agents/tools/session-status-tool.ts
             src/agents/tools/session-status-tool.line-owner-auth.test.ts
             src/agents/openclaw-tools.ts
@@ -297,7 +302,8 @@ jobs:
             extensions/line/index.ts \
             extensions/cloudbath-line-image-archive \
             test/cloudbath-workspace-policy-prewarm.integration.test.ts \
-            test/model-control-dispatch.integration.test.ts
+            test/model-control-dispatch.integration.test.ts \
+            test/cloudbath-referent-gate.integration.test.ts
 
       - name: Lint OpenRouter account catalog
         if: steps.dependencies.outcome == 'success' && !cancelled()

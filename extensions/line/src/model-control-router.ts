@@ -122,6 +122,15 @@ const THAI_PROVIDER =
   /ผู้ให้บริการ|ค่ายไหน|ค่ายอะไร|ของค่าย|ของใคร|บริษัทไหน|บริษัทอะไร|มาจากไหน|มาจากค่าย|ใครทำ|ใครพัฒนา|ผ่านอะไร|ผ่านไหน|\bproviders?\b/iu;
 const THAI_NOW = /ใช้|อยู่|ตอนนี้|ปัจจุบัน/u;
 const ROUTING = /อัตโนมัติ|เลือกเอง|\b(?:auto|routing|fallback|manual)\b/iu;
+// Colloquial "ไร" (for อะไร) counts only right after the noun it asks about:
+// bare, it sits inside "ไม่เป็นไร" and "กำไร".
+const COLLOQUIAL_WHICH = /(?:โมเดล|\bmodels?\b|ตัว|รุ่น)\s*ไร(?![\u0E48-\u0E4B])/iu;
+// With no model word, only a whole message asking which one is running NOW
+// ("ใช้ตัวไหนอยู่", "ตอนนี้รันตัวไหน"); "ใช้ตัวไหน" alone asks for advice, and
+// "ครีมกันแดดใช้ตัวไหนอยู่" is about something else.
+const THAI_RUNNING_WHICH =
+  /^(?:ตอนนี้\s*)?(?:ใช้|รัน)\s*ตัว\s*(?:ไหน|ไร|อะไร)\s*(?:อยู่)?\s*(?:ตอนนี้)?\s*(?:ครับ|คะ|ค่ะ|นะ)?\s*[?？]*$/u;
+const THAI_CURRENT_MARKER = /อยู่|ตอนนี้|ปัจจุบัน/u;
 
 // Model names are written in Latin script inside Thai sentences.
 const LATIN_RUN = /[A-Za-z0-9][\w.:/+-]*(?:\s+[A-Za-z0-9][\w.:/+-]*)*/gu;
@@ -132,6 +141,7 @@ const NOT_A_TARGET = /^(?:models?|llms?|providers?|ai|this|that|it|one)$/iu;
 const ENGLISH_CURRENT = [
   /^(?:what|which)(?:'s|\s+is)?\s+(?:the\s+|your\s+|my\s+)?(?:current(?:ly)?\s+)?(?:selected\s+|active\s+)?(?:ai\s+)?model(?:\s+(?:are|am|is|do)\s+(?:you|i|we)\s+(?:using|on|running|use))?(?:\s+(?:now|right\s+now|currently))?$/iu,
   /\bcurrent(?:ly)?\s+(?:selected\s+|active\s+)?model\b/iu,
+  /^what(?:'re|\s+are)\s+you\s+running(?:\s+(?:on|now|right\s+now|currently))?$/iu,
   /\b(?:auto(?:matic)?|manual)\s+(?:model\s+)?(?:selection|routing)\b/iu,
 ];
 const ENGLISH_EXISTS = [
@@ -180,7 +190,10 @@ function classifyThai(text: string): LineModelStateClassification | undefined {
   if (text.includes("มี") && THAI_QUESTION.test(text) && targets.length > 0) {
     return { question: { kind: "exists", targets }, explicit };
   }
-  const asksWhich = /อะไร|ไหน/u.test(text) && THAI_NOW.test(text);
+  if (THAI_RUNNING_WHICH.test(text) && THAI_CURRENT_MARKER.test(text)) {
+    return { question: { kind: "current" }, explicit: true };
+  }
+  const asksWhich = (/อะไร|ไหน/u.test(text) || COLLOQUIAL_WHICH.test(text)) && THAI_NOW.test(text);
   if (explicit && targets.length === 0 && (asksWhich || ROUTING.test(text))) {
     return { question: { kind: "current" }, explicit };
   }

@@ -652,8 +652,7 @@ export default definePluginEntry({
             resolver: storyboardResolver,
             resolveStoryboardReferent: (params) =>
               creativeSpecialists.storyboard.resolveReferent(params),
-            isStoryboardRevisionCandidate: (params) =>
-              creativeSpecialists.storyboard.isRevisionCandidate(params),
+            classifyStoryboardTurn: (params) => creativeSpecialists.storyboard.classifyTurn(params),
             transcript: createConversationTranscriptReader(),
             semanticResolver: createConversationSemanticResolver(
               async (request) =>

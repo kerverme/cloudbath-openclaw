@@ -274,7 +274,8 @@ describe("LLM storyboard tool handoff", () => {
     const h = harness({ semanticResolver: { resolve } });
     await h.dispatch(CREATE_MESSAGE);
     resolve.mockClear();
-    await h.dispatch("ไม่เอาแบบนี้");
+    // A back-reference to the active storyboard reaches both semantic steps.
+    await h.dispatch("ไม่เอาอันเมื่อกี้");
     expect(resolve).toHaveBeenCalledOnce();
   });
 

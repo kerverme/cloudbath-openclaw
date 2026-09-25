@@ -10,6 +10,7 @@
 import type {
   CloudbathStoryboardLineRouter,
   ResolvedStoryboardReferent,
+  StoryboardTurnReading,
 } from "./storyboard-line-router.js";
 import type { StoryboardAccessClaim, StoryboardVersion } from "./storyboard-types.js";
 import type { StoryboardVisualService, StoryboardVisualStatus } from "./storyboard-visual.js";
@@ -51,10 +52,10 @@ export type CloudbathCreativeSpecialists = Readonly<{
       storyboardId: string;
       claim: StoryboardAccessClaim;
     }): Promise<ResolvedStoryboardReferent | undefined>;
-    isRevisionCandidate(params: {
+    classifyTurn(params: {
       request: string;
       claim: StoryboardAccessClaim;
-    }): Promise<boolean>;
+    }): Promise<StoryboardTurnReading | undefined>;
   }>;
   visual?: Readonly<{
     status(params: {
@@ -76,8 +77,8 @@ export function createCloudbathCreativeSpecialists(params: {
     storyboard: Object.freeze({
       resolveReferent: (request: { storyboardId: string; claim: StoryboardAccessClaim }) =>
         params.storyboard.resolveStoryboardReferent(request),
-      isRevisionCandidate: (request: { request: string; claim: StoryboardAccessClaim }) =>
-        params.storyboard.isStoryboardRevisionCandidate(request),
+      classifyTurn: (request: { request: string; claim: StoryboardAccessClaim }) =>
+        params.storyboard.classifyStoryboardTurn(request),
     }),
     ...(params.visuals
       ? {
