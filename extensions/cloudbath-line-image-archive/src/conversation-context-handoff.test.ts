@@ -249,9 +249,9 @@ describe("C: the same deictic message in a fresh conversation", () => {
 
     expect(asked.conversation?.kind).toBe("clarify");
     expect(asked.text).toContain("หมายถึงงานไหน");
-    // Meaning is resolved even without saved work; a claimed revision still
-    // cannot bind to a nonexistent storyboard.
-    expect(semantic.seen).toHaveLength(1);
+    // With no Cloudbath work to point at, the model's answer could not bind
+    // anything, so it is not consulted.
+    expect(semantic.seen).toHaveLength(0);
     expect(paid.calls).toBe(0);
   });
 });

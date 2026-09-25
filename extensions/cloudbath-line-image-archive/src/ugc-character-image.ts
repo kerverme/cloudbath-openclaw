@@ -221,6 +221,22 @@ function normalizeCommandText(content: string): string {
 }
 
 /**
+ * Whether the Character workflow's before_dispatch claims this text.
+ *
+ * Naming the latest image is NOT a Character mutation, so the archive flow
+ * keeps that turn. It outranks loose intent, because "เก็บรูปนี้ชื่อ X" reads as
+ * both and is shipped as a naming turn; an explicit Character command still
+ * outranks it. Exported so referent arbitration asks the same question.
+ */
+export function claimsUgcCharacterTurn(content: string): boolean {
+  return (
+    parseUgcCharacterImageCommand(content) !== null ||
+    parseUgcCharacterViewMigrationCommand(content) !== null ||
+    (parseLatestImageNamingCommand(content) === null && hasCharacterMutationIntent(content))
+  );
+}
+
+/**
  * Loose "put this image into the Character Library" intent, in either language.
  *
  * A strong verb counts against a Character OR an image target; a weak verb
@@ -696,21 +712,17 @@ export class UgcCharacterImageWorkflow {
     if ((await this.consumeInboundImageTurn(context)) === true) {
       return { handled: true, text: LINE_IMAGE_ACKNOWLEDGEMENT };
     }
-    const command = parseUgcCharacterImageCommand(event.content);
-    const migrationCharacterId = parseUgcCharacterViewMigrationCommand(event.content);
-    // Naming the latest image is NOT a Character mutation, so the archive flow
-    // keeps that turn: this only records the name for a bare follow-up. It
-    // outranks loose intent, because "เก็บรูปนี้ชื่อ X" reads as both and is
-    // shipped as a naming turn; an explicit Character command still outranks it.
-    const namedImage =
-      command || migrationCharacterId ? null : parseLatestImageNamingCommand(event.content);
-    const mutationIntent = !command && !namedImage && hasCharacterMutationIntent(event.content);
-    if (!command && !migrationCharacterId && !mutationIntent) {
+    if (!claimsUgcCharacterTurn(event.content)) {
+      // A naming turn stays the archive flow's: this only records the name
+      // for a bare follow-up.
+      const namedImage = parseLatestImageNamingCommand(event.content);
       if (namedImage) {
         await this.rememberLatestImageName(event, context, namedImage);
       }
       return undefined;
     }
+    const command = parseUgcCharacterImageCommand(event.content);
+    const migrationCharacterId = parseUgcCharacterViewMigrationCommand(event.content);
     const binding = await this.resolveOwnerBinding(event, context);
     if (!binding) {
       return { handled: true };

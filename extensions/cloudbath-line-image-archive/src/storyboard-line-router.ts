@@ -427,6 +427,9 @@ function nativeConversationId(conversationId: string | undefined): string | unde
   return /^[UCR][0-9A-Za-z]{5,}$/u.test(native) ? native : undefined;
 }
 
+/** How the storyboard parser reads a turn, without acting on it. */
+export type StoryboardTurnReading = "revision" | "workflow";
+
 /**
  * The trusted LINE identity triple, or undefined when the turn is not the
  * bound owner speaking in a bound conversation.
@@ -574,11 +577,16 @@ export class CloudbathStoryboardLineRouter {
       : undefined;
   }
 
-  /** Classifies revision shape only; referent identity is resolved separately. */
-  async isStoryboardRevisionCandidate(params: {
+  /**
+   * What this router's own parser reads the turn as, without acting on it:
+   * `revision` when it would append a version to the active storyboard,
+   * `workflow` for any other storyboard intent. Referent identity is resolved
+   * separately.
+   */
+  async classifyStoryboardTurn(params: {
     request: string;
     claim: StoryboardAccessClaim;
-  }): Promise<boolean> {
+  }): Promise<StoryboardTurnReading | undefined> {
     const knownCharacterNames = await this.deps.resolver
       .listCharacterNames(params.claim)
       .catch(() => [] as readonly string[]);
@@ -590,7 +598,10 @@ export class CloudbathStoryboardLineRouter {
       // router cannot disagree about whether a turn revises the bound work.
       ...(await this.boundDuration(params.claim, active, params.request)),
     });
-    return Boolean(intent && revisesActiveStoryboard(intent));
+    if (!intent) {
+      return undefined;
+    }
+    return revisesActiveStoryboard(intent) ? "revision" : "workflow";
   }
 
   /**

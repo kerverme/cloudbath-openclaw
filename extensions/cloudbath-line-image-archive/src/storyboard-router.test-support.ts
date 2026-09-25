@@ -285,8 +285,7 @@ export function harness(
     resolver: shared,
     resolveStoryboardReferent: async (params) =>
       await storyboardRouter.resolveStoryboardReferent(params),
-    isStoryboardRevisionCandidate: async (params) =>
-      await storyboardRouter.isStoryboardRevisionCandidate(params),
+    classifyStoryboardTurn: async (params) => await storyboardRouter.classifyStoryboardTurn(params),
     paidDraftRuntime: options.paidDraftRuntime ?? null,
     now: () => Date.parse("2026-08-30T10:00:00.000Z"),
     randomId: () => `nonce${(nextNonce += 1)}0000`,

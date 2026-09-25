@@ -170,21 +170,33 @@ describe("AVAILABLE only for an exact name or alias", () => {
 });
 
 describe("current model and selection state come from the session", () => {
-  it.each(["ตอนนี้ใช้โมเดลอะไร", "ใช้โมเดลอะไรอยู่", "What model are you using?"])(
-    "%s => the canonical session selection",
-    async (text) => {
-      await seedSelectedModel();
+  it.each([
+    "ตอนนี้ใช้โมเดลอะไร",
+    "ใช้โมเดลอะไรอยู่",
+    "What model are you using?",
+    // Colloquial and unmarked wording owners actually send.
+    "ใช้โมเดลไรอยู่",
+    "ตอนนี้ใช้โมเดลไร",
+    "ใช้ model อะไรอยู่",
+    "ตอนนี้ model อะไร",
+    "ตอนนี้รันตัวไหน",
+    "ใช้ตัวไหนอยู่",
+    "what model are you on",
+    "which model are you using",
+    "what are you running",
+    "current model?",
+  ])("%s => the canonical session selection", async (text) => {
+    await seedSelectedModel();
 
-      const result = await ask(text);
+    const result = await ask(text);
 
-      expect(result?.handled).toBe(true);
-      expect(result?.text).toContain(DEEPSEEK_FLASH);
-      expect(result?.text).toMatch(/openrouter/u);
-      expect(result?.text).toMatch(/เลือกเอง|chosen manually/u);
-      // Current state never needs the catalog.
-      expect(catalogRequests).toBe(0);
-    },
-  );
+    expect(result?.handled).toBe(true);
+    expect(result?.text).toContain(DEEPSEEK_FLASH);
+    expect(result?.text).toMatch(/openrouter/u);
+    expect(result?.text).toMatch(/เลือกเอง|chosen manually/u);
+    // Current state never needs the catalog.
+    expect(catalogRequests).toBe(0);
+  });
 
   it("reports the configured default when the session has no override", async () => {
     const result = await ask("ตอนนี้ใช้โมเดลอะไร");
@@ -260,13 +272,30 @@ describe("an unreadable catalog is claimed and answered, never handed to the age
 });
 
 describe("everything else is left to the other handlers", () => {
-  it.each(["มีข้าวไหม", "มีเวลาไหม", "ใช้โมเดลอะไรดี", "ตอนนี้ใช้โมเดลวิดีโออะไร", "1", "สวัสดีครับ"])(
-    "%s is not claimed and reads no catalog",
-    async (text) => {
-      expect(await ask(text)).toBeUndefined();
-      expect(catalogRequests).toBe(0);
-    },
-  );
+  it.each([
+    "มีข้าวไหม",
+    "มีเวลาไหม",
+    "ใช้โมเดลอะไรดี",
+    "ตอนนี้ใช้โมเดลวิดีโออะไร",
+    "1",
+    "สวัสดีครับ",
+    // Near misses of the colloquial current-model wording.
+    "ใช้ตัวไหนดี",
+    "ใช้ตัวไหน",
+    "ครีมกันแดดใช้ตัวไหนอยู่",
+    "ใช้ตัวไหนอยู่ในรูป",
+    "ตอนนี้ใช้ตัวไหนทำงาน",
+    "ใช้โมเดลนี้ไม่เป็นไร",
+    "มือถือรุ่นไรอยู่",
+    "ตัวไรอยู่ในกล่อง",
+    "โมเดลไรเนี่ย",
+    "แนะนำโมเดลไรดี",
+    "what are you running for",
+    "what are you doing",
+  ])("%s is not claimed and reads no catalog", async (text) => {
+    expect(await ask(text)).toBeUndefined();
+    expect(catalogRequests).toBe(0);
+  });
 
   it("does not claim Latin words the catalog does not use, and remembers that", async () => {
     const handle = router();
