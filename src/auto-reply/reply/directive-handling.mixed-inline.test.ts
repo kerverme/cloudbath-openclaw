@@ -5,7 +5,7 @@ import type { SessionEntry } from "../../config/sessions.js";
 import { applyInlineDirectivesFastLane } from "./directive-handling.fast-lane.js";
 import { parseInlineDirectives } from "./directive-handling.parse.js";
 import { persistInlineDirectives } from "./directive-handling.persist.js";
-import { refreshQueuedFollowupSession } from "./queue.js";
+import { refreshQueuedFollowupSession } from "./queue/state.js";
 
 vi.mock("../../agents/agent-scope.js", () => ({
   listAgentEntries: vi.fn(() => []),
@@ -28,7 +28,10 @@ vi.mock("../../infra/system-events.js", () => ({
   enqueueSystemEvent: vi.fn(),
 }));
 
-vi.mock("./queue.js", () => ({
+vi.mock("./queue/state.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./queue/state.js")>()),
+  // Every session has a queue here, so assertions see each refresh payload.
+  getExistingFollowupQueue: () => ({}),
   refreshQueuedFollowupSession: vi.fn(),
 }));
 

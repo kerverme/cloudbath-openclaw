@@ -487,6 +487,7 @@ export default defineBundledChannelEntry({
           applySessionModel: createLineSessionModelApplier({
             agentId: ctx.agentId,
             sessionKey: ctx.sessionKey,
+            config: ctx.config,
           }),
           config: ctx.config,
           agentId: ctx.agentId,
