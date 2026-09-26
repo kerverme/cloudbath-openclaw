@@ -3440,6 +3440,39 @@ describe("runEmbeddedAttempt tool-result guard budget wiring", () => {
     ).toBe(1_000_000);
   });
 
+  it("budgets tool results at the caps provider dispatch applies", async () => {
+    await createContextEngineAttemptRunner({
+      contextEngine: createContextEngineBootstrapAndAssemble(),
+      sessionKey,
+      tempPaths,
+      attemptOverrides: { contextTokenBudget: 1_050_000 },
+    });
+
+    expect(
+      mockParams(hoisted.installToolResultContextGuardMock, 0, "tool-result guard params")
+        .providerToolResultCaps,
+    ).toEqual({ maxChars: 64_000, aggregateMaxChars: 2_100_000 });
+  });
+
+  it("budgets tool results at a configured tool-result cap", async () => {
+    await createContextEngineAttemptRunner({
+      contextEngine: createContextEngineBootstrapAndAssemble(),
+      sessionKey,
+      tempPaths,
+      attemptOverrides: {
+        contextTokenBudget: 1_050_000,
+        config: {
+          agents: { defaults: { contextLimits: { toolResultMaxChars: 20_000 } } },
+        } as OpenClawConfig,
+      },
+    });
+
+    expect(
+      mockParams(hoisted.installToolResultContextGuardMock, 0, "tool-result guard params")
+        .providerToolResultCaps,
+    ).toEqual({ maxChars: 20_000, aggregateMaxChars: 2_100_000 });
+  });
+
   it("passes context engines the message budget after reserve and rendered prompt pressure", async () => {
     const contextEngine = createContextEngineBootstrapAndAssemble();
     hoisted.compactionReserveTokens = 20_000;

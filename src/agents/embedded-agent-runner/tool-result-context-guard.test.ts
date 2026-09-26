@@ -16,6 +16,23 @@ import {
   markTranscriptPromptText,
   PREEMPTIVE_CONTEXT_OVERFLOW_MESSAGE,
 } from "./tool-result-context-guard.js";
+import {
+  resolveLiveToolResultAggregateMaxChars,
+  resolveLiveToolResultMaxChars,
+  truncateOversizedToolResultsInMessages,
+} from "./tool-result-truncation.js";
+
+/** The caps provider dispatch derives for this window, as attempt.ts computes them. */
+function providerToolResultCapsFor(contextWindowTokens: number) {
+  const maxChars = resolveLiveToolResultMaxChars({ contextWindowTokens });
+  return {
+    maxChars,
+    aggregateMaxChars: resolveLiveToolResultAggregateMaxChars({
+      contextWindowTokens,
+      perResultMaxChars: maxChars,
+    }),
+  };
+}
 
 function makeUser(text: string): AgentMessage {
   return castAgentMessage({
@@ -109,6 +126,7 @@ async function applyGuardToContext(
   installToolResultContextGuard({
     agent,
     contextWindowTokens,
+    providerToolResultCaps: providerToolResultCapsFor(contextWindowTokens),
   });
   return await agent.transformContext?.(contextForNextCall, new AbortController().signal);
 }
@@ -131,6 +149,7 @@ async function applyMidTurnPrecheckGuardToContext(
   installToolResultContextGuard({
     agent,
     contextWindowTokens,
+    providerToolResultCaps: providerToolResultCapsFor(contextWindowTokens),
     midTurnPrecheck: {
       enabled: true,
       contextTokenBudget: options.contextTokenBudget ?? contextWindowTokens,
@@ -441,6 +460,87 @@ describe("installToolResultContextGuard", () => {
   });
 });
 
+/**
+ * Provider dispatch cuts every tool result to the live cap before sending. The
+ * guard used to budget the raw bodies instead, so a few large query results
+ * aborted a turn with "Context overflow" the provider would have accepted.
+ */
+describe("installToolResultContextGuard budgets what provider dispatch sends", () => {
+  // A production-sized window: 1.05M tokens, 64k-char live cap per tool result.
+  const contextWindowTokens = 1_050_000;
+  const caps = providerToolResultCapsFor(contextWindowTokens);
+  // Four 100-row pretty-printed data-source query results, ~660k chars each.
+  const queryRow = JSON.stringify(
+    {
+      id: "0000-row",
+      properties: Object.fromEntries(
+        Array.from({ length: 12 }, (_, i) => [
+          `Field ${i}`,
+          { id: `f${i}`, type: "rich_text", rich_text: [{ plain_text: "v".repeat(400) }] },
+        ]),
+      ),
+    },
+    null,
+    2,
+  );
+  const queryResult = JSON.stringify({ records: Array(100).fill(JSON.parse(queryRow)) }, null, 2);
+
+  function toolLoop(results: string[], userText = "total spend this month?"): AgentMessage[] {
+    return [
+      makeUser(userText),
+      ...results.map((text, i) => makeToolResult(`call_${i}`, text, "data_query")),
+    ];
+  }
+
+  function providerToolChars(messages: AgentMessage[]): number {
+    return truncateOversizedToolResultsInMessages(
+      messages,
+      contextWindowTokens,
+      caps.maxChars,
+      caps.aggregateMaxChars,
+    )
+      .messages.filter((message) => message.role === "toolResult")
+      .reduce((sum, message) => sum + getToolResultText(message).length, 0);
+  }
+
+  it("does not overflow on raw tool bodies provider dispatch will cut to the cap", async () => {
+    const messages = toolLoop(Array(4).fill(queryResult));
+    expect(caps.maxChars).toBe(64_000);
+    expect(queryResult.length).toBeGreaterThan(600_000);
+    // What the provider actually receives: four capped results, ~256k chars.
+    expect(providerToolChars(messages)).toBeLessThanOrEqual(4 * caps.maxChars);
+
+    const transformed = await applyGuardToContext(
+      makeGuardableAgent(),
+      messages,
+      contextWindowTokens,
+    );
+
+    expect(transformed).toHaveLength(messages.length);
+  });
+
+  it("still overflows when the capped tool results alone exceed the threshold", async () => {
+    // Forty results that each survive the per-result cap at 64k still fill the
+    // aggregate budget, which is past the guard's high-water mark.
+    const messages = toolLoop(Array(40).fill("r".repeat(100_000)));
+    expect(providerToolChars(messages)).toBeGreaterThan(2_000_000);
+
+    await expect(
+      applyGuardToContext(makeGuardableAgent(), messages, contextWindowTokens),
+    ).rejects.toThrow(PREEMPTIVE_CONTEXT_OVERFLOW_MESSAGE);
+  });
+
+  it("still overflows when non-tool context exceeds the threshold beside capped results", async () => {
+    const messages = toolLoop(Array(4).fill(queryResult), "u".repeat(3_700_000));
+
+    await expect(
+      applyGuardToContext(makeGuardableAgent(), messages, contextWindowTokens),
+    ).rejects.toThrow(PREEMPTIVE_CONTEXT_OVERFLOW_MESSAGE);
+    // The guard never rewrites the caller's messages to reach its verdict.
+    expect(getToolResultText(messages[1])).toBe(queryResult);
+  });
+});
+
 type MockedEngine = ContextEngine & {
   afterTurn: ReturnType<typeof vi.fn<NonNullable<ContextEngine["afterTurn"]>>>;
   assemble: ReturnType<typeof vi.fn<ContextEngine["assemble"]>>;
@@ -562,9 +662,11 @@ describe("installContextEngineLoopHook", () => {
     // Install engine assembly before the generic guard to prove owner compaction
     // can resolve pressure before fallback truncation checks run.
     const removeEngineHook = installHook(agent, engine, options.prePromptCount);
+    const contextWindowTokens = options.contextWindowTokens ?? 200_000;
     const removeGuard = installToolResultContextGuard({
       agent,
-      contextWindowTokens: options.contextWindowTokens ?? 200_000,
+      contextWindowTokens,
+      providerToolResultCaps: providerToolResultCapsFor(contextWindowTokens),
       midTurnPrecheck: {
         enabled: true,
         contextTokenBudget: options.contextTokenBudget ?? 20_000,
