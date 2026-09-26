@@ -53,6 +53,11 @@ export type BuildChatItemsProps = {
   searchOpen?: boolean;
   searchQuery?: string;
   historyRenderLimit?: number;
+  /**
+   * Tool rows start expanded (verbose "full"), so their output is drawn and
+   * counts toward the history render budget. Collapsed rows count as rows.
+   */
+  autoExpandToolCalls?: boolean;
 };
 
 type CachedChatItems = {
@@ -966,7 +971,26 @@ function sortChatItemsByVisibleTime(
 type RawContentEstimateState = {
   visited: WeakSet<object>;
   nodes: number;
+  collapsedTools: boolean;
 };
+
+/**
+ * What one collapsed tool row draws: its summary label and a preview capped at
+ * 120 chars (formatCollapsedToolPreviewText). Its output and arguments are only
+ * built when the row is expanded, so budgeting their raw size instead let one
+ * turn's tool results push the whole earlier conversation out of the window.
+ */
+const COLLAPSED_TOOL_ROW_RENDER_CHARS = 400;
+
+/** The same test extractToolCards uses: these blocks render as tool rows. */
+function isToolRowBlock(record: Record<string, unknown>): boolean {
+  return (
+    isToolCallContentType(record.type) ||
+    isToolResultContentType(record.type) ||
+    (typeof record.name === "string" &&
+      (record.arguments != null || record.args != null || record.input != null))
+  );
+}
 
 const RAW_CONTENT_ESTIMATE_MAX_DEPTH = 8;
 const RAW_CONTENT_ESTIMATE_MAX_NODES = 400;
@@ -1015,6 +1039,9 @@ function estimateRawContentChars(
   }
 
   const record = value as Record<string, unknown>;
+  if (state.collapsedTools && isToolRowBlock(record)) {
+    return Math.min(COLLAPSED_TOOL_ROW_RENDER_CHARS, limit);
+  }
   let chars = 0;
   for (const key of ["text", "content", "args", "arguments", "input"] as const) {
     chars = addCapped(
@@ -1029,12 +1056,24 @@ function estimateRawContentChars(
   return chars;
 }
 
-function estimateMessageRenderChars(message: unknown, limit: number): number {
+function estimateMessageRenderChars(
+  message: unknown,
+  limit: number,
+  collapsedTools: boolean,
+): number {
   const record = asRecord(message);
   if (!record) {
     return 1;
   }
-  const state: RawContentEstimateState = { visited: new WeakSet<object>(), nodes: 0 };
+  // A tool message's text is the tool's output; collapsed, it is one row.
+  if (collapsedTools && isStandaloneToolMessageForDisplay(message)) {
+    return Math.max(1, Math.min(COLLAPSED_TOOL_ROW_RENDER_CHARS, limit));
+  }
+  const state: RawContentEstimateState = {
+    visited: new WeakSet<object>(),
+    nodes: 0,
+    collapsedTools,
+  };
   let chars = 0;
   for (const key of ["content", "text", "args", "arguments", "input"] as const) {
     chars = addCapped(chars, estimateRawContentChars(record[key], limit - chars, state), limit);
@@ -1073,6 +1112,7 @@ function resolveHistoryStartIndex(
   messages: unknown[],
   showToolCalls: boolean,
   renderLimit: number,
+  collapsedTools: boolean,
 ): number {
   let visibleCount = 0;
   let renderChars = 0;
@@ -1086,7 +1126,7 @@ function resolveHistoryStartIndex(
       break;
     }
     const remainingBudget = Math.max(1, CHAT_HISTORY_RENDER_CHAR_BUDGET - renderChars + 1);
-    const messageChars = estimateMessageRenderChars(message, remainingBudget);
+    const messageChars = estimateMessageRenderChars(message, remainingBudget, collapsedTools);
     if (visibleCount > 0 && renderChars + messageChars > CHAT_HISTORY_RENDER_CHAR_BUDGET) {
       break;
     }
@@ -1111,7 +1151,12 @@ export function buildChatItems(props: BuildChatItemsProps): Array<ChatItem | Mes
     text: string | null;
     timestamp: number | null;
   }>;
-  const historyStart = resolveHistoryStartIndex(history, props.showToolCalls, historyRenderLimit);
+  const historyStart = resolveHistoryStartIndex(
+    history,
+    props.showToolCalls,
+    historyRenderLimit,
+    props.autoExpandToolCalls !== true,
+  );
   const hiddenHistoryCount = countVisibleHistoryMessages(
     history.slice(0, historyStart),
     props.showToolCalls,
@@ -1376,7 +1421,8 @@ function sameChatItemsInput(previous: BuildChatItemsProps, next: BuildChatItemsP
     previous.loading === next.loading &&
     previous.searchOpen === next.searchOpen &&
     previous.searchQuery === next.searchQuery &&
-    previous.historyRenderLimit === next.historyRenderLimit
+    previous.historyRenderLimit === next.historyRenderLimit &&
+    previous.autoExpandToolCalls === next.autoExpandToolCalls
   );
 }
 

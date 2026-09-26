@@ -14,7 +14,10 @@ import {
   handleMarkdownCodeBlockCopy,
   markdownFileLinkFromEvent,
 } from "../../../components/markdown.ts";
-import { CHAT_HISTORY_RENDER_LIMIT } from "../../../lib/chat/chat-types.ts";
+import {
+  CHAT_HISTORY_RENDER_LIMIT,
+  CHAT_REPLY_QUOTE_MAX_CHARS,
+} from "../../../lib/chat/chat-types.ts";
 import type { ChatQueueItem, ChatStreamSegment } from "../../../lib/chat/chat-types.ts";
 import { extractTextCached } from "../../../lib/chat/message-extract.ts";
 import {
@@ -614,7 +617,10 @@ function handleChatContextMenu(event: MouseEvent, props: ChatThreadProps) {
   }
   const senderEl = group.querySelector(".chat-sender-name");
   const senderLabel = senderEl?.textContent?.trim() ?? undefined;
-  const text = truncateUtf16Safe((bubble as HTMLElement).dataset.messageText?.trim() ?? "", 500);
+  const text = truncateUtf16Safe(
+    (bubble as HTMLElement).dataset.messageText?.trim() ?? "",
+    CHAT_REPLY_QUOTE_MAX_CHARS,
+  );
   if (!text) {
     return;
   }
@@ -763,6 +769,7 @@ export function renderChatThread(props: ChatThreadProps) {
     searchOpen: state.searchOpen,
     searchQuery: state.searchQuery,
     historyRenderLimit,
+    autoExpandToolCalls: Boolean(props.autoExpandToolCalls),
   });
   syncToolCardExpansionState(props.sessionKey, chatItems, Boolean(props.autoExpandToolCalls));
   const expandedToolCards = getExpandedToolCards(props.sessionKey);

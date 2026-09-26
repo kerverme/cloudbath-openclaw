@@ -1220,10 +1220,11 @@ describe("buildChatItems", () => {
     expect(messageRecord(groups[groups.length - 1]).content).toBe("message 104");
   });
 
-  it("budgets rendered history by tool-result content size", () => {
+  it("budgets rendered history by tool-result content size when tool output is expanded", () => {
     const largeOutput = "x".repeat(100_000);
     const items = buildChatItems(
       createProps({
+        autoExpandToolCalls: true,
         messages: Array.from({ length: 6 }, (_, index) => ({
           role: "assistant",
           content: [
@@ -1939,5 +1940,117 @@ describe("tool turn outcome annotation (#89683)", () => {
       failedTool(5),
     ]);
     expect(tools.map((group) => group.turnSucceeded)).toEqual([true, false]);
+  });
+});
+
+describe("history render budget with large tool output", () => {
+  // Production: a Notion lookup turn left seven large tool results at the end of
+  // the thread and the Control UI showed "Showing last 14 messages (37 hidden)";
+  // scrolling up could not bring the earlier conversation back. Collapsed tool
+  // rows render a summary, so their raw output must not spend the budget that
+  // decides how much conversation is drawn.
+  const TOOL_OUTPUT_CHARS = 60_000;
+
+  function conversation(pairs: number) {
+    return Array.from({ length: pairs * 2 }, (_, index) => ({
+      role: index % 2 === 0 ? "user" : "assistant",
+      content: `normal ${index}`,
+      timestamp: index,
+    }));
+  }
+
+  function toolTurn(results: number, outputChars: number, start: number) {
+    const messages: unknown[] = [
+      { role: "user", content: "check the cashflow total", timestamp: start },
+    ];
+    for (let index = 0; index < results; index += 1) {
+      const timestamp = start + 1 + index * 2;
+      messages.push({
+        role: "assistant",
+        content: [{ type: "toolCall", id: `call-${index}`, name: "lookup", arguments: { index } }],
+        timestamp,
+      });
+      messages.push({
+        role: "toolResult",
+        toolCallId: `call-${index}`,
+        toolName: "lookup",
+        content: [{ type: "text", text: `{"rows":"${"x".repeat(outputChars)}"}` }],
+        timestamp: timestamp + 1,
+      });
+    }
+    messages.push({ role: "assistant", content: "the total is 7,515", timestamp: start + 100 });
+    return messages;
+  }
+
+  function renderedNormalMessages(props: Partial<BuildChatItemsProps>): string[] {
+    return messageGroups(props)
+      .flatMap((group) => group.messages.map((entry) => requireRecord(entry.message).content))
+      .filter((content): content is string => typeof content === "string")
+      .filter((content) => content.startsWith("normal "));
+  }
+
+  function historyNotice(props: Partial<BuildChatItemsProps>): string | undefined {
+    const first = buildChatItems(createProps(props))[0];
+    if (first?.kind !== "group") {
+      return undefined;
+    }
+    const content = messageRecord(first).content;
+    return typeof content === "string" && content.startsWith("Showing last") ? content : undefined;
+  }
+
+  const history = [...conversation(18), ...toolTurn(7, TOOL_OUTPUT_CHARS, 1_000)];
+
+  it("keeps every earlier user and assistant message reachable behind collapsed tool output", () => {
+    const rendered = renderedNormalMessages({ messages: history, historyRenderLimit: 100 });
+
+    expect(historyNotice({ messages: history, historyRenderLimit: 100 })).toBeUndefined();
+    expect(rendered).toHaveLength(36);
+    expect(rendered[0]).toBe("normal 0");
+  });
+
+  it("brings back more conversation each time the render window grows", () => {
+    const visible = [30, 60, 100].map(
+      (historyRenderLimit) =>
+        renderedNormalMessages({ messages: history, historyRenderLimit }).length,
+    );
+
+    expect(visible[0]).toBeGreaterThan(0);
+    expect(visible[1]).toBeGreaterThan(visible[0]!);
+    expect(visible[2]).toBe(36);
+  });
+
+  it("does not spend the budget on a collapsed tool result's raw body", () => {
+    const messages = [...conversation(20), ...toolTurn(1, 1_000_000, 1_000)];
+
+    expect(historyNotice({ messages, historyRenderLimit: 100 })).toBeUndefined();
+    expect(renderedNormalMessages({ messages, historyRenderLimit: 100 })).toHaveLength(40);
+  });
+
+  it("still budgets tool output that renders expanded", () => {
+    const notice = historyNotice({
+      messages: history,
+      historyRenderLimit: 100,
+      autoExpandToolCalls: true,
+    });
+
+    expect(notice).toMatch(/^Showing last \d+ messages \(\d+ hidden\)\.$/u);
+  });
+
+  it("windows small tool results by message count exactly as before", () => {
+    const messages = [...conversation(18), ...toolTurn(7, 200, 1_000)];
+
+    // 36 conversation + 1 question + 7 calls + 7 results + 1 answer.
+    expect(historyNotice({ messages, historyRenderLimit: 30 })).toBe(
+      "Showing last 30 messages (22 hidden).",
+    );
+    expect(historyNotice({ messages, historyRenderLimit: 100 })).toBeUndefined();
+  });
+
+  it("only changes what is drawn, never the history it was given", () => {
+    const snapshot = structuredClone(history);
+
+    buildChatItems(createProps({ messages: history, historyRenderLimit: 30 }));
+
+    expect(history).toStrictEqual(snapshot);
   });
 });

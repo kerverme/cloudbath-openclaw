@@ -3396,3 +3396,38 @@ describe("formatChatTimestampForDisplay time format", () => {
     expect(display.label).not.toMatch(/AM|PM/i);
   });
 });
+
+describe("collapsed tool results in the DOM", () => {
+  const largeOutput = JSON.stringify({ rows: "x".repeat(100_000) });
+  const toolResult = {
+    role: "toolResult",
+    toolCallId: "call-lookup",
+    toolName: "lookup",
+    content: [{ type: "text", text: largeOutput }],
+    timestamp: 2,
+  };
+
+  it("keeps a collapsed tool result's raw output out of the DOM", () => {
+    const container = document.createElement("div");
+    renderAssistantMessage(container, toolResult, {
+      isToolExpanded: () => false,
+      isToolMessageExpanded: () => false,
+    });
+
+    const bubble = container.querySelector<HTMLElement>(".chat-bubble");
+    expect(bubble).toBeInstanceOf(HTMLElement);
+    // Only a reply quote's worth stays on the bubble for the reply action.
+    expect(bubble!.dataset.messageText?.length).toBeLessThanOrEqual(500);
+    expect(container.innerHTML.length).toBeLessThan(10_000);
+  });
+
+  it("shows the full output once the tool result is expanded", () => {
+    const container = document.createElement("div");
+    renderAssistantMessage(container, toolResult, {
+      isToolExpanded: () => true,
+      isToolMessageExpanded: () => true,
+    });
+
+    expect(container.textContent).toContain(largeOutput);
+  });
+});

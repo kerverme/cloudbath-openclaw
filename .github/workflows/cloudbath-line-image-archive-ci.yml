@@ -16,6 +16,15 @@ on:
       - "src/auto-reply/reply/queue/model-selection*.ts"
       - "ui/src/pages/chat/chat-pane.ts"
       - "ui/src/e2e/chat-session-continuity.e2e.test.ts"
+      - "ui/src/lib/chat/chat-types.ts"
+      - "ui/src/pages/chat/chat-thread.ts"
+      - "ui/src/pages/chat/chat-thread.test.ts"
+      - "ui/src/pages/chat/chat-view.test.ts"
+      - "ui/src/pages/chat/components/chat-message.ts"
+      - "ui/src/pages/chat/components/chat-message.test.ts"
+      - "ui/src/pages/chat/components/chat-thread.ts"
+      - "ui/src/pages/chat/components/chat-tool-cards.ts"
+      - "ui/src/pages/chat/components/chat-tool-cards.test.ts"
       - "scripts/cloudbath/setup-notion-image-archive*"
       - "scripts/cloudbath/docker-cozyclay-removal.test.ts"
       - "Dockerfile"
@@ -208,6 +217,15 @@ jobs:
             ui/src/lib/sessions/navigation.test.ts \
             ui/src/app/gateway-store.test.ts
 
+      - name: Run Control UI history rendering tests
+        if: steps.dependencies.outcome == 'success' && !cancelled()
+        run: |
+          node scripts/run-vitest.mjs run \
+            ui/src/pages/chat/chat-thread.test.ts \
+            ui/src/pages/chat/chat-view.test.ts \
+            ui/src/pages/chat/components/chat-message.test.ts \
+            ui/src/pages/chat/components/chat-tool-cards.test.ts
+
       - name: Typecheck core
         if: steps.dependencies.outcome == 'success' && !cancelled()
         run: pnpm tsgo:core
@@ -287,6 +305,15 @@ jobs:
             src/plugin-sdk/model-session-runtime.ts
             ui/src/pages/chat/chat-pane.ts
             ui/src/e2e/chat-session-continuity.e2e.test.ts
+            ui/src/lib/chat/chat-types.ts
+            ui/src/pages/chat/chat-thread.ts
+            ui/src/pages/chat/chat-thread.test.ts
+            ui/src/pages/chat/chat-view.test.ts
+            ui/src/pages/chat/components/chat-message.ts
+            ui/src/pages/chat/components/chat-message.test.ts
+            ui/src/pages/chat/components/chat-thread.ts
+            ui/src/pages/chat/components/chat-tool-cards.ts
+            ui/src/pages/chat/components/chat-tool-cards.test.ts
           )
           if ! pnpm exec oxfmt --check --threads=1 "${paths[@]}"; then
             pnpm exec oxfmt --write --threads=1 "${paths[@]}"
@@ -336,7 +363,16 @@ jobs:
         run: |
           node scripts/run-oxlint.mjs \
             ui/src/pages/chat/chat-pane.ts \
-            ui/src/e2e/chat-session-continuity.e2e.test.ts
+            ui/src/e2e/chat-session-continuity.e2e.test.ts \
+            ui/src/lib/chat/chat-types.ts \
+            ui/src/pages/chat/chat-thread.ts \
+            ui/src/pages/chat/chat-thread.test.ts \
+            ui/src/pages/chat/chat-view.test.ts \
+            ui/src/pages/chat/components/chat-message.ts \
+            ui/src/pages/chat/components/chat-message.test.ts \
+            ui/src/pages/chat/components/chat-thread.ts \
+            ui/src/pages/chat/components/chat-tool-cards.ts \
+            ui/src/pages/chat/components/chat-tool-cards.test.ts
 
       - name: Lint scoped LINE changes
         if: steps.dependencies.outcome == 'success' && !cancelled()

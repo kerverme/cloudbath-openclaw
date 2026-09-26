@@ -1036,3 +1036,72 @@ describe("tool-cards", () => {
     expect(sidebar.fullMessageRequest).toBeUndefined();
   });
 });
+
+describe("large tool output is built only when opened", () => {
+  const largeOutput = JSON.stringify({ rows: "x".repeat(200_000) });
+
+  it("shows the full output of an expanded tool card", () => {
+    const container = document.createElement("div");
+    render(
+      renderToolCard(
+        { id: "tool:large", name: "lookup", outputText: largeOutput },
+        { expanded: true, onToggleExpanded: vi.fn() },
+      ),
+      container,
+    );
+
+    expect(container.querySelector("pre code")?.textContent).toBe(largeOutput);
+  });
+
+  it("renders nothing of the output while the card is collapsed", () => {
+    const container = document.createElement("div");
+    render(
+      renderToolCard(
+        { id: "tool:large", name: "lookup", outputText: largeOutput },
+        { expanded: false, onToggleExpanded: vi.fn() },
+      ),
+      container,
+    );
+
+    expect(container.innerHTML.length).toBeLessThan(5_000);
+  });
+
+  it("builds the raw details body when it is opened and drops it when closed", () => {
+    const container = document.createElement("div");
+    render(
+      renderToolCard(
+        {
+          id: "tool:large-preview",
+          name: "canvas_render",
+          outputText: largeOutput,
+          preview: {
+            kind: "canvas",
+            surface: "assistant_message",
+            render: "url",
+            viewId: "cv_large",
+            title: "Large",
+            url: "/__openclaw__/canvas/documents/cv_large/index.html",
+          },
+        },
+        { expanded: true, onToggleExpanded: vi.fn() },
+      ),
+      container,
+    );
+    const rawToggle = container.querySelector<HTMLButtonElement>(".chat-tool-card__raw-toggle")!;
+    const rawBody = container.querySelector<HTMLElement>(".chat-tool-card__raw-body")!;
+
+    expect(rawBody.hidden).toBe(true);
+    expect(rawBody.textContent).toBe("");
+    expect(container.innerHTML).not.toContain(largeOutput);
+
+    rawToggle.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+    expect(rawBody.hidden).toBe(false);
+    expect(rawBody.querySelector("code")?.textContent).toBe(largeOutput);
+
+    rawToggle.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+    expect(rawBody.hidden).toBe(true);
+    expect(rawBody.textContent).toBe("");
+  });
+});

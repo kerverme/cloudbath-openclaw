@@ -959,6 +959,20 @@ describe("chat code-block copy", () => {
 });
 
 describe("chat history render window", () => {
+  it("tells history building whether tool rows start expanded", () => {
+    const messages = [{ role: "user", content: "hello", timestamp: 1 }];
+
+    renderChatView({ messages });
+    expect(buildChatItemsMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({ autoExpandToolCalls: false }),
+    );
+
+    renderChatView({ messages, autoExpandToolCalls: true });
+    expect(buildChatItemsMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({ autoExpandToolCalls: true }),
+    );
+  });
+
   it("starts freshly loaded large histories with a small render window", () => {
     const messages = Array.from({ length: 80 }, (_, index) => ({
       role: index % 2 === 0 ? "user" : "assistant",
