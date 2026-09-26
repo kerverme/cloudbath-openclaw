@@ -1,4 +1,5 @@
 // Control UI chat module implements grouped render behavior.
+import { truncateUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
 import { html, nothing } from "lit";
 import { unsafeHTML } from "lit/directives/unsafe-html.js";
 import { until } from "lit/directives/until.js";
@@ -19,6 +20,7 @@ import type {
   NormalizedMessage,
   ToolCard,
 } from "../../../lib/chat/chat-types.ts";
+import { CHAT_REPLY_QUOTE_MAX_CHARS } from "../../../lib/chat/chat-types.ts";
 import {
   extractThinkingCached,
   formatReasoningMarkdown,
@@ -2071,6 +2073,9 @@ function renderGroupedMessage(
   const hasPairingQrExpiryNotices = pairingQrExpiryNotices.length > 0;
 
   const extractedText = resolveNormalizedMessageMarkdown(normalizedMessage);
+  // The bubble carries only what the reply action quotes. A tool message's text
+  // is its whole output, which stayed in the DOM here while the row was collapsed.
+  const replyQuoteText = truncateUtf16Safe(extractedText, CHAT_REPLY_QUOTE_MAX_CHARS);
   const assistantAttachments = normalizedMessage.content.filter(
     (item): item is AttachmentItem => item.type === "attachment",
   );
@@ -2191,7 +2196,7 @@ function renderGroupedMessage(
       <div
         class="${bubbleClasses}"
         data-message-id=${messageKey}
-        data-message-text=${extractedText || nothing}
+        data-message-text=${replyQuoteText || nothing}
       >
         ${renderReplyPill(normalizedMessage.replyTarget)}
         ${renderInlineToolCards(toolCards, {
@@ -2223,7 +2228,7 @@ function renderGroupedMessage(
     <div
       class="${bubbleClasses}"
       data-message-id=${messageKey}
-      data-message-text=${extractedText || nothing}
+      data-message-text=${replyQuoteText || nothing}
     >
       ${renderReplyPill(normalizedMessage.replyTarget)}
       ${isStandaloneToolMessage

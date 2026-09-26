@@ -58,6 +58,8 @@ export type ChatItem =
 
 export const CHAT_HISTORY_RENDER_LIMIT = 100;
 export const CHAT_HISTORY_RENDER_CHAR_BUDGET = 240_000;
+/** How much of a message the reply action quotes, and all its bubble carries. */
+export const CHAT_REPLY_QUOTE_MAX_CHARS = 500;
 
 export type ChatStreamSegment = {
   text: string;

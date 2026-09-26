@@ -1,7 +1,8 @@
 // Control UI chat module implements tool cards behavior.
 import { truncateUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
-import { html, nothing } from "lit";
+import { html, nothing, render } from "lit";
 import { keyed } from "lit/directives/keyed.js";
+import { ref } from "lit/directives/ref.js";
 import { icons, type IconName } from "../../../components/icons.ts";
 import { isMarkdownBlockArtText } from "../../../components/markdown.ts";
 import "../../../components/tooltip.ts";
@@ -120,16 +121,43 @@ export function buildToolCardSidebarContent(card: ToolCard): string {
   return sections.join("\n\n");
 }
 
+// The output behind each raw-details toggle, by toggle root. The body is built
+// only while the toggle is open, so a closed toggle keeps no copy of tool
+// output (which can be hundreds of KB) in the DOM.
+const rawOutputTextByToggle = new WeakMap<Element, string>();
+
+function renderRawOutputBody(body: HTMLElement, text: string | undefined) {
+  render(
+    text === undefined
+      ? nothing
+      : renderToolDataBlock({ label: t("chat.toolCards.toolOutput"), text }),
+    body,
+  );
+}
+
+function syncRawOutputText(root: Element | undefined, text: string) {
+  if (!root) {
+    return;
+  }
+  rawOutputTextByToggle.set(root, text);
+  // An open body follows the card's current output, as it did when it was bound.
+  const body = root.querySelector<HTMLElement>(".chat-tool-card__raw-body");
+  if (body && !body.hidden) {
+    renderRawOutputBody(body, text);
+  }
+}
+
 function handleRawDetailsToggle(event: Event) {
   const button = event.currentTarget as HTMLButtonElement | null;
   const root = button?.closest(".chat-tool-card__raw");
   const body = root?.querySelector<HTMLElement>(".chat-tool-card__raw-body");
-  if (!button || !body) {
+  if (!button || !root || !body) {
     return;
   }
-  const expanded = button.getAttribute("aria-expanded") === "true";
-  button.setAttribute("aria-expanded", String(!expanded));
-  body.hidden = expanded;
+  const opening = button.getAttribute("aria-expanded") !== "true";
+  button.setAttribute("aria-expanded", String(opening));
+  body.hidden = !opening;
+  renderRawOutputBody(body, opening ? rawOutputTextByToggle.get(root) : undefined);
 }
 
 // Sandboxed widget documents report their content height via postMessage so the
@@ -332,7 +360,7 @@ function buildToolSidebarFullMessageRequest(
 
 export function renderRawOutputToggle(text: string) {
   return html`
-    <div class="chat-tool-card__raw">
+    <div class="chat-tool-card__raw" ${ref((root) => syncRawOutputText(root, text))}>
       <button
         class="chat-tool-card__raw-toggle"
         type="button"
@@ -342,9 +370,7 @@ export function renderRawOutputToggle(text: string) {
         <span>${t("chat.toolCards.rawDetails")}</span>
         <span class="chat-tool-card__raw-toggle-icon">${icons.chevronDown}</span>
       </button>
-      <div class="chat-tool-card__raw-body" hidden>
-        ${renderToolDataBlock({ label: t("chat.toolCards.toolOutput"), text })}
-      </div>
+      <div class="chat-tool-card__raw-body" hidden></div>
     </div>
   `;
 }
