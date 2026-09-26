@@ -35,6 +35,7 @@ type NotionPage = {
 type NotionDatabase = {
   object?: string;
   id?: string;
+  title?: Array<{ plain_text?: unknown }>;
   data_sources?: Array<{ id?: string }>;
 };
 type NotionBlock = {
@@ -75,7 +76,7 @@ type SafeNotionPage = {
   properties: Record<string, unknown>;
 };
 /** A Wellness row as the model sees it: plain property values, no Notion wrappers. */
-type WellnessRecord = {
+export type WellnessRecord = {
   id: string;
   database?: string;
   dataSourceIndex: number;
@@ -83,10 +84,26 @@ type WellnessRecord = {
   lastEditedAt?: string;
   properties: Record<string, unknown>;
 };
+/** One data source beneath the Wellness root page, by its discovery index. */
+export type WellnessTable = Readonly<{
+  dataSourceIndex: number;
+  dataSourceId: string;
+  title?: string;
+}>;
+/** Every row of one table, read in one operation. */
+export type WellnessTableRows = Readonly<{
+  records: readonly WellnessRecord[];
+  /** Notion property type by name, e.g. `number`, `formula`, `date`, `title`. */
+  propertyTypes: Readonly<Record<string, string>>;
+  /** False when the table has more rows than one read may scan. */
+  complete: boolean;
+}>;
 type WellnessQueryCursor = {
   version: 1;
   sourceIndex: number;
   notionCursor?: string;
+  /** Set when the query named one data source: continuing it must not spill into the next. */
+  singleSource?: true;
 };
 type ConstructionValues = {
   name?: string;
@@ -359,6 +376,7 @@ function decodeWellnessCursor(value: string | undefined): WellnessQueryCursor | 
     const parsed = JSON.parse(
       Buffer.from(value, "base64url").toString("utf8"),
     ) as Partial<WellnessQueryCursor>;
+    const singleSource: unknown = parsed.singleSource;
     if (
       parsed.version !== 1 ||
       !Number.isInteger(parsed.sourceIndex) ||
@@ -367,7 +385,8 @@ function decodeWellnessCursor(value: string | undefined): WellnessQueryCursor | 
       (parsed.notionCursor !== undefined &&
         (typeof parsed.notionCursor !== "string" ||
           parsed.notionCursor.length === 0 ||
-          parsed.notionCursor.length > 512))
+          parsed.notionCursor.length > 512)) ||
+      (singleSource !== undefined && singleSource !== true)
     ) {
       throw new Error("invalid cursor");
     }
@@ -608,7 +627,12 @@ class WellnessNotionReader {
               continue;
             }
             canonicalNotionId(source.id);
-            const databaseTitle = childDatabaseTitles.get(canonicalNotionId(databaseId));
+            // A linked or full-page database block carries no title of its own;
+            // the database does, and it is what owners call the table.
+            const databaseTitle =
+              childDatabaseTitles.get(canonicalNotionId(databaseId)) ||
+              plainText(database.title).trim() ||
+              undefined;
             scopes.push({
               databaseId,
               dataSourceId: source.id,
@@ -705,14 +729,16 @@ class WellnessNotionReader {
   ) {
     const scopes = await this.discoverScopes(signal);
     const decoded = decodeWellnessCursor(startCursor);
-    if (decoded && dataSourceIndex !== undefined) {
-      throw new Error("data_source_index cannot be combined with start_cursor");
+    // Continuing one data source is naturally asked with both its index and the
+    // cursor; only a cursor from a different source is a contradiction.
+    if (decoded && dataSourceIndex !== undefined && decoded.sourceIndex !== dataSourceIndex) {
+      throw new Error("start_cursor belongs to a different data_source_index");
     }
     let sourceIndex = decoded?.sourceIndex ?? dataSourceIndex ?? 0;
     if (!scopes[sourceIndex]) {
       throw new Error("Wellness continuation is outside the root-page scope");
     }
-    const singleSource = dataSourceIndex !== undefined;
+    const singleSource = dataSourceIndex !== undefined || decoded?.singleSource === true;
     const records: WellnessRecord[] = [];
     let scanned = 0;
     let nextCursor: string | undefined;
@@ -737,6 +763,7 @@ class WellnessNotionReader {
           version: 1,
           sourceIndex,
           notionCursor: result.nextCursor,
+          ...(singleSource ? { singleSource: true } : {}),
         });
         break;
       }
@@ -758,7 +785,41 @@ class WellnessNotionReader {
       recordCount: scanned,
       hasMore: Boolean(nextCursor),
       ...(nextCursor ? { nextCursor } : {}),
-      ...(singleSource ? { dataSourceIndex } : {}),
+      ...(singleSource ? { dataSourceIndex: sourceIndex } : {}),
+    };
+  }
+
+  async listTables(signal?: AbortSignal): Promise<readonly WellnessTable[]> {
+    return (await this.discoverScopes(signal)).map((scope, dataSourceIndex) =>
+      scope.databaseTitle
+        ? { dataSourceIndex, dataSourceId: scope.dataSourceId, title: scope.databaseTitle }
+        : { dataSourceIndex, dataSourceId: scope.dataSourceId },
+    );
+  }
+
+  /**
+   * Every row of one discovered data source, paging inside this call up to the
+   * scan limit, so a caller totalling a table never walks cursors turn by turn.
+   */
+  async readTable(dataSourceIndex: number, signal?: AbortSignal): Promise<WellnessTableRows> {
+    const scope = (await this.discoverScopes(signal))[dataSourceIndex];
+    if (!scope) {
+      throw new Error("Wellness table is outside the root-page scope");
+    }
+    const result = await this.queryDataSource(scope.dataSourceId, MAX_SEARCH_RECORDS, signal);
+    const propertyTypes: Record<string, string> = {};
+    for (const page of result.records) {
+      for (const [name, property] of Object.entries(page.properties)) {
+        const type = (property as { type?: unknown } | null)?.type;
+        if (typeof type === "string" && !(name in propertyTypes)) {
+          propertyTypes[name] = type;
+        }
+      }
+    }
+    return {
+      records: result.records.map((page) => wellnessRecord(page, scope, dataSourceIndex)),
+      propertyTypes,
+      complete: !result.hasMore,
     };
   }
 
@@ -1051,7 +1112,8 @@ const WellnessQuerySchema = Type.Object(
     start_cursor: Type.Optional(
       Type.String({
         maxLength: 512,
-        description: "Opaque nextCursor returned by the previous Wellness query.",
+        description:
+          "Opaque nextCursor returned by the previous Wellness query; it continues the same data source(s).",
       }),
     ),
   },
@@ -1146,6 +1208,15 @@ function constructionValues(
     aiSummary: readString(params, "ai_summary"),
     status: readString(params, "status", { maxLength: 100 }),
   };
+}
+
+/** Read-only access to whole Wellness tables, under the same root-page scope as the tools. */
+export function createWellnessTableReader(
+  fetchImpl: FetchLike = fetch,
+): Pick<WellnessNotionReader, "listTables" | "readTable"> {
+  return new WellnessNotionReader(
+    new ScopedNotionClient("wellness", requireCredential("wellness"), fetchImpl),
+  );
 }
 
 export const CLOUDBATH_NOTION_TOOL_NAMES = [

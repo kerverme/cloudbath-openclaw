@@ -1,7 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { CLOUDBATH_NOTION_TOOL_NAMES, createCloudbathNotionTools } from "./notion-tools.js";
 import {
+  CLOUDBATH_NOTION_TOOL_NAMES,
+  createCloudbathNotionTools,
+  createWellnessTableReader,
+} from "./notion-tools.js";
+import {
+  CASHFLOW_FIXTURE,
   type NotionRequest,
+  productionShapedWellness,
   recordId,
   SIGNED_FILE_TOKEN,
   type SyntheticDataSource,
@@ -924,5 +930,107 @@ describe("wellness_notion_get_record batches known records", () => {
 
     await expect(result).rejects.toThrow("outside the configured data source");
     expect(requests.some((request) => request.url.includes("/v1/pages"))).toBe(false);
+  });
+});
+
+/**
+ * Production: the agent paged a 164-row table with `data_source_index` plus the
+ * returned cursor (refused: "cannot be combined"), then with the cursor alone,
+ * which ran off the end of that table into the next one.
+ */
+describe("wellness_notion_query pages one table without leaving it", () => {
+  const sources = () => productionShapedWellness();
+
+  async function query(params: Record<string, unknown>) {
+    const result = await tool("wellness_notion_query", syntheticWellnessFetch(sources())).execute(
+      "call",
+      params,
+    );
+    return result.details as {
+      records: Array<{ database?: string }>;
+      hasMore: boolean;
+      nextCursor?: string;
+      dataSourceIndex?: number;
+    };
+  }
+
+  it("continues a named data source with its index and cursor, then stops at its end", async () => {
+    const first = await query({ data_source_index: 1 });
+    expect(first.records).toHaveLength(100);
+    expect(first.hasMore).toBe(true);
+
+    const withIndex = await query({ data_source_index: 1, start_cursor: first.nextCursor });
+    const cursorOnly = await query({ start_cursor: first.nextCursor });
+
+    for (const page of [withIndex, cursorOnly]) {
+      expect(page.records).toHaveLength(CASHFLOW_FIXTURE.rows - 100);
+      expect(new Set(page.records.map((record) => record.database))).toEqual(
+        new Set(["Cashflow - Cloudbath"]),
+      );
+      expect(page).toMatchObject({ hasMore: false, dataSourceIndex: 1 });
+    }
+  });
+
+  it("still refuses a cursor with another data source's index", async () => {
+    const first = await query({ data_source_index: 1 });
+
+    await expect(query({ data_source_index: 2, start_cursor: first.nextCursor })).rejects.toThrow(
+      "different data_source_index",
+    );
+  });
+
+  it("names a linked database by its own title when its block has none", async () => {
+    const page = await query({ data_source_index: 0, max_records: 1 });
+
+    expect(page.records[0]?.database).toBe("Source Inbox");
+  });
+});
+
+describe("createWellnessTableReader reads a whole table in one call", () => {
+  it("pages inside the call and stays in the chosen data source", async () => {
+    const requests: NotionRequest[] = [];
+    const reader = createWellnessTableReader(
+      syntheticWellnessFetch(productionShapedWellness(), requests),
+    );
+
+    const tables = await reader.listTables();
+    const table = await reader.readTable(1);
+
+    expect(tables.map((entry) => entry.title)).toEqual([
+      "Source Inbox",
+      "Cashflow - Cloudbath",
+      "BOQ Forecast - Cloudbath",
+      "Work Packages - Cloudbath",
+    ]);
+    expect(table).toMatchObject({ complete: true });
+    expect(table.records).toHaveLength(CASHFLOW_FIXTURE.rows);
+    expect(table.propertyTypes).toMatchObject({
+      Amount: "number",
+      "Expense Amount": "formula",
+      Date: "date",
+      Direction: "select",
+    });
+    // One discovery for both calls, then the table's two pages and nothing else.
+    const queries = requests.filter((request) => request.url.includes("/query"));
+    expect(requests.filter((request) => request.url.includes("/v1/blocks/"))).toHaveLength(1);
+    expect(queries).toHaveLength(2);
+    expect(queries.every((request) => request.url.includes(tables[1]!.dataSourceId))).toBe(true);
+    expect(
+      requests.every((request) => request.method === "GET" || request.url.endsWith("/query")),
+    ).toBe(true);
+  });
+
+  it("refuses an index outside the root-page scope", async () => {
+    const reader = createWellnessTableReader(syntheticWellnessFetch(productionShapedWellness()));
+
+    await expect(reader.readTable(9)).rejects.toThrow("outside the root-page scope");
+  });
+
+  it("requires the Wellness connection", () => {
+    vi.stubEnv("NOTION_WELLNESS_READ_TOKEN", "");
+
+    expect(() => createWellnessTableReader(vi.fn() as typeof fetch)).toThrow(
+      "Wellness Notion connection is not configured",
+    );
   });
 });
