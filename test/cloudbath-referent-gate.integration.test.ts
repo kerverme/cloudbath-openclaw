@@ -107,6 +107,10 @@ const { addTestHook } = await import("../src/plugins/hooks.test-helpers.js");
 const { createEmptyPluginRegistry } = await import("../src/plugins/registry-empty.js");
 const { resetPluginRuntimeStateForTest } = await import("../src/plugins/runtime.js");
 const { resolvePluginCallReason } = await import("../src/plugins/runtime/runtime-llm.runtime.js");
+const { CASHFLOW_FIXTURE, productionShapedWellness, syntheticWellnessFetch } =
+  await import("../extensions/cloudbath-line-image-archive/src/notion-tools.test-support.js");
+type NotionRequest =
+  import("../extensions/cloudbath-line-image-archive/src/notion-tools.test-support.js").NotionRequest;
 
 function openKeyedStore<T>(): PluginStateKeyedStore<T> {
   const values = new Map<string, T>();
@@ -174,8 +178,31 @@ type Turn = {
 let messageCounter = 0;
 let runtimeOwner: symbol | undefined;
 
-function createHarness() {
+/** A plugin completion as index.ts makes it: labeled by its purpose's call reason. */
+type PluginCompletion = {
+  systemPrompt?: string;
+  messages: Array<{ content: string }>;
+  purpose?: string;
+};
+
+function createHarness(
+  harnessOptions: {
+    /** What the referent model double concludes; production's was unsure. */
+    referent?: Record<string, unknown>;
+    /** The Wellness data answer, composed from the summary the plugin computed. */
+    answerData?: (request: PluginCompletion) => string;
+  } = {},
+) {
   const registry = createEmptyPluginRegistry();
+  const pluginCompletions: PluginCompletion[] = [];
+  const llm = {
+    complete: async (request: PluginCompletion) =>
+      await runWithLlmCallReason(resolvePluginCallReason(request.purpose), async () => {
+        recordProviderRequest("plugin");
+        pluginCompletions.push(request);
+        return { text: harnessOptions.answerData?.(request) ?? "data reply" };
+      }),
+  };
   const handlers: string[] = [];
   for (const [entry, pluginId] of [
     [cloudbathEntry, "cloudbath-line-image-archive"],
@@ -189,7 +216,7 @@ function createHarness() {
         source: "test",
         config: CONFIG,
         registrationMode: "full",
-        runtime: { state: { openKeyedStore } } as unknown as OpenClawPluginApi["runtime"],
+        runtime: { state: { openKeyedStore }, llm } as unknown as OpenClawPluginApi["runtime"],
         on(hookName, handler, options) {
           const label = `${pluginId}:${beforeDispatchIndex}`;
           if (hookName === "before_dispatch") {
@@ -223,12 +250,14 @@ function createHarness() {
         await runWithLlmCallReason(resolvePluginCallReason(request.purpose), async () => {
           recordProviderRequest("referent");
           return {
-            text: JSON.stringify({
-              intent: "unrelated",
-              referentType: "none",
-              confidence: 0.95,
-              needsClarification: false,
-            }),
+            text: JSON.stringify(
+              harnessOptions.referent ?? {
+                intent: "unrelated",
+                referentType: "none",
+                confidence: 0.95,
+                needsClarification: false,
+              },
+            ),
           };
         }),
     ),
@@ -253,7 +282,14 @@ function createHarness() {
     }),
   );
   let catalogRequests = 0;
-  globalThis.fetch = vi.fn(async () => {
+  const notionRequests: NotionRequest[] = [];
+  const notion = syntheticWellnessFetch(productionShapedWellness(), notionRequests);
+  globalThis.fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+    if (
+      String(input instanceof Request ? input.url : input).startsWith("https://api.notion.com/")
+    ) {
+      return await notion(input, init);
+    }
     catalogRequests += 1;
     return new Response(JSON.stringify({ data: [] }), { status: 200 });
   }) as typeof fetch;
@@ -313,12 +349,12 @@ function createHarness() {
       catalogRequests,
     };
   };
-  return { ask, cloudbath, replyResolver };
+  return { ask, cloudbath, replyResolver, notionRequests, pluginCompletions };
 }
 
 /** A storyboard the owner made earlier and has since stopped talking about. */
-async function withStaleStoryboard() {
-  const harness = createHarness();
+async function withStaleStoryboard(options: Parameters<typeof createHarness>[0] = {}) {
+  const harness = createHarness(options);
   await harness.cloudbath.dispatch(CREATE_MESSAGE);
   expect(await harness.cloudbath.active.entries()).toHaveLength(1);
   return harness;
@@ -448,5 +484,125 @@ describe("model-state questions are answered before Cloudbath runs", () => {
     expect(turn.catalogRequests).toBe(0);
     expect(replyResolver).not.toHaveBeenCalled();
     expect(turn.delivered.join("\n")).toContain("deepseek/deepseek-v4-flash-0731");
+  });
+});
+
+/**
+ * Production after the compact-payload fix: "ช่วยเช็คหน่อย Cashflow - Cloudbath
+ * ใช้ไปเท่าไร" still reached the general agent, which ran shell commands, read
+ * a file, searched memory and queried Notion eight times (12 model calls,
+ * 122 s). The follow-up "รายจ่ายล่าสุดคืออะไร" was then answered "หมายถึงงานไหน?
+ * บอกชื่อ Character หรือรหัส VIDEO ได้เลย".
+ */
+describe("a Wellness data question is answered from its table", () => {
+  // The referent double is unsure, as the production resolver was.
+  const UNSURE_REFERENT = {
+    intent: "unrelated",
+    referentType: "none",
+    confidence: 0.3,
+    needsClarification: true,
+  };
+  const AMBIGUOUS_REFERENT_REPLY = "หมายถึงงานไหน";
+  const DATA_ANSWER_ONLY = ["plugin_llm"];
+
+  /** Answers from the summary the plugin computed, choosing the figure the question names. */
+  function answerFromSummary(request: PluginCompletion): string {
+    const content = request.messages[0]!.content;
+    const question = /QUESTION: (.+)/u.exec(content)![1]!;
+    const summary = JSON.parse(/SUMMARY: (.+)/u.exec(content)![1]!) as {
+      table: string;
+      flow?: { groups: Array<{ value: string; sums: Record<string, number> }> };
+      latest?: { date: string; rows: number; totals: Array<{ field: string; sum: number }> };
+    };
+    const baht = (value: number | undefined) =>
+      (value ?? Number.NaN).toLocaleString("en-US", { minimumFractionDigits: 2 });
+    if (question.includes("ล่าสุด")) {
+      const latest = summary.latest!;
+      const expense = latest.totals.find((total) => total.field === "Expense Amount")?.sum;
+      return `${summary.table} รายจ่ายล่าสุด ${latest.date}: ${latest.rows} รายการ รวม ${baht(expense)} บาท`;
+    }
+    const out = summary.flow?.groups.find((group) => group.value === "Out");
+    return `${summary.table} ใช้ไปทั้งหมด ${baht(out?.sums["Expense Amount"])} บาท`;
+  }
+
+  beforeEach(() => {
+    vi.stubEnv("NOTION_WELLNESS_READ_TOKEN", "test-only-wellness-credential");
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("I: total, then latest, with a stale storyboard: one table read and one model call each", async () => {
+    const harness = await withStaleStoryboard({
+      referent: UNSURE_REFERENT,
+      answerData: answerFromSummary,
+    });
+    const cashflow = productionShapedWellness()[1]!;
+
+    const total = await harness.ask("ช่วยเช็คหน่อย Cashflow - Cloudbath ใช้ไปเท่าไร");
+
+    // Turn 1: no general agent, so no commands, file reads, memory or web.
+    expect(total.modelCalls).toEqual(DATA_ANSWER_ONLY);
+    expect(harness.replyResolver).not.toHaveBeenCalled();
+    expect(total.delivered).toEqual([
+      `Cashflow - Cloudbath ใช้ไปทั้งหมด ${CASHFLOW_FIXTURE.expenseTotal.toLocaleString("en-US")} บาท`,
+    ]);
+    // One executor read of the 164-row table: its two pages, nothing else queried.
+    const queries = harness.notionRequests.filter((request) => request.url.includes("/query"));
+    expect(queries).toHaveLength(2);
+    expect(queries.every((request) => request.url.includes(cashflow.dataSourceId))).toBe(true);
+    expect(harness.notionRequests.every((request) => request.method !== "PATCH")).toBe(true);
+
+    harness.notionRequests.length = 0;
+    const latest = await harness.ask("รายจ่ายล่าสุดคืออะไร");
+
+    // Turn 2: still the Cashflow table, never the Character/VIDEO question.
+    expect(latest.modelCalls).toEqual(DATA_ANSWER_ONLY);
+    expect(harness.replyResolver).not.toHaveBeenCalled();
+    expect(latest.delivered.join("\n")).not.toContain(AMBIGUOUS_REFERENT_REPLY);
+    expect(latest.delivered).toEqual([
+      `Cashflow - Cloudbath รายจ่ายล่าสุด ${CASHFLOW_FIXTURE.latestDate}: ${CASHFLOW_FIXTURE.latestRows} รายการ รวม ${CASHFLOW_FIXTURE.latestExpense.toLocaleString("en-US", { minimumFractionDigits: 2 })} บาท`,
+    ]);
+    // The answering model is told the earlier figure was the running total.
+    expect(harness.pluginCompletions.at(-1)!.messages[0]!.content).toContain(
+      `PREVIOUS ANSWER: ${total.delivered[0]}`,
+    );
+  });
+
+  it("I: the follow-up alone is not taken for a reference back to creative work", async () => {
+    const harness = await withStaleStoryboard({
+      referent: UNSURE_REFERENT,
+      answerData: answerFromSummary,
+    });
+
+    const latest = await harness.ask("รายจ่ายล่าสุดคืออะไร");
+
+    expect(latest.delivered.join("\n")).not.toContain(AMBIGUOUS_REFERENT_REPLY);
+    expect(latest.modelCalls).toEqual(DATA_ANSWER_ONLY);
+  });
+
+  it.each(["ค่าใช้จ่ายทำวิดีโอเท่าไร", "ค่าใช้จ่าย OpenRouter เท่าไร", "วันนี้ฝนตกไหม"])(
+    "near miss %s is left to its usual route and reads no Notion",
+    async (text) => {
+      const harness = createHarness({ answerData: answerFromSummary });
+
+      const turn = await harness.ask(text);
+
+      // Whatever usually answers it (the storyboard flow claims a video request),
+      // the data path neither read a table nor spent a call.
+      expect(turn.modelCalls).not.toContain("plugin_llm");
+      expect(harness.pluginCompletions).toEqual([]);
+      expect(harness.notionRequests).toEqual([]);
+    },
+  );
+
+  it("creative recency still reaches the referent with a stale storyboard", async () => {
+    const harness = await withStaleStoryboard({ answerData: answerFromSummary });
+
+    const turn = await harness.ask("storyboard ล่าสุด แก้ตอนท้ายให้แรงขึ้น");
+
+    expect(turn.modelCalls).toEqual(REFERENT_THEN_AGENT);
+    expect(harness.notionRequests).toEqual([]);
   });
 });

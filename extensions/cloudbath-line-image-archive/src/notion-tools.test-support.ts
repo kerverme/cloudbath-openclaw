@@ -12,7 +12,10 @@ export const SIGNED_FILE_TOKEN = "IQoJb3JpZ2luX2VjTEMPORARYSTORAGECREDENTIAL";
 export type SyntheticDataSource = {
   databaseId: string;
   dataSourceId: string;
+  /** The database's own title. */
   title: string;
+  /** What the root page's child_database block says; linked databases say nothing. */
+  blockTitle?: string;
   pages: unknown[];
 };
 
@@ -197,7 +200,7 @@ export function syntheticWellnessFetch(
           object: "block",
           id: source.databaseId,
           type: "child_database",
-          child_database: { title: source.title },
+          child_database: { title: source.blockTitle ?? source.title },
         })),
         has_more: false,
         next_cursor: null,
@@ -208,6 +211,7 @@ export function syntheticWellnessFetch(
         return Response.json({
           object: "database",
           id: source.databaseId,
+          title: [{ plain_text: source.title }],
           data_sources: [{ id: source.dataSourceId }],
         });
       }
@@ -229,4 +233,127 @@ export function syntheticWellnessFetch(
     }
     throw new Error(`unexpected Notion request: ${method} ${url}`);
   }) as typeof fetch;
+}
+
+/**
+ * A bookkeeping table shaped like the production one: several money columns
+ * (a raw amount, an expense formula, a sparsely filled actual expense), a
+ * direction select, and a date. Figures are fixture values only.
+ */
+export const CASHFLOW_FIXTURE = Object.freeze({
+  rows: 164,
+  dates: 74,
+  expenseTotal: 1_303_307.51,
+  latestDate: "2026-09-25",
+  latestRows: 13,
+  latestExpense: 156_325,
+  incomeRows: 6,
+  incomeTotal: 300_000,
+});
+
+function cashflowPage(
+  dataSourceId: string,
+  dataSourceIndex: number,
+  index: number,
+  row: { date: string; amount: number; direction: "Out" | "In"; category: string; payee: string },
+) {
+  const expense = row.direction === "Out" ? row.amount : 0;
+  return {
+    object: "page",
+    id: recordId(dataSourceIndex, index),
+    created_time: `${row.date}T08:00:00.000Z`,
+    last_edited_time: `${row.date}T09:00:00.000Z`,
+    parent: { type: "data_source_id", data_source_id: dataSourceId },
+    properties: {
+      Name: { id: "title", type: "title", title: [richText(`${row.category} ${index}`)] },
+      Date: { id: "dAtE", type: "date", date: { start: row.date, end: null, time_zone: null } },
+      Amount: { id: "aMnT", type: "number", number: row.amount },
+      "Expense Amount": {
+        id: "eXpA",
+        type: "formula",
+        formula: { type: "number", number: expense },
+      },
+      "Actual Expense": {
+        id: "aCtE",
+        type: "number",
+        number: index % 10 === 0 ? expense : null,
+      },
+      "AI Confidence": { id: "aIcF", type: "number", number: 0.93 },
+      Direction: {
+        id: "dIrN",
+        type: "select",
+        select: { id: "d1", name: row.direction, color: "green" },
+      },
+      "Main Category": {
+        id: "mCaT",
+        type: "select",
+        select: { id: "c1", name: row.category, color: "gray" },
+      },
+      "To / Payee": { id: "pAyE", type: "rich_text", rich_text: [richText(row.payee)] },
+    },
+  };
+}
+
+export function cashflowSource(
+  dataSourceIndex: number,
+  title = "Cashflow - Cloudbath",
+): SyntheticDataSource {
+  const source = transactionSource(dataSourceIndex, title, 0);
+  const rows: Array<Parameters<typeof cashflowPage>[3]> = [];
+  // 13 rows on the latest date: 12 x 12,000 + 12,325 = 156,325.
+  for (let i = 0; i < CASHFLOW_FIXTURE.latestRows; i += 1) {
+    rows.push({
+      date: CASHFLOW_FIXTURE.latestDate,
+      amount: i === 0 ? 12_325 : 12_000,
+      direction: "Out",
+      category: "Material",
+      payee: `Supplier ${i}`,
+    });
+  }
+  // 145 older expenses over 73 earlier dates: 144 x 7,900 + 9,382.51.
+  const olderDate = (i: number) => {
+    const day = new Date(Date.UTC(2026, 5, 1) + (i % 73) * 86_400_000);
+    return day.toISOString().slice(0, 10);
+  };
+  for (let i = 0; i < 145; i += 1) {
+    rows.push({
+      date: olderDate(i),
+      amount: i === 0 ? 9_382.51 : 7_900,
+      direction: "Out",
+      category: i % 2 ? "Labour" : "Transport",
+      payee: `Vendor ${i}`,
+    });
+  }
+  // 6 money-in rows, which a spending question must not count.
+  for (let i = 0; i < CASHFLOW_FIXTURE.incomeRows; i += 1) {
+    rows.push({
+      date: olderDate(i * 11),
+      amount: 50_000,
+      direction: "In",
+      category: "Cash In",
+      payee: "Owner",
+    });
+  }
+  // Notion returns rows in its own order, not by date: interleave them.
+  const ordered = rows.map((row, index) => ({ row, key: (index * 37) % rows.length }));
+  ordered.sort((left, right) => left.key - right.key);
+  return {
+    ...source,
+    pages: ordered.map(({ row }, index) =>
+      cashflowPage(source.dataSourceId, dataSourceIndex, index, row),
+    ),
+  };
+}
+
+/**
+ * The production root page's shape: a large untitled linked inbox first, then
+ * the bookkeeping table, then two other project tables.
+ */
+export function productionShapedWellness(): SyntheticDataSource[] {
+  return [
+    { ...transactionSource(0, "Source Inbox", 240), blockTitle: "" },
+    cashflowSource(1),
+    transactionSource(2, "BOQ Forecast - Cloudbath", 60),
+    { ...transactionSource(3, "Work Packages - Cloudbath", 30), blockTitle: "" },
+  ];
 }

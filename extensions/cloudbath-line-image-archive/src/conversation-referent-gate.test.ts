@@ -137,6 +137,55 @@ describe("dated and news wording is not a reference back", () => {
   });
 });
 
+/**
+ * Production: "รายจ่ายล่าสุดคืออะไร" was answered "หมายถึงงานไหน? บอกชื่อ
+ * Character หรือรหัส VIDEO ได้เลย". The recency of records is not a reference
+ * back at creative work; the noun before ล่าสุด decides which one it is.
+ */
+const DATA_RECENCY_CHAT = [
+  "รายจ่ายล่าสุดคืออะไร",
+  "ยอดล่าสุดเท่าไร",
+  "รายการล่าสุดมีอะไรบ้าง",
+  "ธุรกรรมล่าสุด",
+  "invoice ล่าสุด",
+  "cashflow ล่าสุด",
+  "ค่าใช้จ่ายล่าสุด",
+  "what was the latest expense",
+];
+
+describe("the recency of records is not a reference back", () => {
+  it.each(DATA_RECENCY_CHAT)("%s carries no deixis", (text) => {
+    expect(classifyConversationUtterance(text)?.deixis).toBeUndefined();
+  });
+
+  it.each(DATA_RECENCY_CHAT)("stale storyboard: %s is not arbitrated", async (text) => {
+    const { h, semantic } = await withStaleStoryboard();
+
+    expect((await h.dispatch(text)).conversation).toEqual({ kind: "pass" });
+    expect(semantic.messages).toEqual([]);
+  });
+
+  it.each(DATA_RECENCY_CHAT)("fresh conversation: %s is not asked about", async (text) => {
+    const { h, semantic } = fresh();
+
+    expect((await h.dispatch(text)).conversation).toEqual({ kind: "pass" });
+    expect(semantic.messages).toEqual([]);
+  });
+
+  it.each([
+    "อันล่าสุด",
+    "รูปล่าสุด",
+    "ภาพล่าสุด",
+    "ฉากล่าสุด",
+    "storyboard ล่าสุด",
+    "video ล่าสุด",
+    "งานล่าสุด",
+    "ตัวล่าสุด",
+  ])("creative work %s still points back", (text) => {
+    expect(classifyConversationUtterance(text)?.deixis).toBe("previous");
+  });
+});
+
 describe("genuine workflow turns still reach it", () => {
   it.each([
     "แก้อันเมื่อกี้ให้ตอนท้ายแรงขึ้น",

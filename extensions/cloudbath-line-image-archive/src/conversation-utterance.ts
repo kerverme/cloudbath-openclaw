@@ -64,6 +64,15 @@ const DATED_RECENCY =
   /(?:วัน|อาทิตย์|สัปดาห์|เดือน|ปี|ชั่วโมง|นาที|เทอม|ไตรมาส)\s*(?:ที่แล้ว|ก่อนหน้า(?:นี้)?|ล่าสุด)|เดิมที|\b(?:last|previous|past)\s+(?:week|weekend|month|year|night|day|hour)s?\b/giu;
 const NEWS_TOPIC = /ข่าว|\b(?:news|headlines?)\b/iu;
 
+/**
+ * Recency of RECORDS rather than of work: "รายจ่ายล่าสุด", "ยอดล่าสุด",
+ * "latest invoice". Production answered "รายจ่ายล่าสุดคืออะไร" with "which
+ * Character or VIDEO do you mean?". The noun, not the marker, decides: "อันล่าสุด",
+ * "รูปล่าสุด" and "storyboard ล่าสุด" still point back at work.
+ */
+const DATA_RECENCY =
+  /(?:รายจ่าย|รายรับ|ค่าใช้จ่าย|ยอด(?:เงิน|รวม)?|รายการ|ธุรกรรม|ใบแจ้งหนี้|ใบเสร็จ|บิล|cash\s*flow|invoices?|expenses?|transactions?|payments?)\s*(?:ที่)?\s*(?:ล่าสุด|ก่อนหน้า(?:นี้)?|ที่แล้ว)|\b(?:last|latest|most\s+recent|previous)\s+(?:expenses?|transactions?|invoices?|payments?|records?|entries|rows?|cash\s*flow)\b/giu;
+
 /** A bare number: the one unambiguous way to pick from a numbered menu. */
 const BARE_ORDINAL = /^(\d{1,2})$/u;
 
@@ -136,7 +145,7 @@ export function classifyConversationUtterance(content: string): ConversationUtte
       : AFFIRMATION.test(text)
         ? "affirm"
         : undefined;
-  const deicticText = text.replace(DATED_RECENCY, " ");
+  const deicticText = text.replace(DATED_RECENCY, " ").replace(DATA_RECENCY, " ");
   const deixis: ConversationDeixis | undefined = DEIXIS_SAME.test(deicticText)
     ? "same"
     : DEIXIS_PREVIOUS.test(deicticText) && !NEWS_TOPIC.test(text)

@@ -31,7 +31,11 @@ import {
   clearCloudbathLineVideoWorkspaceRuntime,
   installCloudbathLineVideoWorkspaceRuntime,
 } from "./src/line-video-workspace-runtime.js";
-import { CLOUDBATH_NOTION_TOOL_NAMES, createCloudbathNotionTools } from "./src/notion-tools.js";
+import {
+  CLOUDBATH_NOTION_TOOL_NAMES,
+  createCloudbathNotionTools,
+  createWellnessTableReader,
+} from "./src/notion-tools.js";
 import { NotionArchiveClient } from "./src/notion.js";
 import { ArchivePipeline } from "./src/pipeline.js";
 import { CLOUDBATH_PREVIS_ACTIVE_MAX_ENTRIES } from "./src/previs-line-router.js";
@@ -106,6 +110,12 @@ import {
   CloudbathUgcVideoWorkflow,
   UgcNotionWorkflowClient,
 } from "./src/ugc-workflow.js";
+import {
+  CLOUDBATH_WELLNESS_DATA_REFERENT_NAMESPACE,
+  CLOUDBATH_WELLNESS_DATA_REFERENT_TTL_MS,
+  WellnessDataRoute,
+  type WellnessDataConversation,
+} from "./src/wellness-data-route.js";
 import {
   clearCloudbathWorkspacePolicyRuntime,
   createCloudbathWorkspacePolicyRuntimeOwner,
@@ -867,7 +877,32 @@ export default definePluginEntry({
       },
     });
 
+    // Opened on first use: plugin state is ready once turns arrive, not while
+    // the plugin is still registering.
+    let wellnessData: WellnessDataRoute | undefined;
+    const wellnessDataRoute = () =>
+      (wellnessData ??= new WellnessDataRoute({
+        openReader: () => createWellnessTableReader(),
+        referents: api.runtime.state.openKeyedStore<WellnessDataConversation>({
+          namespace: CLOUDBATH_WELLNESS_DATA_REFERENT_NAMESPACE,
+          maxEntries: 5_000,
+          overflowPolicy: "evict-oldest",
+          defaultTtlMs: CLOUDBATH_WELLNESS_DATA_REFERENT_TTL_MS,
+        }),
+        answer: async (request) =>
+          (await api.runtime.llm.complete({ ...request, messages: [...request.messages] })).text,
+        now: Date.now,
+        logger,
+      }));
+
     api.on("before_dispatch", async (event, ctx) => {
+      // A business-data question is answered from its table before any
+      // creative-work arbitration sees it: its recency words ("รายจ่ายล่าสุด")
+      // are about records, and stale storyboard state must not claim them.
+      const dataAnswer = await wellnessDataRoute().handle(event, ctx);
+      if (dataAnswer) {
+        return dataAnswer;
+      }
       const runtime = tryGetCloudbathWorkspacePolicyRuntime();
       const registry = runtime?.workspaceRegistry;
       if (!registry) {
