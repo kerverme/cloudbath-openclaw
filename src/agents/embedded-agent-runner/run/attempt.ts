@@ -3040,6 +3040,22 @@ export async function runEmbeddedAttempt(
         cfg: params.config,
         agentId: sessionAgentId,
       });
+      // Provider dispatch (installProviderPromptHistoryTransform) cuts tool results to
+      // these; the loop guard budgets the same caps so its estimate is what gets sent.
+      const promptContextTokenBudget = params.contextTokenBudget ?? DEFAULT_CONTEXT_TOKENS;
+      const promptToolResultMaxChars = resolveLiveToolResultMaxChars({
+        contextWindowTokens: promptContextTokenBudget,
+        cfg: params.config,
+        agentId: sessionAgentId,
+      });
+      const promptToolResultAggregateMaxChars = resolveLiveToolResultAggregateMaxChars({
+        contextWindowTokens: promptContextTokenBudget,
+        perResultMaxChars: promptToolResultMaxChars,
+      });
+      const providerToolResultCaps = {
+        maxChars: promptToolResultMaxChars,
+        aggregateMaxChars: promptToolResultAggregateMaxChars,
+      };
       const midTurnPrecheckEnabled =
         params.config?.agents?.defaults?.compaction?.midTurnPrecheck?.enabled === true;
       let pendingMidTurnPrecheckRequest: MidTurnPrecheckRequest | null = null;
@@ -3117,6 +3133,7 @@ export async function runEmbeddedAttempt(
         const removeGuard = installToolResultContextGuard({
           agent: activeSession.agent,
           contextWindowTokens: contextTokenBudgetForGuard,
+          providerToolResultCaps,
           ...midTurnPrecheckOptions,
         });
         removeToolResultContextGuard = () => {
@@ -3127,6 +3144,7 @@ export async function runEmbeddedAttempt(
         removeToolResultContextGuard = installToolResultContextGuard({
           agent: activeSession.agent,
           contextWindowTokens: contextTokenBudgetForGuard,
+          providerToolResultCaps,
           ...midTurnPrecheckOptions,
         });
       }
@@ -4703,15 +4721,6 @@ export async function runEmbeddedAttempt(
           }
           prePromptMessageCount = activeSession.messages.length;
           const contextTokenBudget = params.contextTokenBudget ?? DEFAULT_CONTEXT_TOKENS;
-          const promptToolResultMaxChars = resolveLiveToolResultMaxChars({
-            contextWindowTokens: contextTokenBudget,
-            cfg: params.config,
-            agentId: sessionAgentId,
-          });
-          const promptToolResultAggregateMaxChars = resolveLiveToolResultAggregateMaxChars({
-            contextWindowTokens: contextTokenBudget,
-            perResultMaxChars: promptToolResultMaxChars,
-          });
           let promptHistoryMessages = activeSession.messages;
           const promptToolResultTruncation = truncateOversizedToolResultsInMessages(
             activeSession.messages,

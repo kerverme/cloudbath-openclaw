@@ -1,5 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CLOUDBATH_NOTION_TOOL_NAMES, createCloudbathNotionTools } from "./notion-tools.js";
+import {
+  type NotionRequest,
+  recordId,
+  SIGNED_FILE_TOKEN,
+  type SyntheticDataSource,
+  syntheticWellnessFetch,
+  TRANSACTION_CATEGORIES,
+  TRANSACTION_STATUSES,
+  transactionAmount,
+  transactionPage,
+  transactionSource,
+} from "./notion-tools.test-support.js";
 
 const WELLNESS_ROOT_PAGE_ID = "39575d42-f42b-808c-8a66-faed4274521b";
 const WELLNESS_DATABASE_ID = "11111111-1111-4111-8111-111111111111";
@@ -596,5 +608,321 @@ describe("Cloudbath scoped Notion tools", () => {
       tool("construction_upload_create", fetchImpl).execute("call", validConstructionCreate()),
     ).rejects.toThrow("Construction Notion connection is not configured");
     expect(fetchImpl).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Wellness results are read by the model through a live tool-result cap (64k
+ * chars in a 1M-token window). Raw pretty-printed Notion pages cost ~6.6k
+ * chars each, so a 100-row query showed the model its first 9 rows and it went
+ * back for the rest one record at a time.
+ */
+describe("Wellness results carry plain values the model can read in one pass", () => {
+  const LIVE_TOOL_RESULT_CAP = 64_000;
+
+  function execute(name: string, sources: SyntheticDataSource[], params: unknown) {
+    const requests: NotionRequest[] = [];
+    const run = tool(name, syntheticWellnessFetch(sources, requests)).execute("call", params);
+    return { run, requests };
+  }
+
+  function rows(result: ToolResult): Array<Record<string, unknown>> {
+    const parsed = JSON.parse(result.content[0]!.text) as {
+      records?: Array<Record<string, unknown>>;
+      matches?: Array<Record<string, unknown>>;
+    };
+    return parsed.records ?? parsed.matches ?? [];
+  }
+
+  it("a 100-row query keeps every row and value under the live tool-result cap", async () => {
+    const source = transactionSource(0, "Ledger", 100);
+    const { run } = execute("wellness_notion_query", [source], { max_records: 100 });
+    const result = await run;
+    const text = result.content[0]!.text;
+
+    expect(text.length).toBeLessThan(LIVE_TOOL_RESULT_CAP);
+    const records = rows(result);
+    expect(records).toHaveLength(100);
+    const expected = Array.from({ length: 100 }, (_, index) => ({
+      id: recordId(0, index),
+      Amount: transactionAmount(index),
+      Category: TRANSACTION_CATEGORIES[index % TRANSACTION_CATEGORIES.length],
+      Status: TRANSACTION_STATUSES[index % TRANSACTION_STATUSES.length],
+      Description: `Monthly service charge ${index} and related costs`,
+      Date: `2026-09-${String((index % 28) + 1).padStart(2, "0")}`,
+    }));
+    expect(
+      records.map((record) => {
+        const properties = record.properties as Record<string, unknown>;
+        return {
+          id: record.id,
+          Amount: properties.Amount,
+          Category: properties.Category,
+          Status: properties.Status,
+          Description: properties.Description,
+          Date: properties.Date,
+        };
+      }),
+    ).toEqual(expected);
+    expect(JSON.parse(text)).toEqual(result.details);
+  });
+
+  it("projects every Notion property type to the value a person reads", async () => {
+    const page = transactionPage(transactionSource(0, "Ledger", 0).dataSourceId, 0, 7);
+    const source = { ...transactionSource(0, "Ledger", 0), pages: [page] };
+    Object.assign(page.properties, {
+      Range: {
+        id: "rAnG",
+        type: "date",
+        date: { start: "2026-09-01T09:00:00.000+07:00", end: "2026-09-03", time_zone: null },
+      },
+      Zoned: {
+        id: "zOnE",
+        type: "date",
+        date: { start: "2026-09-01T09:00:00", end: null, time_zone: "Asia/Bangkok" },
+      },
+      Empty: { id: "eMpT", type: "select", select: null },
+      Precise: { id: "pReC", type: "number", number: 1_234_567.891 },
+      Email: { id: "eMaL", type: "email", email: "billing@example.invalid" },
+      Phone: { id: "pHoN", type: "phone_number", phone_number: "+66 2 000 0000" },
+      Link: { id: "lInK", type: "url", url: "https://example.invalid/invoice/7" },
+      Invoice: { id: "uNiQ", type: "unique_id", unique_id: { prefix: "INV", number: 42 } },
+      Due: {
+        id: "dUe1",
+        type: "formula",
+        formula: { type: "date", date: { start: "2026-10-01" } },
+      },
+      Overdue: { id: "oVeR", type: "formula", formula: { type: "boolean", boolean: false } },
+      Label: { id: "lAbL", type: "formula", formula: { type: "string", string: "Q3-7" } },
+      Total: {
+        id: "tOtL",
+        type: "rollup",
+        rollup: { type: "number", number: 9_876.5, function: "sum" },
+      },
+      Latest: {
+        id: "lAtE",
+        type: "rollup",
+        rollup: { type: "date", date: { start: "2026-09-20" }, function: "latest_date" },
+      },
+      Vendors: {
+        id: "vEnD",
+        type: "relation",
+        relation: [{ id: "3d4e5f60-7182-4930-8bcd-ef0123456789" }],
+        has_more: true,
+      },
+      Contract: {
+        id: "cOnT",
+        type: "files",
+        files: [
+          {
+            name: "contract.pdf",
+            type: "external",
+            external: { url: "https://example.invalid/contract.pdf" },
+          },
+        ],
+      },
+      Checked: {
+        id: "vErI",
+        type: "verification",
+        verification: { state: "verified", verified_by: null, date: null },
+      },
+      Future: { id: "fUtR", type: "place", place: { lat: 13.75, lon: 100.5, name: "Bangkok" } },
+    });
+    const { run } = execute("wellness_notion_get_record", [source], { record_id: page.id });
+    const result = await run;
+
+    expect(result.details).toEqual({
+      id: page.id,
+      database: "Ledger",
+      dataSourceIndex: 0,
+      createdAt: "2026-09-08T01:02:00.000Z",
+      lastEditedAt: "2026-09-08T03:04:00.000Z",
+      properties: {
+        Name: "Transaction 7",
+        Amount: transactionAmount(7),
+        Date: "2026-09-08",
+        Category: "Payroll",
+        Description: "Monthly service charge 7 and related costs",
+        Status: "Pending",
+        Tags: ["Ledger", "Q3"],
+        Project: ["2c3d4e5f-6071-4829-9abc-def012345678"],
+        "Project Name": ["Spa renovation"],
+        "Amount incl. VAT": Math.round(transactionAmount(7) * 107) / 100,
+        Receipt: ["receipt-7.jpg"],
+        Paid: false,
+        Owner: ["Team member 1"],
+        "Created by": "Team member 1",
+        Created: "2026-09-08T01:02:00.000Z",
+        Range: { start: "2026-09-01T09:00:00.000+07:00", end: "2026-09-03" },
+        Zoned: { start: "2026-09-01T09:00:00", timeZone: "Asia/Bangkok" },
+        Empty: null,
+        Precise: 1_234_567.891,
+        Email: "billing@example.invalid",
+        Phone: "+66 2 000 0000",
+        Link: "https://example.invalid/invoice/7",
+        Invoice: "INV-42",
+        Due: "2026-10-01",
+        Overdue: false,
+        Label: "Q3-7",
+        Total: 9_876.5,
+        Latest: "2026-09-20",
+        Vendors: { ids: ["3d4e5f60-7182-4930-8bcd-ef0123456789"], hasMore: true },
+        Contract: [{ name: "contract.pdf", url: "https://example.invalid/contract.pdf" }],
+        Checked: "verified",
+        Future: { lat: 13.75, lon: 100.5, name: "Bangkok" },
+      },
+    });
+  });
+
+  it("never hands the model signed file links, avatars, emails of people, or credentials", async () => {
+    const source = transactionSource(0, "Ledger", 20);
+    const results = await Promise.all([
+      execute("wellness_notion_query", [source], {}).run,
+      execute("wellness_notion_search", [source], { query: "Transaction" }).run,
+      execute("wellness_notion_get_record", [source], { record_id: recordId(0, 3) }).run,
+    ]);
+
+    for (const result of results) {
+      const serialized = JSON.stringify(result);
+      expect(serialized).not.toContain(SIGNED_FILE_TOKEN);
+      expect(serialized).not.toContain("X-Amz-");
+      expect(serialized).not.toContain("avatar");
+      expect(serialized).not.toContain("@example.invalid");
+      expect(serialized).not.toContain(WELLNESS_TEST_CREDENTIAL);
+    }
+  });
+
+  it("searches what rows say, not Notion wrapper keys or option colors", async () => {
+    const source = transactionSource(0, "Ledger", 20);
+
+    const byValue = await execute("wellness_notion_search", [source], { query: "marketing" }).run;
+    const byColor = await execute("wellness_notion_search", [source], { query: "blue" }).run;
+    const byWrapper = await execute("wellness_notion_search", [source], { query: "rich_text" }).run;
+
+    expect(rows(byValue).map((record) => record.id)).toEqual(
+      [1, 5, 9, 13, 17].map((index) => recordId(0, index)),
+    );
+    expect(rows(byColor)).toEqual([]);
+    expect(rows(byWrapper)).toEqual([]);
+  });
+});
+
+describe("wellness_notion_get_record batches known records", () => {
+  const ledger = transactionSource(0, "Ledger", 150);
+  const budget = transactionSource(1, "Budget", 30);
+
+  function run(params: unknown, sources: SyntheticDataSource[] = [ledger, budget]) {
+    const requests: NotionRequest[] = [];
+    const result = tool(
+      "wellness_notion_get_record",
+      syntheticWellnessFetch(sources, requests),
+    ).execute("call", params);
+    return { result, requests };
+  }
+
+  it("returns several records from several databases in one call, in requested order", async () => {
+    const ids = [recordId(1, 4), recordId(0, 120), recordId(0, 2)];
+    const { result, requests } = run({ record_ids: ids });
+
+    const details = (await result).details as {
+      records: Array<{ id: string; database: string; properties: { Amount: number } }>;
+      missing: string[];
+    };
+
+    expect(details.records.map((record) => [record.id, record.database])).toEqual([
+      [ids[0], "Budget"],
+      [ids[1], "Ledger"],
+      [ids[2], "Ledger"],
+    ]);
+    expect(details.records.map((record) => record.properties.Amount)).toEqual([
+      transactionAmount(4),
+      transactionAmount(120),
+      transactionAmount(2),
+    ]);
+    expect(details.missing).toEqual([]);
+    // One scope discovery and one pass over each data source for all three ids.
+    expect(requests.filter((request) => request.url.includes("/v1/blocks/"))).toHaveLength(1);
+    expect(requests.filter((request) => request.url.includes("/v1/databases/"))).toHaveLength(2);
+    expect(
+      requests.filter((request) => request.url.includes(`/${ledger.dataSourceId}/query`)),
+    ).toHaveLength(2);
+    expect(
+      requests.filter((request) => request.url.includes(`/${budget.dataSourceId}/query`)),
+    ).toHaveLength(1);
+  });
+
+  it("stops scanning once every requested record is found", async () => {
+    const { result, requests } = run({ record_ids: [recordId(0, 1), recordId(0, 3)] });
+
+    await result;
+
+    expect(requests.filter((request) => request.url.includes("/query"))).toHaveLength(1);
+    expect(requests.some((request) => request.url.includes(budget.dataSourceId))).toBe(false);
+  });
+
+  it("reports records outside the root page as missing without fetching them", async () => {
+    const foreign = transactionSource(5, "Other workspace table", 3);
+    const foreignId = recordId(5, 1);
+    const { result, requests } = run({ record_ids: [recordId(0, 7), foreignId] });
+
+    const details = (await result).details as {
+      records: Array<{ id: string }>;
+      missing: string[];
+    };
+
+    expect(details.records.map((record) => record.id)).toEqual([recordId(0, 7)]);
+    expect(details.missing).toEqual([foreignId]);
+    expect(requests.some((request) => request.url.includes("/v1/pages"))).toBe(false);
+    expect(requests.some((request) => request.url.includes(foreign.dataSourceId))).toBe(false);
+    expect(requests.every((request) => request.method !== "PATCH")).toBe(true);
+  });
+
+  it("keeps the single record_id call: one record back, or the same refusal", async () => {
+    const found = await run({ record_id: recordId(1, 2) }).result;
+    expect(found.details).toMatchObject({
+      id: recordId(1, 2),
+      database: "Budget",
+      properties: { Amount: transactionAmount(2) },
+    });
+
+    await expect(run({ record_id: recordId(5, 1) }).result).rejects.toThrow(
+      "Wellness record is outside the allowed root page or does not exist",
+    );
+  });
+
+  it("rejects ambiguous, oversized, or malformed id lists before any request", async () => {
+    const fetchImpl = vi.fn() as typeof fetch;
+    const getRecord = tool("wellness_notion_get_record", fetchImpl);
+
+    await expect(
+      getRecord.execute("call", { record_id: recordId(0, 1), record_ids: [recordId(0, 2)] }),
+    ).rejects.toThrow("exactly one of record_id or record_ids");
+    await expect(getRecord.execute("call", {})).rejects.toThrow(
+      "exactly one of record_id or record_ids",
+    );
+    await expect(getRecord.execute("call", { record_ids: [] })).rejects.toThrow("record_ids");
+    await expect(
+      getRecord.execute("call", {
+        record_ids: Array.from({ length: 101 }, (_, index) => recordId(0, index)),
+      }),
+    ).rejects.toThrow("record_ids");
+    await expect(getRecord.execute("call", { record_ids: ["not-a-notion-id"] })).rejects.toThrow(
+      "A valid Notion record ID is required",
+    );
+    await expect(
+      getRecord.execute("call", { record_ids: [recordId(0, 1)], database_id: "x" }),
+    ).rejects.toThrow("Unsupported tool parameter");
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("still refuses a data source that returns a row from outside its scope", async () => {
+    const leaking = {
+      ...ledger,
+      pages: [transactionPage("ffffffff-ffff-4fff-8fff-ffffffffffff", 0, 1)],
+    };
+    const { result, requests } = run({ record_ids: [recordId(0, 1)] }, [leaking]);
+
+    await expect(result).rejects.toThrow("outside the configured data source");
+    expect(requests.some((request) => request.url.includes("/v1/pages"))).toBe(false);
   });
 });

@@ -25,6 +25,7 @@ import {
 } from "@openclaw/ai/internal/runtime";
 import { resetApiProviders } from "@openclaw/ai/providers";
 import { CURRENT_SESSION_VERSION } from "../../config/sessions/version.js";
+import { runWithLlmCallReason } from "../../infra/turn-latency-ledger.js";
 import { streamSimple } from "../../llm/stream.js";
 import type {
   AssistantMessage,
@@ -1982,14 +1983,20 @@ export class AgentSession {
 
     let compactionResult: CompactionResult | undefined;
     let fromExtension = false;
+    // Summary and merge requests run inside the agent turn's latency scope; label them
+    // so the turn record shows compaction instead of counting extra tool follow-ups.
+    const labelCompaction = <T>(run: () => Promise<T>) =>
+      runWithLlmCallReason("context_compaction", run);
     if (this.currentExtensionRunner.hasHandlers("session_before_compact")) {
-      const extensionResult = await this.currentExtensionRunner.emit({
-        type: "session_before_compact",
-        preparation,
-        branchEntries: pathEntries,
-        customInstructions: options.customInstructions,
-        signal: options.signal,
-      });
+      const extensionResult = await labelCompaction(() =>
+        this.currentExtensionRunner.emit({
+          type: "session_before_compact",
+          preparation,
+          branchEntries: pathEntries,
+          customInstructions: options.customInstructions,
+          signal: options.signal,
+        }),
+      );
 
       if (extensionResult?.cancel) {
         return { status: "aborted" };
@@ -2001,16 +2008,19 @@ export class AgentSession {
       }
     }
 
+    const model = this.model;
     compactionResult ??= unwrapCoreResult(
-      await compact(
-        preparation,
-        this.model,
-        auth.apiKey,
-        auth.headers,
-        options.customInstructions,
-        options.signal,
-        this.thinkingLevel,
-        this.agent.streamFn,
+      await labelCompaction(() =>
+        compact(
+          preparation,
+          model,
+          auth.apiKey,
+          auth.headers,
+          options.customInstructions,
+          options.signal,
+          this.thinkingLevel,
+          this.agent.streamFn,
+        ),
       ),
     );
 

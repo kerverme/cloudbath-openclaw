@@ -24,6 +24,7 @@ import {
   invalidateMessageCharsCacheEntry,
   isToolResultMessage,
 } from "./tool-result-char-estimator.js";
+import { truncateOversizedToolResultsInMessages } from "./tool-result-truncation.js";
 
 const SINGLE_TOOL_RESULT_CONTEXT_SHARE = 0.5;
 const PREEMPTIVE_OVERFLOW_RATIO = 0.9;
@@ -42,6 +43,12 @@ type GuardableAgent = object;
 
 type GuardableAgentRecord = {
   transformContext?: GuardableTransformContext;
+};
+
+/** The live caps provider dispatch applies to each tool result and to all of them together. */
+type ProviderToolResultCaps = {
+  maxChars: number;
+  aggregateMaxChars: number;
 };
 
 type MidTurnPrecheckOptions = {
@@ -249,9 +256,26 @@ function toolResultsNeedTruncation(params: {
 function exceedsPreemptiveOverflowThreshold(params: {
   messages: AgentMessage[];
   maxContextChars: number;
+  contextWindowTokens: number;
+  providerToolResultCaps: ProviderToolResultCaps;
 }): boolean {
-  const estimateCache = createMessageCharEstimateCache();
-  return estimateContextChars(params.messages, estimateCache) > params.maxContextChars;
+  if (
+    estimateContextChars(params.messages, createMessageCharEstimateCache()) <=
+    params.maxContextChars
+  ) {
+    return false;
+  }
+  // Provider dispatch cuts every tool result to these caps before sending, so budget
+  // that view: raw bodies it would cut must not abort a turn the provider accepts.
+  const providerView = truncateOversizedToolResultsInMessages(
+    params.messages,
+    params.contextWindowTokens,
+    params.providerToolResultCaps.maxChars,
+    params.providerToolResultCaps.aggregateMaxChars,
+  ).messages;
+  return (
+    estimateContextChars(providerView, createMessageCharEstimateCache()) > params.maxContextChars
+  );
 }
 
 function applyMessageMutationInPlace(
@@ -473,6 +497,7 @@ export function installContextEngineLoopHook(params: {
 export function installToolResultContextGuard(params: {
   agent: GuardableAgent;
   contextWindowTokens: number;
+  providerToolResultCaps: ProviderToolResultCaps;
   midTurnPrecheck?: MidTurnPrecheckOptions;
 }): () => void {
   const contextWindowTokens = Math.max(1, Math.floor(params.contextWindowTokens));
@@ -559,6 +584,8 @@ export function installToolResultContextGuard(params: {
       exceedsPreemptiveOverflowThreshold({
         messages: contextMessages,
         maxContextChars,
+        contextWindowTokens,
+        providerToolResultCaps: params.providerToolResultCaps,
       })
     ) {
       throw new Error(PREEMPTIVE_CONTEXT_OVERFLOW_MESSAGE);

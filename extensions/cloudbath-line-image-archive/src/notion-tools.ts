@@ -1,4 +1,4 @@
-import { jsonResult } from "openclaw/plugin-sdk/tool-results";
+import { jsonResult, textResult } from "openclaw/plugin-sdk/tool-results";
 import { Type } from "typebox";
 import { NOTION_API_VERSION } from "./notion-schema.js";
 import { isRetryableStatus, withBoundedRetry } from "./retry.js";
@@ -13,6 +13,7 @@ const REQUEST_TIMEOUT_MS = 15_000;
 const MAX_NOTION_TEXT_LENGTH = 1_900;
 const MAX_QUERY_RECORDS = 500;
 const MAX_SEARCH_RECORDS = 1_000;
+const MAX_GET_RECORDS = 100;
 const MAX_WELLNESS_ROOT_BLOCKS = 1_000;
 const MAX_WELLNESS_CHILD_DATABASES = 100;
 const NOTION_ID_PATTERN = /^[0-9a-f]{32}$/;
@@ -50,6 +51,7 @@ type NotionBlockChildrenResponse = {
 type WellnessDataSourceScope = {
   databaseId: string;
   dataSourceId: string;
+  databaseTitle?: string;
 };
 type NotionPropertySchema = {
   type?: string;
@@ -72,7 +74,15 @@ type SafeNotionPage = {
   lastEditedAt?: string;
   properties: Record<string, unknown>;
 };
-type ScopedWellnessPage = SafeNotionPage & WellnessDataSourceScope;
+/** A Wellness row as the model sees it: plain property values, no Notion wrappers. */
+type WellnessRecord = {
+  id: string;
+  database?: string;
+  dataSourceIndex: number;
+  createdAt?: string;
+  lastEditedAt?: string;
+  properties: Record<string, unknown>;
+};
 type WellnessQueryCursor = {
   version: 1;
   sourceIndex: number;
@@ -321,6 +331,22 @@ function readDataSourceIndex(params: Record<string, unknown>): number | undefine
   return raw as number;
 }
 
+function readRecordIds(params: Record<string, unknown>): string[] | undefined {
+  const raw = params.record_ids;
+  if (raw === undefined) {
+    return undefined;
+  }
+  if (!Array.isArray(raw) || raw.length < 1 || raw.length > MAX_GET_RECORDS) {
+    throw new Error(`record_ids must list 1 to ${MAX_GET_RECORDS} record IDs`);
+  }
+  return raw.map((id) => {
+    if (typeof id !== "string" || !id.trim()) {
+      throw new Error("record_ids must contain record ID strings");
+    }
+    return id.trim();
+  });
+}
+
 function encodeWellnessCursor(cursor: WellnessQueryCursor): string {
   return Buffer.from(JSON.stringify(cursor), "utf8").toString("base64url");
 }
@@ -367,6 +393,149 @@ function safePage(page: NotionPage, expectedDataSourceId: string): SafeNotionPag
   };
 }
 
+type NotionRichText = Array<{ plain_text?: unknown }>;
+type NotionUser = { id?: unknown; name?: unknown };
+type NotionDate = { start?: unknown; end?: unknown; time_zone?: unknown } | null;
+type NotionFile = { name?: unknown; type?: unknown; external?: { url?: unknown } };
+
+function plainText(value: unknown): string {
+  return Array.isArray(value)
+    ? (value as NotionRichText)
+        .map((item) => (typeof item?.plain_text === "string" ? item.plain_text : ""))
+        .join("")
+    : "";
+}
+
+function plainUser(user: NotionUser | null | undefined): unknown {
+  return typeof user?.name === "string" && user.name ? user.name : (user?.id ?? null);
+}
+
+function plainDate(date: NotionDate | undefined): unknown {
+  if (!date) {
+    return null;
+  }
+  // A lone start stays the exact Notion date string; ranges and zones keep every part.
+  if (date.end == null && date.time_zone == null) {
+    return date.start ?? null;
+  }
+  return {
+    start: date.start ?? null,
+    ...(date.end != null ? { end: date.end } : {}),
+    ...(date.time_zone != null ? { timeZone: date.time_zone } : {}),
+  };
+}
+
+function plainFile(file: NotionFile): unknown {
+  // Notion-hosted file URLs are short-lived signed links carrying temporary storage
+  // credentials; only the name is stable. External files keep their own URL.
+  return file.type === "external" && typeof file.external?.url === "string"
+    ? { name: file.name ?? null, url: file.external.url }
+    : (file.name ?? null);
+}
+
+/**
+ * Reduces one Notion property value to the value a person would read in the
+ * table. Type wrappers, option ids and colors, annotations, avatars, and signed
+ * file links are dropped; unknown types keep their unwrapped value.
+ */
+function plainPropertyValue(property: unknown): unknown {
+  if (!property || typeof property !== "object") {
+    return property ?? null;
+  }
+  const record = property as Record<string, unknown> & { type?: unknown };
+  const type = typeof record.type === "string" ? record.type : undefined;
+  if (!type) {
+    return null;
+  }
+  const value = record[type];
+  switch (type) {
+    case "title":
+    case "rich_text":
+      return plainText(value);
+    case "select":
+    case "status":
+      return (value as { name?: unknown } | null)?.name ?? null;
+    case "multi_select":
+      return Array.isArray(value)
+        ? value.map((option: { name?: unknown }) => option?.name ?? null)
+        : [];
+    case "date":
+      return plainDate(value as NotionDate);
+    case "people":
+      return Array.isArray(value) ? value.map((user: NotionUser) => plainUser(user)) : [];
+    case "created_by":
+    case "last_edited_by":
+      return plainUser(value as NotionUser);
+    case "files":
+      return Array.isArray(value) ? value.map((file: NotionFile) => plainFile(file)) : [];
+    case "relation": {
+      const ids = Array.isArray(value) ? value.map((item: { id?: unknown }) => item?.id) : [];
+      // Notion lists at most 25 relations per page read; say so instead of implying all.
+      return record.has_more === true ? { ids, hasMore: true } : ids;
+    }
+    case "formula": {
+      const formula = value as { type?: unknown } & Record<string, unknown>;
+      if (typeof formula?.type !== "string") {
+        return null;
+      }
+      return formula.type === "date"
+        ? plainDate(formula.date as NotionDate)
+        : (formula[formula.type] ?? null);
+    }
+    case "rollup": {
+      const rollup = value as { type?: unknown } & Record<string, unknown>;
+      if (rollup?.type === "array") {
+        return Array.isArray(rollup.array) ? rollup.array.map(plainPropertyValue) : [];
+      }
+      if (rollup?.type === "date") {
+        return plainDate(rollup.date as NotionDate);
+      }
+      return typeof rollup?.type === "string" ? (rollup[rollup.type] ?? null) : null;
+    }
+    case "unique_id": {
+      const unique = value as { prefix?: unknown; number?: unknown } | null;
+      if (typeof unique?.number !== "number") {
+        return null;
+      }
+      return typeof unique.prefix === "string" && unique.prefix
+        ? `${unique.prefix}-${unique.number}`
+        : unique.number;
+    }
+    case "verification":
+      return (value as { state?: unknown } | null)?.state ?? null;
+    default:
+      return value ?? null;
+  }
+}
+
+function wellnessRecord(
+  page: SafeNotionPage,
+  scope: WellnessDataSourceScope,
+  dataSourceIndex: number,
+): WellnessRecord {
+  return {
+    id: page.id,
+    ...(scope.databaseTitle ? { database: scope.databaseTitle } : {}),
+    dataSourceIndex,
+    ...(page.createdAt ? { createdAt: page.createdAt } : {}),
+    ...(page.lastEditedAt ? { lastEditedAt: page.lastEditedAt } : {}),
+    properties: Object.fromEntries(
+      Object.entries(page.properties).map(([name, property]) => [
+        name,
+        plainPropertyValue(property),
+      ]),
+    ),
+  };
+}
+
+/**
+ * Wellness results are read by the model through a per-result character cap;
+ * unindented JSON fits about 1.5x the rows under it that pretty-printed JSON does.
+ */
+function compactJsonResult<T>(payload: T) {
+  return textResult(JSON.stringify(payload), payload);
+}
+
 class WellnessNotionReader {
   private scopesPromise: Promise<WellnessDataSourceScope[]> | undefined;
 
@@ -377,6 +546,7 @@ class WellnessNotionReader {
     if (!pending) {
       pending = (async () => {
         const childDatabaseIds: string[] = [];
+        const childDatabaseTitles = new Map<string, string>();
         let cursor: string | undefined;
         let scannedBlocks = 0;
         let hasMore = true;
@@ -396,7 +566,11 @@ class WellnessNotionReader {
               throw new Error("Wellness root page exceeds the safe discovery limit");
             }
             if (block.object === "block" && block.type === "child_database" && block.id) {
-              canonicalNotionId(block.id);
+              const databaseKey = canonicalNotionId(block.id);
+              const title = block.child_database?.title?.trim();
+              if (title) {
+                childDatabaseTitles.set(databaseKey, title);
+              }
               childDatabaseIds.push(block.id);
               if (
                 new Set(childDatabaseIds.map(canonicalNotionId)).size > MAX_WELLNESS_CHILD_DATABASES
@@ -434,7 +608,12 @@ class WellnessNotionReader {
               continue;
             }
             canonicalNotionId(source.id);
-            scopes.push({ databaseId, dataSourceId: source.id });
+            const databaseTitle = childDatabaseTitles.get(canonicalNotionId(databaseId));
+            scopes.push({
+              databaseId,
+              dataSourceId: source.id,
+              ...(databaseTitle ? { databaseTitle } : {}),
+            });
           }
         }
         const uniqueScopes = [
@@ -534,7 +713,7 @@ class WellnessNotionReader {
       throw new Error("Wellness continuation is outside the root-page scope");
     }
     const singleSource = dataSourceIndex !== undefined;
-    const records: ScopedWellnessPage[] = [];
+    const records: WellnessRecord[] = [];
     let scanned = 0;
     let nextCursor: string | undefined;
     let notionCursor = decoded?.notionCursor;
@@ -548,13 +727,7 @@ class WellnessNotionReader {
         undefined,
         notionCursor,
       );
-      records.push(
-        ...result.records.map((page) => ({
-          ...page,
-          databaseId: scope.databaseId,
-          dataSourceId: scope.dataSourceId,
-        })),
-      );
+      records.push(...result.records.map((page) => wellnessRecord(page, scope, sourceIndex)));
       scanned += result.scanned;
       if (result.hasMore) {
         if (!result.nextCursor) {
@@ -589,31 +762,41 @@ class WellnessNotionReader {
     };
   }
 
-  async getRecord(recordId: string, signal?: AbortSignal): Promise<ScopedWellnessPage> {
-    const wanted = canonicalNotionId(recordId);
-    for (const scope of await this.discoverScopes(signal)) {
-      let found: SafeNotionPage | undefined;
-      await this.queryDataSource(scope.dataSourceId, 10_000, signal, (page) => {
-        if (canonicalNotionId(page.id) === wanted) {
-          found = page;
-          return "stop";
-        }
-        return false;
-      });
-      if (found) {
-        return { ...found, databaseId: scope.databaseId, dataSourceId: scope.dataSourceId };
+  /**
+   * Finds the requested records in one pass over the discovered data sources,
+   * stopping once all are found. Records are only ever read through a scoped
+   * data-source query, so an id outside the root page is reported missing,
+   * never fetched.
+   */
+  async getRecords(recordIds: string[], signal?: AbortSignal) {
+    const wanted = new Map(recordIds.map((id) => [canonicalNotionId(id), id]));
+    const found = new Map<string, WellnessRecord>();
+    const scopes = await this.discoverScopes(signal);
+    for (const [index, scope] of scopes.entries()) {
+      if (found.size === wanted.size) {
+        break;
       }
+      await this.queryDataSource(scope.dataSourceId, 10_000, signal, (page) => {
+        const key = canonicalNotionId(page.id);
+        if (wanted.has(key) && !found.has(key)) {
+          found.set(key, wellnessRecord(page, scope, index));
+        }
+        return found.size === wanted.size ? "stop" : false;
+      });
     }
-    throw new Error("Wellness record is outside the allowed root page or does not exist");
+    return {
+      records: [...wanted.keys()].flatMap((key) => found.get(key) ?? []),
+      missing: [...wanted].filter(([key]) => !found.has(key)).map(([, id]) => id),
+    };
   }
 
   async search(query: string, maxResults: number, maxRecordsScanned: number, signal?: AbortSignal) {
     const needle = query.toLocaleLowerCase();
-    const matches: ScopedWellnessPage[] = [];
+    const matches: WellnessRecord[] = [];
     let scanned = 0;
     let hasMore = false;
     const scopes = await this.discoverScopes(signal);
-    for (const scope of scopes) {
+    for (const [index, scope] of scopes.entries()) {
       if (scanned >= maxRecordsScanned || matches.length >= maxResults) {
         hasMore = true;
         break;
@@ -623,13 +806,11 @@ class WellnessNotionReader {
         maxRecordsScanned - scanned,
         signal,
         (page) => {
-          const matched = JSON.stringify(page.properties).toLocaleLowerCase().includes(needle);
+          // Match what the row says, not Notion's wrapper keys, option ids, or colors.
+          const record = wellnessRecord(page, scope, index);
+          const matched = JSON.stringify(record.properties).toLocaleLowerCase().includes(needle);
           if (matched && matches.length < maxResults) {
-            matches.push({
-              ...page,
-              databaseId: scope.databaseId,
-              dataSourceId: scope.dataSourceId,
-            });
+            matches.push(record);
           }
           return matches.length >= maxResults ? "stop" : false;
         },
@@ -878,7 +1059,17 @@ const WellnessQuerySchema = Type.Object(
 );
 const WellnessGetRecordSchema = Type.Object(
   {
-    record_id: Type.String({ description: "Notion page ID returned by a Wellness query." }),
+    record_id: Type.Optional(
+      Type.String({ description: "One Notion page ID returned by a Wellness query or search." }),
+    ),
+    record_ids: Type.Optional(
+      Type.Array(Type.String(), {
+        minItems: 1,
+        maxItems: MAX_GET_RECORDS,
+        description:
+          "Several Notion page IDs returned by a Wellness query or search, fetched in one call. Use instead of record_id when more than one record needs detail.",
+      }),
+    ),
   },
   { additionalProperties: false },
 );
@@ -924,7 +1115,7 @@ const ConstructionUpdateSchema = Type.Object(
 );
 
 const WELLNESS_QUERY_KEYS = new Set(["data_source_index", "max_records", "start_cursor"]);
-const WELLNESS_GET_KEYS = new Set(["record_id"]);
+const WELLNESS_GET_KEYS = new Set(["record_id", "record_ids"]);
 const WELLNESS_SEARCH_KEYS = new Set(["query", "max_results", "max_records_scanned"]);
 const CONSTRUCTION_CREATE_KEYS = new Set([
   "record_id",
@@ -979,7 +1170,7 @@ export function createCloudbathNotionTools(fetchImpl: FetchLike = fetch) {
       name: "wellness_notion_query",
       label: "Wellness Notion Query",
       description:
-        "READ ONLY. Query records only from child databases directly beneath the configured Wellness root page. Cannot create, update, delete, archive, comment, or change schemas.",
+        "READ ONLY. Query records only from child databases directly beneath the configured Wellness root page. Each returned record already carries every property as a plain value (text, numbers, dates, options, people, relations, formulas, rollups), so totals and summaries can be computed from one query; do not fetch records one by one to read them. Cannot create, update, delete, archive, comment, or change schemas.",
       parameters: WellnessQuerySchema,
       execute: async (_toolCallId: string, rawParams: unknown, signal?: AbortSignal) => {
         const params = paramsRecord(rawParams);
@@ -987,7 +1178,7 @@ export function createCloudbathNotionTools(fetchImpl: FetchLike = fetch) {
         const dataSourceIndex = readDataSourceIndex(params);
         const maxRecords = readInteger(params, "max_records", 100, MAX_QUERY_RECORDS);
         const startCursor = readString(params, "start_cursor", { maxLength: 512 });
-        return jsonResult(
+        return compactJsonResult(
           await wellnessReader().query(dataSourceIndex, maxRecords, startCursor, signal),
         );
       },
@@ -996,20 +1187,32 @@ export function createCloudbathNotionTools(fetchImpl: FetchLike = fetch) {
       name: "wellness_notion_get_record",
       label: "Wellness Notion Get Record",
       description:
-        "READ ONLY. Retrieve one record only after proving it belongs to a data source discovered beneath the configured Wellness root page. Cannot mutate Notion.",
+        "READ ONLY. Retrieve records only after proving they belong to a data source discovered beneath the configured Wellness root page. Query and search results already include every property, so use this only when a known record's details are missing; pass all such IDs together in record_ids rather than one call per record. Cannot mutate Notion.",
       parameters: WellnessGetRecordSchema,
       execute: async (_toolCallId: string, rawParams: unknown, signal?: AbortSignal) => {
         const params = paramsRecord(rawParams);
         assertAllowedKeys(params, WELLNESS_GET_KEYS);
-        const recordId = readString(params, "record_id", { required: true })!;
-        return jsonResult(await wellnessReader().getRecord(recordId, signal));
+        const recordId = readString(params, "record_id");
+        const recordIds = readRecordIds(params);
+        if (Boolean(recordId) === Boolean(recordIds)) {
+          throw new Error("Provide exactly one of record_id or record_ids");
+        }
+        const result = await wellnessReader().getRecords(recordIds ?? [recordId!], signal);
+        if (recordIds) {
+          return compactJsonResult(result);
+        }
+        const [record] = result.records;
+        if (!record) {
+          throw new Error("Wellness record is outside the allowed root page or does not exist");
+        }
+        return compactJsonResult(record);
       },
     },
     {
       name: "wellness_notion_search",
       label: "Wellness Notion Search",
       description:
-        "READ ONLY. Search property values only inside data sources discovered beneath the configured Wellness root page; never workspace-wide. Cannot mutate Notion.",
+        "READ ONLY. Search property values only inside data sources discovered beneath the configured Wellness root page; never workspace-wide. Each match already carries every property as a plain value; do not fetch matches one by one to read them. Cannot mutate Notion.",
       parameters: WellnessSearchSchema,
       execute: async (_toolCallId: string, rawParams: unknown, signal?: AbortSignal) => {
         const params = paramsRecord(rawParams);
@@ -1022,7 +1225,7 @@ export function createCloudbathNotionTools(fetchImpl: FetchLike = fetch) {
           500,
           MAX_SEARCH_RECORDS,
         );
-        return jsonResult(
+        return compactJsonResult(
           await wellnessReader().search(query, maxResults, maxRecordsScanned, signal),
         );
       },
