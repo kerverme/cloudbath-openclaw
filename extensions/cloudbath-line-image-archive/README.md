@@ -459,6 +459,13 @@ tool is explicitly allowlisted:
   left out, so a 100-row query stays within the model's tool-result budget.
   `wellness_notion_get_record` takes one `record_id` or up to 100 `record_ids`; a batch returns the
   records it found in requested order and lists the rest under `missing`.
+- A read-only business-data question from the bound LINE owner ("Cashflow ใช้ไปเท่าไร",
+  "รายจ่ายล่าสุดคืออะไร", "เดือนนี้ใช้ไปเท่าไร") is answered before the agent runs. The plugin
+  picks the table the question names (or the one this conversation just asked about, for 30
+  minutes; or the only bookkeeping-titled table for a money question), reads every row of it
+  in one operation, computes totals, the money-in/out split, the latest batch and any named
+  period in code, and makes one tool-less model call to phrase the answer. Anything it cannot
+  place plainly, or any failure, goes to the agent unchanged.
 - `construction_upload_create` and `construction_upload_update` write only allowlisted
   properties in the Construction Upload Inbox. Creation always uses the fixed data source, and
   updates resolve a page by its `Record ID` inside that data source rather than accepting a page
