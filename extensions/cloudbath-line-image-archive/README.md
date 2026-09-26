@@ -453,7 +453,12 @@ tool is explicitly allowlisted:
 - `wellness_notion_query`, `wellness_notion_get_record`, and `wellness_notion_search` are
   read-only and fixed to the Wellness project root page. They discover only direct
   `child_database` blocks beneath that root, query those databases' data sources, and never use
-  Notion's workspace-wide search endpoint.
+  Notion's workspace-wide search endpoint. Records come back as compact JSON with plain property
+  values (text, numbers, dates, option names, people names, relation ids, formula and rollup
+  results); Notion type wrappers, option colors, avatars, and signed Notion-hosted file links are
+  left out, so a 100-row query stays within the model's tool-result budget.
+  `wellness_notion_get_record` takes one `record_id` or up to 100 `record_ids`; a batch returns the
+  records it found in requested order and lists the rest under `missing`.
 - `construction_upload_create` and `construction_upload_update` write only allowlisted
   properties in the Construction Upload Inbox. Creation always uses the fixed data source, and
   updates resolve a page by its `Record ID` inside that data source rather than accepting a page

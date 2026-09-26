@@ -10,6 +10,10 @@ on:
       - "test/session-model-selection-race.integration.test.ts"
       - "test/model-control-dispatch.integration.test.ts"
       - "test/cloudbath-referent-gate.integration.test.ts"
+      - "test/cloudbath-notion-tool-loop.integration.test.ts"
+      - "src/agents/embedded-agent-runner/tool-result-*.ts"
+      - "src/agents/embedded-agent-runner/run/attempt.ts"
+      - "src/agents/embedded-agent-runner/run/attempt.spawn-workspace.context-engine.test.ts"
       - "src/sessions/session-model-selection*.ts"
       - "src/gateway/sessions-patch.ts"
       - "src/plugin-sdk/model-session-runtime.ts"
@@ -226,6 +230,16 @@ jobs:
             ui/src/pages/chat/components/chat-message.test.ts \
             ui/src/pages/chat/components/chat-tool-cards.test.ts
 
+      - name: Run tool-loop context and Notion payload tests
+        if: steps.dependencies.outcome == 'success' && !cancelled()
+        run: |
+          node scripts/run-vitest.mjs run \
+            src/agents/embedded-agent-runner/tool-result-context-guard.test.ts \
+            src/agents/embedded-agent-runner/tool-result-truncation.test.ts \
+            src/agents/embedded-agent-runner/run/attempt.spawn-workspace.context-engine.test.ts \
+            extensions/cloudbath-line-image-archive/src/notion-tools.test.ts \
+            test/cloudbath-notion-tool-loop.integration.test.ts
+
       - name: Typecheck core
         if: steps.dependencies.outcome == 'success' && !cancelled()
         run: pnpm tsgo:core
@@ -314,6 +328,11 @@ jobs:
             ui/src/pages/chat/components/chat-thread.ts
             ui/src/pages/chat/components/chat-tool-cards.ts
             ui/src/pages/chat/components/chat-tool-cards.test.ts
+            src/agents/embedded-agent-runner/tool-result-context-guard.ts
+            src/agents/embedded-agent-runner/tool-result-context-guard.test.ts
+            src/agents/embedded-agent-runner/run/attempt.ts
+            src/agents/embedded-agent-runner/run/attempt.spawn-workspace.context-engine.test.ts
+            test/cloudbath-notion-tool-loop.integration.test.ts
           )
           if ! pnpm exec oxfmt --check --threads=1 "${paths[@]}"; then
             pnpm exec oxfmt --write --threads=1 "${paths[@]}"
@@ -373,6 +392,16 @@ jobs:
             ui/src/pages/chat/components/chat-thread.ts \
             ui/src/pages/chat/components/chat-tool-cards.ts \
             ui/src/pages/chat/components/chat-tool-cards.test.ts
+
+      - name: Lint tool-loop context guard
+        if: steps.dependencies.outcome == 'success' && !cancelled()
+        run: |
+          node scripts/run-oxlint.mjs \
+            src/agents/embedded-agent-runner/tool-result-context-guard.ts \
+            src/agents/embedded-agent-runner/tool-result-context-guard.test.ts \
+            src/agents/embedded-agent-runner/run/attempt.ts \
+            src/agents/embedded-agent-runner/run/attempt.spawn-workspace.context-engine.test.ts \
+            test/cloudbath-notion-tool-loop.integration.test.ts
 
       - name: Lint scoped LINE changes
         if: steps.dependencies.outcome == 'success' && !cancelled()
