@@ -4,12 +4,20 @@ import type { FollowupRun } from "./queue.js";
 
 const hoisted = vi.hoisted(() => {
   const resolveEffectiveModelFallbacksMock = vi.fn();
+  const isUserPinnedModelSelectionMock = vi.fn((_facts: unknown) => false);
   const getChannelPluginMock = vi.fn();
   const isReasoningTagProviderMock = vi.fn();
-  return { resolveEffectiveModelFallbacksMock, getChannelPluginMock, isReasoningTagProviderMock };
+  return {
+    resolveEffectiveModelFallbacksMock,
+    isUserPinnedModelSelectionMock,
+    getChannelPluginMock,
+    isReasoningTagProviderMock,
+  };
 });
 
 vi.mock("../../agents/agent-scope.js", () => ({
+  isUserPinnedModelSelection: (facts: { hasSessionModelOverride: boolean }) =>
+    hoisted.isUserPinnedModelSelectionMock(facts),
   resolveEffectiveModelFallbacks: (...args: unknown[]) =>
     hoisted.resolveEffectiveModelFallbacksMock(...args),
 }));
