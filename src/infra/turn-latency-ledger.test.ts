@@ -13,6 +13,7 @@ import {
   createTurnLatencyLedger,
   currentLlmCallReason,
   currentTurnLatencyLedger,
+  formatTurnLatencyRecord,
   runWithLlmCallReason,
   runWithTurnLatencyLedger,
   type TurnLatencyRecord,
@@ -60,6 +61,24 @@ async function recordOrdinaryLineTurn(): Promise<TurnLatencyRecord> {
 }
 
 describe("the record names every call in the turn", () => {
+  it("prints which model each call went to, so a call off the session's model shows", () => {
+    const turn = ledger();
+    turn
+      .openModelCall({
+        provider: "openrouter",
+        model: "openai/gpt-6-luna",
+        callReason: "main_agent",
+      })
+      .complete();
+    turn.openModelCall({ callReason: "plugin_llm" }).complete();
+
+    const line = formatTurnLatencyRecord(turn.finish({ outcome: "completed" })!);
+
+    expect(line).toContain("main_agent[openrouter/openai/gpt-6-luna]=");
+    // A call with no model identity keeps the bare reason.
+    expect(line).toMatch(/ plugin_llm=/u);
+  });
+
   it("proves the ordinary LINE path is the referent helper then the agent", async () => {
     const record = await recordOrdinaryLineTurn();
 

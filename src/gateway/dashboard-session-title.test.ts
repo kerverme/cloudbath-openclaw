@@ -69,6 +69,8 @@ describe("maybeGenerateDashboardSessionTitle", () => {
         "Generate a concise session title (3-6 words, max 60 characters) from the user's first message. Use the same language as the message. No emoji. Return only the title.",
       cfg: {},
       agentId: "main",
+      // The title is part of this session's turn: a pinned model labels it.
+      sessionKey: "agent:main:dashboard:chat-1",
       maxLength: 60,
     });
     expect(updateSessionEntry).toHaveBeenCalledWith(

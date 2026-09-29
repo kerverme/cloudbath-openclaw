@@ -265,6 +265,15 @@ two-party event loops that do not go through the shared inbound reply runner.
     result includes provider/model/agent attribution plus normalized token,
     cache, and estimated cost usage when available.
 
+    A completion that names no `model` and runs on a session's behalf (inside a
+    turn of that session, such as a `before_dispatch` handler or a tool call, or
+    through a session-bound capability) uses the model the user explicitly
+    selected for that session, the same model the session's agent turn runs on.
+    Inside a running agent attempt it is the model that attempt executes. Only a
+    session with no explicit selection uses the agent's configured model. When
+    the selected model cannot be prepared, the call fails; it does not fall back
+    to the configured model.
+
     <Warning>
     Model overrides require operator opt-in via `plugins.entries.<id>.llm.allowModelOverride: true` in config. Use `plugins.entries.<id>.llm.allowedModels` to restrict trusted plugins to specific canonical `provider/model` targets. Cross-agent completions require `plugins.entries.<id>.llm.allowAgentIdOverride: true`.
     </Warning>

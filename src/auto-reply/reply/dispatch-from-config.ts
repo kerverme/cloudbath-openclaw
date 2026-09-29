@@ -109,6 +109,10 @@ import type { PluginHookReplyDispatchEvent } from "../../plugins/hook-types.js";
 import { isAcpSessionKey } from "../../routing/session-key.js";
 import { resolveSendPolicy } from "../../sessions/send-policy.js";
 import type { SessionWorkAdmissionLease } from "../../sessions/session-lifecycle-admission.js";
+import {
+  runWithSessionModelScope,
+  type SessionModelScope,
+} from "../../sessions/session-model-scope.js";
 import { createLazyImportLoader } from "../../shared/lazy-promise.js";
 import { resolveSilentReplyPolicyFromPolicies } from "../../shared/silent-reply-policy.js";
 import { createTtsDirectiveTextStreamCleaner } from "../../tts/directives.js";
@@ -1756,6 +1760,10 @@ async function dispatchReplyFromConfigInner(
       );
     }
   };
+  // The session this turn's text-model calls belong to. Bound below once the
+  // dispatch resolves it, and entered by every traced phase the way the latency
+  // ledger is, so plugin completions inherit the session's pinned model.
+  const turnModelScope: { current?: SessionModelScope } = {};
   const traceReplyPhase = <T>(name: string, run: () => Promise<T> | T): Promise<T> =>
     replyHotPathTiming.measure(name, () =>
       turnLatency.phase(TURN_LATENCY_PHASE_NAMES[name] ?? name, () =>
@@ -1763,11 +1771,13 @@ async function dispatchReplyFromConfigInner(
         // provider request happens inside a traced phase, and this keeps the
         // carrier's lifetime equal to the phase it is measuring.
         runWithTurnLatencyLedger(turnLatency, () =>
-          measureDiagnosticsTimelineSpan(name, run, {
-            phase: "agent-turn",
-            config: cfg,
-            attributes: traceAttributes,
-          }),
+          runWithSessionModelScope(turnModelScope.current, () =>
+            measureDiagnosticsTimelineSpan(name, run, {
+              phase: "agent-turn",
+              config: cfg,
+              attributes: traceAttributes,
+            }),
+          ),
         ),
       ),
     );
@@ -1937,6 +1947,10 @@ async function dispatchReplyFromConfigInner(
     config: cfg,
     fallbackAgentId: ctx.AgentId,
   });
+  const turnSessionKey = sessionStoreEntry.sessionKey ?? sessionKey;
+  turnModelScope.current = turnSessionKey
+    ? { sessionKey: turnSessionKey, agentId: sessionAgentId }
+    : undefined;
   const sessionAgentCfg = resolveAgentConfig(cfg, sessionAgentId);
   const verboseProgress = createShouldEmitVerboseProgress({
     agentId: sessionAgentId,
