@@ -37,7 +37,11 @@ import {
   validateSessionsResolveParams,
   validateSessionsSendParams,
 } from "../../../packages/gateway-protocol/src/index.js";
-import { resolveAgentWorkspaceDir, resolveDefaultAgentId } from "../../agents/agent-scope.js";
+import {
+  hasUserPinnedSessionModel,
+  resolveAgentWorkspaceDir,
+  resolveDefaultAgentId,
+} from "../../agents/agent-scope.js";
 import {
   abortEmbeddedAgentRun,
   isEmbeddedAgentRunActive,
@@ -3315,6 +3319,7 @@ export const sessionsHandlers: GatewayRequestHandlers = {
                   ? resolvePersistedSessionRuntimeId(latestEntry)
                   : latestEntry.agentHarnessId,
               modelSelectionLocked: latestEntry.modelSelectionLocked === true,
+              sessionModelPinned: hasUserPinnedSessionModel(latestEntry),
               thinkLevel: normalizeThinkLevel(latestEntry.thinkingLevel),
               reasoningLevel: normalizeReasoningLevel(latestEntry.reasoningLevel),
               bashElevated: {

@@ -393,6 +393,7 @@ async function compactResolvedContextEngine(
     modelId: params.model,
     authProfileId: params.authProfileId,
     modelSelectionLocked: params.modelSelectionLocked,
+    sessionModelPinned: params.sessionModelPinned,
     defaultProvider: DEFAULT_PROVIDER,
     defaultModel: DEFAULT_MODEL,
   });
@@ -442,6 +443,7 @@ async function compactResolvedContextEngine(
     authProfileId: params.authProfileId,
     harnessRuntime: selectedHarnessRuntime,
     modelSelectionLocked: params.modelSelectionLocked,
+    sessionModelPinned: params.sessionModelPinned,
     defaultProvider: DEFAULT_PROVIDER,
     defaultModel: DEFAULT_MODEL,
   });
@@ -1058,6 +1060,7 @@ function buildCompactionContextEngineRuntimeContext(params: {
       modelId: params.params.model,
       harnessRuntime: params.harnessRuntime,
       modelSelectionLocked: params.params.modelSelectionLocked,
+      sessionModelPinned: params.params.sessionModelPinned,
       modelFallbacksOverride: params.params.modelFallbacksOverride,
       thinkLevel: params.params.thinkLevel,
       reasoningLevel: params.params.reasoningLevel,

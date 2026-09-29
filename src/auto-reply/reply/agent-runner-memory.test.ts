@@ -141,6 +141,9 @@ type CompactEmbeddedAgentSessionParams = {
   force?: boolean;
   forcePreflight?: boolean;
   modelSelectionLocked?: boolean;
+  sessionModelPinned?: boolean;
+  provider?: string;
+  model?: string;
   preflightRequired?: boolean;
   preflightCompactionTrigger?: string;
   sessionFile?: string;
@@ -966,6 +969,60 @@ describe("runMemoryFlushIfNeeded", () => {
     expect(agentCall.authProfileIdSource).toBeUndefined();
   });
 
+  it("flushes a pinned session on the owner's model, not the maintenance override", async () => {
+    registerMemoryFlushPlanResolverForTest(() => ({
+      softThresholdTokens: 4_000,
+      forceFlushTranscriptBytes: 1_000_000_000,
+      reserveTokensFloor: 20_000,
+      model: "openrouter/deepseek/deepseek-v4-flash-0731",
+      prompt: "Pre-compaction memory flush.\nNO_REPLY",
+      systemPrompt: "Write memory to memory/YYYY-MM-DD.md.",
+      relativePath: "memory/2023-11-14.md",
+    }));
+    const sessionEntry: SessionEntry = {
+      sessionId: "session",
+      updatedAt: Date.now(),
+      totalTokens: 80_000,
+      compactionCount: 1,
+    };
+
+    await runMemoryFlushIfNeeded({
+      cfg: {
+        agents: {
+          defaults: {
+            model: {
+              primary: "openrouter/deepseek/deepseek-v4-flash-0731",
+              fallbacks: ["openrouter/qwen/qwen3.6-plus"],
+            },
+            compaction: { memoryFlush: { model: "openrouter/deepseek/deepseek-v4-flash-0731" } },
+          },
+        },
+      },
+      followupRun: createTestFollowupRun({
+        provider: "openrouter",
+        model: "openai/gpt-6-luna",
+        hasSessionModelOverride: true,
+        modelOverrideSource: "user",
+      }),
+      sessionCtx: { Provider: "line" } as unknown as TemplateContext,
+      defaultModel: "openrouter/deepseek/deepseek-v4-flash-0731",
+      agentCfgContextTokens: 100_000,
+      resolvedVerboseLevel: "off",
+      sessionEntry,
+      sessionStore: { main: sessionEntry },
+      sessionKey: "main",
+      isHeartbeat: false,
+      replyOperation: createReplyOperation(),
+    });
+
+    const fallbackCall = requireModelFallbackCall();
+    expect([fallbackCall.provider, fallbackCall.model]).toEqual([
+      "openrouter",
+      "openai/gpt-6-luna",
+    ]);
+    expect(fallbackCall.fallbacksOverride).toEqual([]);
+  });
+
   it("loads the selected harness before memory-flush fallback preflight", async () => {
     const cfg = {
       agents: {
@@ -1357,6 +1414,61 @@ describe("runMemoryFlushIfNeeded", () => {
     expect(compactCall.sessionKey).toBe("agent:main:main");
     expect(compactCall.cwd).toBe("/tmp/task-repo");
     expect(compactCall.sandboxSessionKey).toBe("agent:main:telegram:default:direct:12345");
+  });
+
+  it.each([
+    [
+      "an owner-pinned session",
+      { hasSessionModelOverride: true, modelOverrideSource: "user" },
+      true,
+    ],
+    ["a session on the configured default", {}, false],
+  ] as const)("tells preflight compaction whether it runs %s", async (_label, facts, pinned) => {
+    const sessionFile = path.join(rootDir, "session.jsonl");
+    await fs.writeFile(
+      sessionFile,
+      `${JSON.stringify({ message: { role: "user", content: "x".repeat(5_000) } })}\n`,
+      "utf8",
+    );
+    registerMemoryFlushPlanResolverForTest(() => ({
+      softThresholdTokens: 1,
+      forceFlushTranscriptBytes: 1_000_000_000,
+      reserveTokensFloor: 0,
+      prompt: "Pre-compaction memory flush.\nNO_REPLY",
+      systemPrompt: "Write memory to memory/YYYY-MM-DD.md.",
+      relativePath: "memory/2023-11-14.md",
+    }));
+    const sessionEntry: SessionEntry = {
+      sessionId: "session",
+      sessionFile,
+      updatedAt: Date.now(),
+      totalTokens: 120,
+      totalTokensFresh: true,
+    };
+
+    await runPreflightCompactionIfNeeded({
+      cfg: { agents: { defaults: { compaction: { memoryFlush: {} } } } },
+      followupRun: createTestFollowupRun({
+        sessionId: "session",
+        sessionFile,
+        sessionKey: "agent:main:main",
+        provider: "openrouter",
+        model: "openai/gpt-6-luna",
+        ...facts,
+      }),
+      defaultModel: "openrouter/deepseek/deepseek-v4-flash-0731",
+      agentCfgContextTokens: 100,
+      sessionEntry,
+      sessionStore: { "agent:main:main": sessionEntry },
+      sessionKey: "agent:main:main",
+      storePath: path.join(rootDir, "sessions.json"),
+      isHeartbeat: false,
+      replyOperation: createReplyOperation(),
+    });
+
+    const compactCall = requireCompactEmbeddedAgentSessionCall();
+    expect([compactCall.provider, compactCall.model]).toEqual(["openrouter", "openai/gpt-6-luna"]);
+    expect(compactCall.sessionModelPinned).toBe(pinned);
   });
 
   it.each([

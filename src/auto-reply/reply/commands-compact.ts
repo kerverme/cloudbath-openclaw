@@ -4,7 +4,11 @@ import {
   normalizeLowercaseStringOrEmpty,
   normalizeOptionalString,
 } from "@openclaw/normalization-core/string-coerce";
-import { resolveAgentDir, resolveSessionAgentId } from "../../agents/agent-scope.js";
+import {
+  hasUserPinnedSessionModel,
+  resolveAgentDir,
+  resolveSessionAgentId,
+} from "../../agents/agent-scope.js";
 import { resolveContextTokensForModel } from "../../agents/context.js";
 import { classifyCompactionReason } from "../../agents/embedded-agent-runner/compact-reasons.js";
 import { resolveAgentHarnessPolicy } from "../../agents/harness/policy.js";
@@ -285,6 +289,7 @@ export const handleCompactCommand: CommandHandler = async (params) => {
         ? resolvePersistedSessionRuntimeId(targetSessionEntry)
         : targetSessionEntry.agentHarnessId,
     modelSelectionLocked: targetSessionEntry.modelSelectionLocked === true,
+    sessionModelPinned: hasUserPinnedSessionModel(targetSessionEntry),
     thinkLevel: params.resolvedThinkLevel ?? (await params.resolveDefaultThinkingLevel()),
     bashElevated: {
       enabled: false,

@@ -2714,6 +2714,7 @@ async function runEmbeddedAgentInternal(
             agentHarnessId: agentHarness.id,
             agentHarnessRuntimeOverride: agentHarness.id,
             modelSelectionLocked: params.modelSelectionLocked,
+            sessionModelPinned: params.sessionModelPinned,
             ...(params.onSuccessfulAuthBinding || expectedHarnessArtifact
               ? { captureRuntimeArtifact: true }
               : {}),
@@ -3154,6 +3155,7 @@ async function runEmbeddedAgentInternal(
                     modelId,
                     harnessRuntime: agentHarness.id,
                     modelSelectionLocked: params.modelSelectionLocked,
+                    sessionModelPinned: params.sessionModelPinned,
                     modelFallbacksOverride: params.modelFallbacksOverride,
                     thinkLevel,
                     reasoningLevel: params.reasoningLevel,
@@ -3381,6 +3383,7 @@ async function runEmbeddedAgentInternal(
                     modelId,
                     harnessRuntime: agentHarness.id,
                     modelSelectionLocked: params.modelSelectionLocked,
+                    sessionModelPinned: params.sessionModelPinned,
                     modelFallbacksOverride: params.modelFallbacksOverride,
                     thinkLevel,
                     reasoningLevel: params.reasoningLevel,

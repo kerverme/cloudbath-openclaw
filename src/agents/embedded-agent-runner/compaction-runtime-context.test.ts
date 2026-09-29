@@ -240,6 +240,37 @@ describe("buildEmbeddedCompactionRuntimeContext", () => {
     });
   });
 
+  it("summarizes a pinned session on its own model, not compaction.model", () => {
+    const config = {
+      agents: { defaults: { compaction: { model: "openrouter/deepseek/deepseek-v4-flash-0731" } } },
+    } as unknown as OpenClawConfig;
+    const target = {
+      config,
+      provider: "openrouter",
+      modelId: "openai/gpt-6-luna",
+      authProfileId: "openrouter:default",
+    };
+
+    expect(resolveEmbeddedCompactionTarget({ ...target, sessionModelPinned: true })).toEqual({
+      provider: "openrouter",
+      model: "openai/gpt-6-luna",
+      authProfileId: "openrouter:default",
+    });
+    const context = buildEmbeddedCompactionRuntimeContext({
+      ...target,
+      workspaceDir: "/tmp/workspace",
+      agentDir: "/tmp/agent",
+      sessionModelPinned: true,
+    });
+    expect(context).toMatchObject({
+      provider: "openrouter",
+      model: "openai/gpt-6-luna",
+      sessionModelPinned: true,
+    });
+    // A session without a pin keeps the operator's override.
+    expect(resolveEmbeddedCompactionTarget(target).model).toBe("deepseek/deepseek-v4-flash-0731");
+  });
+
   it("keeps configured OpenAI provider with legacy Codex auth profiles (#86373)", () => {
     const result = resolveEmbeddedCompactionTarget({
       provider: "openai",

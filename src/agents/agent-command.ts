@@ -95,6 +95,7 @@ import {
   entryMatchesAutoFallbackPrimaryProbe,
   hasLegacyAutoFallbackWithoutOrigin,
   hasSessionAutoModelFallbackProvenance,
+  isUserPinnedModelSelection,
   listAgentIds,
   markAutoFallbackPrimaryProbe,
   resolveAutoFallbackPrimaryProbe,
@@ -105,6 +106,7 @@ import {
   resolveEffectiveModelFallbacks,
   resolveSessionAgentId,
   resolveAgentWorkspaceDir,
+  type SessionModelOverrideFacts,
 } from "./agent-scope.js";
 import { isStoredCredentialCompatibleWithAuthProvider } from "./auth-profiles/order.js";
 import { clearSessionAuthProfileOverride } from "./auth-profiles/session-override.js";
@@ -2197,19 +2199,23 @@ async function agentCommandInternal(
             ? getGeneratedMediaTaskIdsForSessionKey(sessionKey)
             : new Set<string>();
           const spawnedBy = normalizedSpawned.spawnedBy ?? sessionEntry?.spawnedBy;
+          const sessionModelFacts: SessionModelOverrideFacts = {
+            hasSessionModelOverride:
+              hasExplicitRunOverride || Boolean(storedProviderOverride || storedModelOverride),
+            modelOverrideSource: hasExplicitRunOverride ? "user" : storedModelOverrideSource,
+            hasAutoFallbackProvenance: hasExplicitRunOverride
+              ? false
+              : hasStoredAutoFallbackProvenance,
+          };
           const effectiveFallbacksOverride = isModelSelectionLocked(sessionEntry)
             ? []
             : resolveEffectiveModelFallbacks({
                 cfg,
                 agentId: sessionAgentId,
                 sessionKey,
-                hasSessionModelOverride:
-                  hasExplicitRunOverride || Boolean(storedProviderOverride || storedModelOverride),
-                modelOverrideSource: hasExplicitRunOverride ? "user" : storedModelOverrideSource,
-                hasAutoFallbackProvenance: hasExplicitRunOverride
-                  ? false
-                  : hasStoredAutoFallbackProvenance,
+                ...sessionModelFacts,
               });
+          const sessionModelPinned = isUserPinnedModelSelection(sessionModelFacts);
 
           let fallbackAttemptIndex = 0;
           const fallbackRuntimeState: { originRuntime?: "cli" | "embedded" } = {};
@@ -2352,6 +2358,7 @@ async function agentCommandInternal(
                 modelOverride,
                 configuredAuthProfileId,
                 modelFallbacksOverride: effectiveFallbacksOverride,
+                sessionModelPinned,
                 originalProvider: provider,
                 cfg,
                 sessionEntry: attemptSessionEntry,
