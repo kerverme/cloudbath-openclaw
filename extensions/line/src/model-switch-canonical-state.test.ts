@@ -242,7 +242,7 @@ describe("the switch writes what the Control UI picker writes", () => {
     });
   });
 
-  it("naming the default model resets the override instead of pinning it", async () => {
+  it("naming the default model pins it; it is not a reset", async () => {
     await seedSelectedModel(LUNA);
     const { early } = createLineModelControlRouter({
       pendingStore: createMemoryPendingStore(now),
@@ -259,10 +259,14 @@ describe("the switch writes what the Control UI picker writes", () => {
     const result = await early(ownerEvent("switch to deepseek-v4-flash-0731"), CTX);
 
     expect(result?.handled).toBe(true);
-    const entry = readEntry();
-    expect(entry?.providerOverride).toBeUndefined();
-    expect(entry?.modelOverride).toBeUndefined();
-    expect(entry?.liveModelSwitchPending).toBe(true);
+    // A pinned default owns every text call and has no cross-model fallback,
+    // exactly like any other pin.
+    expect(readEntry()).toMatchObject({
+      providerOverride: "openrouter",
+      modelOverride: DEEPSEEK_FLASH,
+      modelOverrideSource: "user",
+      liveModelSwitchPending: true,
+    });
   });
 });
 

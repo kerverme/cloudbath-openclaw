@@ -1,5 +1,9 @@
 // A user's model selection is applied one way on every surface.
 import { describe, expect, it } from "vitest";
+import {
+  hasUserPinnedSessionModel,
+  resolveEffectiveModelFallbacks,
+} from "../agents/agent-scope.js";
 import type { SessionEntry } from "../config/sessions.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { applyUserSessionModelSelection } from "./session-model-selection.js";
@@ -34,7 +38,7 @@ describe("applyUserSessionModelSelection", () => {
     expect(next.modelProvider).toBeUndefined();
   });
 
-  it("choosing the default is a reset, not a pinned copy of it", () => {
+  it("choosing the configured default pins it; only an explicit reset clears the pin", () => {
     const next = entry({
       providerOverride: LUNA.provider,
       modelOverride: LUNA.model,
@@ -48,10 +52,31 @@ describe("applyUserSessionModelSelection", () => {
       defaultModel: DEFAULT_MODEL,
     });
 
-    expect(next.providerOverride).toBeUndefined();
-    expect(next.modelOverride).toBeUndefined();
-    expect(next.modelOverrideSource).toBeUndefined();
-    expect(next.liveModelSwitchPending).toBe(true);
+    // A pin on the default still owns every text call and has no fallbacks.
+    expect(next).toMatchObject({
+      providerOverride: DEFAULT_MODEL.provider,
+      modelOverride: DEFAULT_MODEL.model,
+      modelOverrideSource: "user",
+      liveModelSwitchPending: true,
+    });
+    expect(hasUserPinnedSessionModel(next)).toBe(true);
+    expect(
+      resolveEffectiveModelFallbacks({
+        cfg: {
+          agents: {
+            defaults: {
+              model: {
+                primary: "openrouter/qwen/qwen3.8-27b",
+                fallbacks: ["openrouter/deepseek/deepseek-v4-flash-0731"],
+              },
+            },
+          },
+        } as OpenClawConfig,
+        agentId: "main",
+        hasSessionModelOverride: true,
+        modelOverrideSource: next.modelOverrideSource,
+      }),
+    ).toEqual([]);
   });
 
   it("keeps a pinned auth profile that still authenticates the target provider", () => {

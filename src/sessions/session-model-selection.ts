@@ -55,9 +55,11 @@ export function shouldPreserveSessionAuthProfileOverride(params: {
 }
 
 /**
- * Applies a user-selected model to a session entry. Choosing the agent's
- * default clears the override (a reset, not a pinned copy of the default), and
- * the switch is marked live so an in-flight run picks it up.
+ * Applies a user-selected model to a session entry and marks the switch live so
+ * an in-flight run picks it up. Choosing the model that happens to be the
+ * agent's default still pins it: a pin owns every text call and disables
+ * cross-model fallback, and only an explicit reset (`/model default`,
+ * `sessions.patch` with `model: null`) returns the session to the default.
  */
 export function applyUserSessionModelSelection(params: {
   cfg: OpenClawConfig;
@@ -67,11 +69,9 @@ export function applyUserSessionModelSelection(params: {
   profileOverride?: string;
 }): { updated: boolean } {
   const { cfg, entry, selection, defaultModel } = params;
-  const isDefault =
-    selection.provider === defaultModel.provider && selection.model === defaultModel.model;
   return applyModelOverrideToSessionEntry({
     entry,
-    selection: { provider: selection.provider, model: selection.model, isDefault },
+    selection: { provider: selection.provider, model: selection.model },
     profileOverride: params.profileOverride,
     preserveAuthProfileOverride: shouldPreserveSessionAuthProfileOverride({
       cfg,

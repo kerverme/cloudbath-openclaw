@@ -1138,7 +1138,7 @@ describe("/model chat UX", () => {
     expect(resolved.modelSelection).toEqual({
       provider: "anthropic",
       model: "claude-opus-4-6",
-      isDefault: true,
+      isDefault: false,
     });
     expect(resolved.errorText).toBeUndefined();
   });
@@ -1171,7 +1171,7 @@ describe("/model chat UX", () => {
     expect(resolved.errorText).toContain("openclaw plugins enable codex");
   });
 
-  it("treats explicit default /model selection as resettable default", () => {
+  it("pins an explicitly named default model; only /model default resets", () => {
     const resolved = resolveModelSelectionForCommand({
       command: "/model anthropic/claude-opus-4-6",
       allowedModelKeys: new Set(["anthropic/claude-opus-4-6", "openai/gpt-4o"]),
@@ -1182,7 +1182,7 @@ describe("/model chat UX", () => {
     expect(resolved.modelSelection).toEqual({
       provider: "anthropic",
       model: "claude-opus-4-6",
-      isDefault: true,
+      isDefault: false,
     });
   });
 
