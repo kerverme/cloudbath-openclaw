@@ -784,6 +784,7 @@ describe("runtime.llm.complete", () => {
  */
 describe("runtime.llm.complete inside a session with a pinned model", () => {
   const SESSION = "agent:main:line:group:c1234567890abcdef";
+  const ASSISTANT_SESSION = "agent:assistant:line:group:c1234567890abcdef";
   const LUNA = { providerOverride: "openrouter", modelOverride: "openai/gpt-6-luna" } as const;
 
   // A real SQLite session store: the pin resolver reads the row the same way
@@ -804,9 +805,9 @@ describe("runtime.llm.complete inside a session with a pinned model", () => {
     fs.rmSync(stateDir, { recursive: true, force: true });
   });
 
-  async function pin(fields: Partial<SessionEntry>) {
+  async function pin(fields: Partial<SessionEntry>, agentId = "main", sessionKey = SESSION) {
     await replaceSessionEntry(
-      { storePath: resolveStorePath(undefined, { agentId: "main" }), sessionKey: SESSION },
+      { storePath: resolveStorePath(undefined, { agentId }), sessionKey },
       { sessionId: "s1", updatedAt: Date.now(), ...fields },
     );
   }
@@ -938,17 +939,89 @@ describe("runtime.llm.complete inside a session with a pinned model", () => {
     });
   });
 
-  it("uses the pin when a trusted plugin targets another agent inside the turn", async () => {
-    await pin({ ...LUNA, modelOverrideSource: "user" });
+  // The pin owns the text model only. An authorized agent override keeps its
+  // agent: that agent's directory, credentials and model catalog prepare the
+  // conversation's model, and the conversation's auth profile stays behind.
+  function prepareForEachAgent() {
+    hoisted.prepareSimpleCompletionModelForAgent.mockImplementation(
+      async (params: { agentId: string; modelRef?: string }) => {
+        const prepared = createPreparedModel(params.modelRef ?? "gpt-5.5");
+        return {
+          ...prepared,
+          selection: { ...prepared.selection, agentDir: `/tmp/${params.agentId}` },
+        };
+      },
+    );
+  }
 
-    await runWithSessionModelScope({ sessionKey: SESSION, agentId: "main" }, () =>
-      trustedComplete({ agentId: "research", model: "openai/gpt-5.4" }),
+  it("keeps an authorized agent override and runs it on the pin", async () => {
+    await pin(
+      { ...LUNA, modelOverrideSource: "user", authProfileOverride: "openrouter:work" },
+      "assistant",
+      ASSISTANT_SESSION,
+    );
+    prepareForEachAgent();
+
+    const result = await runWithSessionModelScope(
+      { sessionKey: ASSISTANT_SESSION, agentId: "assistant" },
+      () =>
+        trustedComplete({
+          agentId: "creative",
+          model: "openrouter/deepseek/deepseek-v4-flash-0731",
+        }),
+    );
+
+    const prepare = expectSingleCallFirstArg(hoisted.prepareSimpleCompletionModelForAgent, {
+      agentId: "creative",
+      modelRef: "openrouter/openai/gpt-6-luna",
+    });
+    expect(prepare.preferredProfile).toBeUndefined();
+    const completion = requireRecord(
+      hoisted.completeWithPreparedSimpleCompletionModel.mock.calls[0]?.[0],
+      "completion params",
+    );
+    expect(completion.model).toMatchObject({ id: "openrouter/openai/gpt-6-luna" });
+    expect(result.agentId).toBe("creative");
+    expectSingleLogPayload(logger.info as unknown as MockCalls, "plugin llm completion", {
+      agentId: "creative",
+      modelSource: "session",
+      supersededModel: "openrouter/deepseek/deepseek-v4-flash-0731",
+    });
+  });
+
+  it("keeps an authorized agent override and its model when the session is unpinned", async () => {
+    prepareForEachAgent();
+
+    const result = await runWithSessionModelScope(
+      { sessionKey: ASSISTANT_SESSION, agentId: "assistant" },
+      () =>
+        trustedComplete({
+          agentId: "creative",
+          model: "openrouter/deepseek/deepseek-v4-flash-0731",
+        }),
     );
 
     expectSingleCallFirstArg(hoisted.prepareSimpleCompletionModelForAgent, {
-      agentId: "main",
-      modelRef: "openrouter/openai/gpt-6-luna",
+      agentId: "creative",
+      modelRef: "openrouter/deepseek/deepseek-v4-flash-0731",
     });
+    expect(result.agentId).toBe("creative");
+  });
+
+  it("still rejects an unauthorized agent override inside a pinned turn", async () => {
+    await pin({ ...LUNA, modelOverrideSource: "user" }, "assistant", ASSISTANT_SESSION);
+
+    await expect(
+      runWithSessionModelScope({ sessionKey: ASSISTANT_SESSION, agentId: "assistant" }, () =>
+        withPluginRuntimePluginIdScope("plain-plugin", () =>
+          globalRuntime().complete({
+            agentId: "creative",
+            messages: [{ role: "user", content: "q" }],
+          }),
+        ),
+      ),
+    ).rejects.toThrow("Plugin LLM completion cannot override the target agent.");
+    expect(hoisted.prepareSimpleCompletionModelForAgent).not.toHaveBeenCalled();
   });
 
   it("uses the pin over an explicit model for a session-bound authority", async () => {

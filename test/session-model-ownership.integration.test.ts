@@ -41,6 +41,8 @@ const provider = vi.hoisted(() => ({
   config: undefined as OpenClawConfig | undefined,
   /** This turn's requests as `<call reason> <provider>/<model>`, as the turn record logs them. */
   turnCalls: [] as string[],
+  /** The agent each plugin completion was prepared for, in order. */
+  preparedAgents: [] as string[],
 }));
 
 /** One provider request, recorded where and how the model transport records it. */
@@ -94,6 +96,7 @@ vi.mock("../src/agents/simple-completion-runtime.js", async (importOriginal) => 
     prepareSimpleCompletionModelForAgent: async (
       params: Parameters<typeof actual.resolveSimpleCompletionSelectionForAgent>[0],
     ) => {
+      provider.preparedAgents.push(params.agentId);
       const selection = actual.resolveSimpleCompletionSelectionForAgent(params);
       if (!selection) {
         return { error: `No model configured for agent ${params.agentId}.` };
@@ -256,7 +259,9 @@ function productionConfig(home: string, extra: { compactionModel?: string } = {}
   // A plugin the operator trusts to name its own completion model.
   cfg.plugins = {
     ...cfg.plugins,
-    entries: { [EXPLICIT_MODEL_PLUGIN]: { llm: { allowModelOverride: true } } },
+    entries: {
+      [EXPLICIT_MODEL_PLUGIN]: { llm: { allowModelOverride: true, allowAgentIdOverride: true } },
+    },
   };
   // Specialist media models are separate capabilities, never the chat pin.
   cfg.agents!.defaults!.imageGenerationModel = { primary: "openrouter/google/gemini-3-pro-image" };
@@ -359,6 +364,7 @@ async function openConversation(home: string, options: { compactionModel?: strin
   const cfg = productionConfig(home, options);
   provider.config = cfg;
   provider.requests.length = 0;
+  provider.preparedAgents.length = 0;
   provider.failing.clear();
   await replaceSessionEntry(
     { storePath: storePath(), sessionKey: SESSION_KEY },
@@ -536,12 +542,16 @@ async function openConversation(home: string, options: { compactionModel?: strin
    * `before_dispatch` on every turn (inside the turn) or directly (outside any
    * turn, as a background job would).
    */
-  const explicitModelCompletion = (model: string) => () =>
+  const explicitModelCompletion = (model: string, agentId?: string) => () =>
     withPluginRuntimePluginIdScope(EXPLICIT_MODEL_PLUGIN, () =>
-      llm.complete({ model, messages: [{ role: "user", content: "summarize" }] }),
+      llm.complete({
+        model,
+        ...(agentId ? { agentId } : {}),
+        messages: [{ role: "user", content: "summarize" }],
+      }),
     );
-  const completeInEveryTurn = (model: string) => {
-    const complete = explicitModelCompletion(model);
+  const completeInEveryTurn = (model: string, agentId?: string) => {
+    const complete = explicitModelCompletion(model, agentId);
     addTestHook({
       registry,
       pluginId: EXPLICIT_MODEL_PLUGIN,
@@ -788,6 +798,37 @@ describe("an owner-pinned text model owns every text request of the conversation
       provider.requests.length = 0;
       await completeInBackground(QWEN);
       expect(provider.requests).toEqual([QWEN]);
+    });
+  });
+
+  // Multi-agent guard: the pin owns the text model, never the agent. A helper
+  // call an operator authorized to target another agent stays that agent.
+  it("J: an authorized helper call for another agent keeps that agent and runs on the pin", async () => {
+    await inConversation(async ({ ask, completeInEveryTurn }) => {
+      await ask(PIN_LUNA);
+      completeInEveryTurn(DEEPSEEK, "creative");
+      provider.preparedAgents.length = 0;
+
+      const chat = await ask("สวัสดี");
+
+      expect(chat.modelCalls).toEqual([
+        `plugin_llm ${LUNA}`,
+        `main_agent ${LUNA}`,
+        `tool_followup ${LUNA}`,
+      ]);
+      expect(provider.preparedAgents).toEqual(["creative"]);
+      expect(provider.requests).not.toContain(DEEPSEEK);
+    });
+  });
+
+  it("J: unpinned, an authorized helper call keeps its agent and its own model", async () => {
+    await inConversation(async ({ ask, completeInEveryTurn }) => {
+      completeInEveryTurn(QWEN, "creative");
+
+      const chat = await ask("สวัสดี");
+
+      expect(chat.modelCalls[0]).toBe(`plugin_llm ${QWEN}`);
+      expect(provider.preparedAgents).toEqual(["creative"]);
     });
   });
 

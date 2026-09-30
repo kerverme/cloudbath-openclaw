@@ -453,21 +453,23 @@ export function createRuntimeLlm(
       }
 
       // Inside a conversation whose owner pinned a text model, that model is the
-      // only one: it outranks the request's own model and agent (still
-      // policy-checked above) and the agent default. Calls outside a pinned
-      // session keep what they asked for.
+      // only one: it outranks the request's own model (still policy-checked
+      // above) and the agent default. The pin owns the model, not the agent: an
+      // authorized agent override keeps its agent, directory and credentials.
       const sessionAgent = sessionAgentId ? normalizeAgentId(sessionAgentId) : agentId;
       const pinned = sessionKey
         ? resolvePinnedSessionModelRef({ cfg, sessionKey, agentId: sessionAgent })
         : undefined;
-      const completionAgentId = pinned ? sessionAgent : agentId;
+      // Auth profiles live in each agent's own store; the session's profile
+      // applies only when the call runs as the session's agent.
+      const pinnedProfile = sessionAgent === agentId ? pinned?.authProfileId : undefined;
       const preferredProfile =
-        normalizeOptionalString(options.authority?.preferredProfile) ?? pinned?.authProfileId;
+        normalizeOptionalString(options.authority?.preferredProfile) ?? pinnedProfile;
       // A pinned model that cannot be prepared fails the call below; it never
       // falls back to the configured default.
       const prepared = await prepareSimpleCompletionModelForAgent({
         cfg,
-        agentId: completionAgentId,
+        agentId,
         modelRef: pinned?.modelRef ?? params.model,
         preferredProfile,
         allowBundledStaticCatalogFallback: true,
@@ -525,7 +527,7 @@ export function createRuntimeLlm(
         modelSource: pinned ? "session" : requestedModel ? "request" : "agent",
         // A request the pin overrode, so a plugin author can see why.
         ...(pinned && requestedModel ? { supersededModel: requestedModel } : {}),
-        agentId: completionAgentId,
+        agentId,
         provider: prepared.selection.provider,
         model: prepared.selection.modelId,
         usage,
@@ -535,7 +537,7 @@ export function createRuntimeLlm(
         text,
         provider: prepared.selection.provider,
         model: prepared.selection.modelId,
-        agentId: completionAgentId,
+        agentId,
         usage,
         audit: {
           caller,
