@@ -85,6 +85,7 @@ export async function maybeGenerateDashboardSessionTitle(params: {
       prompt: DASHBOARD_SESSION_TITLE_PROMPT,
       cfg: params.cfg,
       agentId: params.agentId,
+      sessionKey: params.sessionKey,
       maxLength: DASHBOARD_SESSION_TITLE_MAX_CHARS,
     });
     const displayName = generated ? normalizeDashboardSessionTitle(generated) : null;

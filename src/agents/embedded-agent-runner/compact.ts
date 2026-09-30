@@ -481,13 +481,18 @@ function containsRealConversationMessages(messages: AgentMessage[]): boolean {
 }
 
 function hasExplicitCompactionModel(params: CompactEmbeddedAgentSessionParams): boolean {
-  return Boolean(params.config?.agents?.defaults?.compaction?.model?.trim());
+  return (
+    !params.sessionModelPinned &&
+    Boolean(params.config?.agents?.defaults?.compaction?.model?.trim())
+  );
 }
 
 function resolveCompactionFallbacksOverride(
   params: CompactEmbeddedAgentSessionParams,
 ): string[] | undefined {
-  if (params.modelSelectionLocked) {
+  // A pinned session compacts on its own model or not at all, whichever
+  // caller started the compaction.
+  if (params.modelSelectionLocked || params.sessionModelPinned) {
     return [];
   }
   return (
@@ -570,6 +575,7 @@ export async function compactEmbeddedAgentSessionDirect(
     modelId: params.model,
     authProfileId: params.authProfileId,
     modelSelectionLocked: params.modelSelectionLocked,
+    sessionModelPinned: params.sessionModelPinned,
     defaultProvider: DEFAULT_PROVIDER,
     defaultModel: DEFAULT_MODEL,
   });
@@ -695,6 +701,7 @@ async function compactEmbeddedAgentSessionDirectOnce(
     modelId: params.model,
     authProfileId: params.authProfileId,
     modelSelectionLocked: params.modelSelectionLocked,
+    sessionModelPinned: params.sessionModelPinned,
     defaultProvider: DEFAULT_PROVIDER,
     defaultModel: DEFAULT_MODEL,
   });
@@ -729,6 +736,7 @@ async function compactEmbeddedAgentSessionDirectOnce(
     authProfileId: params.authProfileId,
     harnessRuntime: selectedHarnessRuntime,
     modelSelectionLocked: params.modelSelectionLocked,
+    sessionModelPinned: params.sessionModelPinned,
     defaultProvider: DEFAULT_PROVIDER,
     defaultModel: DEFAULT_MODEL,
   });
@@ -2013,6 +2021,7 @@ export const testing = {
   runBeforeCompactionHooks,
   runAfterCompactionHooks,
   runPostCompactionSideEffects,
+  resolveCompactionFallbacksOverride,
 } as const;
 
 export { testing as __testing };

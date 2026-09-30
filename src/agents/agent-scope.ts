@@ -549,22 +549,66 @@ export function hasConfiguredModelFallbacks(params: {
   return (fallbacksOverride ?? defaultFallbacks).length > 0;
 }
 
-export function resolveEffectiveModelFallbacks(params: {
-  cfg: OpenClawConfig;
-  agentId: string;
-  sessionKey?: string | null;
+/** The facts a run carries about how its session's model override was chosen. */
+export type SessionModelOverrideFacts = {
   hasSessionModelOverride: boolean;
   modelOverrideSource?: "auto" | "user";
   hasAutoFallbackProvenance?: boolean;
-}): string[] | undefined {
+};
+
+/**
+ * Whether the session's model is one the user explicitly chose rather than an
+ * automatic fallback. A user pin is the highest text-model authority for the
+ * session: it has no cross-model fallbacks and wins over compaction, memory
+ * flush and plugin defaults. Legacy overrides without a source count as user
+ * choices unless they carry fallback provenance.
+ */
+export function isUserPinnedModelSelection(facts: SessionModelOverrideFacts): boolean {
+  if (!facts.hasSessionModelOverride) {
+    return false;
+  }
+  return (
+    facts.modelOverrideSource === "user" ||
+    (facts.modelOverrideSource === undefined && facts.hasAutoFallbackProvenance !== true)
+  );
+}
+
+/** {@link isUserPinnedModelSelection} read from a persisted session row. */
+export function hasUserPinnedSessionModel(
+  entry:
+    | Pick<
+        SessionEntry,
+        | "providerOverride"
+        | "modelOverride"
+        | "modelOverrideSource"
+        | "modelOverrideFallbackOriginProvider"
+        | "modelOverrideFallbackOriginModel"
+      >
+    | undefined,
+): boolean {
+  const hasOverride = Boolean(
+    normalizeOptionalString(entry?.modelOverride) ||
+    normalizeOptionalString(entry?.providerOverride),
+  );
+  return isUserPinnedModelSelection({
+    hasSessionModelOverride: hasOverride && !hasLegacyAutoFallbackWithoutOrigin(entry),
+    modelOverrideSource: entry?.modelOverrideSource,
+    hasAutoFallbackProvenance: hasSessionAutoModelFallbackProvenance(entry),
+  });
+}
+
+export function resolveEffectiveModelFallbacks(
+  params: {
+    cfg: OpenClawConfig;
+    agentId: string;
+    sessionKey?: string | null;
+  } & SessionModelOverrideFacts,
+): string[] | undefined {
   const agentFallbacksOverride = resolveAgentModelFallbacksOverride(params.cfg, params.agentId);
   if (!params.hasSessionModelOverride) {
     return agentFallbacksOverride;
   }
-  const canUseConfiguredFallbacks =
-    params.modelOverrideSource === "auto" ||
-    (params.modelOverrideSource === undefined && params.hasAutoFallbackProvenance === true);
-  if (!canUseConfiguredFallbacks) {
+  if (isUserPinnedModelSelection(params)) {
     return [];
   }
   const subagentFallbacksOverride = isSubagentSessionKey(params.sessionKey)

@@ -554,6 +554,7 @@ export async function getReplyFromConfig(
   const resolvedOpts = attachProgressNarratorToReplyOptions({
     cfg,
     agentId,
+    sessionKey,
     userMessage: finalized.BodyForAgent ?? finalized.Body,
     opts: optsWithSkillFilter,
     disabled: sessionModelSelectionLocked,

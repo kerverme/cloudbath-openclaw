@@ -57,6 +57,7 @@ import type { VerboseLevel } from "../thinking.js";
 import type { GetReplyOptions, ReplyPayload } from "../types.js";
 import {
   buildEmbeddedRunExecutionParams,
+  isSessionModelPinned,
   resolveModelFallbackOptions,
 } from "./agent-runner-utils.js";
 import type { CompactionNoticePhase } from "./compaction-notice.js";
@@ -231,7 +232,9 @@ function resolveMemoryFlushModelFallbackOptions(
   configOverride: FollowupRun["run"]["config"] = run.config,
 ) {
   const options = resolveModelFallbackOptions(run, configOverride);
-  const override = normalizeOptionalString(model);
+  // A model the owner pinned owns the flush as well; the maintenance override
+  // applies only to sessions that never chose one.
+  const override = isSessionModelPinned(run) ? undefined : normalizeOptionalString(model);
   if (!override) {
     return options;
   }
@@ -976,6 +979,7 @@ export async function runPreflightCompactionIfNeeded(params: {
             : entry.agentHarnessId
           : undefined,
       modelSelectionLocked: entry.modelSelectionLocked === true,
+      sessionModelPinned: isSessionModelPinned(params.followupRun.run),
       thinkLevel: params.followupRun.run.thinkLevel,
       bashElevated: params.followupRun.run.bashElevated,
       trigger: "budget",

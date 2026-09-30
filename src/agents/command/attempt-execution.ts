@@ -489,6 +489,7 @@ export function runAgentAttempt(params: {
   metadataSnapshot?: PluginMetadataSnapshot;
   allowTransientCooldownProbe?: boolean;
   modelFallbacksOverride?: string[];
+  sessionModelPinned?: boolean;
   sessionHasHistory?: boolean;
   fallbackRuntimeState?: { originRuntime?: "cli" | "embedded" };
   suppressPromptPersistenceOnRetry?: boolean;
@@ -909,6 +910,7 @@ export function runAgentAttempt(params: {
     provider: embeddedAgentProvider,
     model: params.modelOverride,
     modelFallbacksOverride: params.modelFallbacksOverride,
+    sessionModelPinned: params.sessionModelPinned,
     authProfileId,
     authProfileIdSource: authProfileId ? harnessAuthSelection.authProfileIdSource : undefined,
     thinkLevel: params.resolvedThinkLevel,

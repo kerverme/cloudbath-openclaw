@@ -1,5 +1,9 @@
 /** Builds embedded-agent run parameters from queued follow-up run state. */
-import { resolveEffectiveModelFallbacks } from "../../agents/agent-scope.js";
+import {
+  isUserPinnedModelSelection,
+  resolveEffectiveModelFallbacks,
+  type SessionModelOverrideFacts,
+} from "../../agents/agent-scope.js";
 import type { resolveProviderScopedAuthProfile } from "./agent-runner-auth-profile.js";
 import type { FollowupRun } from "./queue.js";
 
@@ -13,22 +17,40 @@ type ReasoningTagProviderResolver = (
   },
 ) => boolean;
 
+function sessionModelFactsOf(run: FollowupRun["run"]): SessionModelOverrideFacts {
+  return {
+    hasSessionModelOverride: run.hasSessionModelOverride === true,
+    modelOverrideSource: run.modelOverrideSource,
+    hasAutoFallbackProvenance: run.hasAutoFallbackProvenance === true,
+  };
+}
+
+/** Whether the run's model is the owner's explicit pin for its session. */
+export function isSessionModelPinned(run: FollowupRun["run"]): boolean {
+  return isUserPinnedModelSelection(sessionModelFactsOf(run));
+}
+
+function resolveRunModelFallbacks(
+  run: FollowupRun["run"],
+  config: FollowupRun["run"]["config"],
+): string[] | undefined {
+  return run.modelSelectionLocked
+    ? []
+    : resolveEffectiveModelFallbacks({
+        cfg: config,
+        agentId: run.agentId,
+        sessionKey: run.sessionKey,
+        ...sessionModelFactsOf(run),
+      });
+}
+
 /** Builds model fallback options for an embedded follow-up run. */
 export function resolveModelFallbackOptions(
   run: FollowupRun["run"],
   configOverride: FollowupRun["run"]["config"] = run.config,
 ) {
   const config = configOverride;
-  const fallbacksOverride = run.modelSelectionLocked
-    ? []
-    : resolveEffectiveModelFallbacks({
-        cfg: config,
-        agentId: run.agentId,
-        sessionKey: run.sessionKey,
-        hasSessionModelOverride: run.hasSessionModelOverride === true,
-        modelOverrideSource: run.modelOverrideSource,
-        hasAutoFallbackProvenance: run.hasAutoFallbackProvenance === true,
-      });
+  const fallbacksOverride = resolveRunModelFallbacks(run, config);
   return {
     cfg: config,
     provider: run.provider,
@@ -71,16 +93,7 @@ export function buildEmbeddedRunBaseParams(params: {
   isReasoningTagProvider?: ReasoningTagProviderResolver;
 }) {
   const config = params.run.config;
-  const modelFallbacksOverride = params.run.modelSelectionLocked
-    ? []
-    : resolveEffectiveModelFallbacks({
-        cfg: config,
-        agentId: params.run.agentId,
-        sessionKey: params.run.sessionKey,
-        hasSessionModelOverride: params.run.hasSessionModelOverride === true,
-        modelOverrideSource: params.run.modelOverrideSource,
-        hasAutoFallbackProvenance: params.run.hasAutoFallbackProvenance === true,
-      });
+  const modelFallbacksOverride = resolveRunModelFallbacks(params.run, config);
   const enforceFinalTag = resolveEnforceFinalTagWithResolver(
     params.run,
     params.provider,
@@ -111,6 +124,7 @@ export function buildEmbeddedRunBaseParams(params: {
     model: params.model,
     modelSelectionLocked: params.run.modelSelectionLocked,
     modelFallbacksOverride,
+    sessionModelPinned: isSessionModelPinned(params.run),
     ...params.authProfile,
     thinkLevel: params.run.thinkLevel,
     fastMode: params.run.fastMode,

@@ -15,6 +15,10 @@ export type { ModelAliasIndex };
 export type ModelDirectiveSelection = {
   provider: string;
   model: string;
+  /**
+   * An explicit reset to the inherited default (`/model default`). A named
+   * model is a pin even when it equals the default, so this stays false.
+   */
   isDefault: boolean;
   alias?: string;
 };
@@ -247,7 +251,7 @@ export function resolveModelDirectiveSelection(params: {
     return {
       provider,
       model,
-      isDefault: provider === defaultProvider && model === defaultModel,
+      isDefault: false,
       ...(alias ? { alias } : undefined),
     };
   };
@@ -377,7 +381,7 @@ export function resolveModelDirectiveSelection(params: {
       selection: {
         provider: resolved.ref.provider,
         model: resolved.ref.model,
-        isDefault: resolved.ref.provider === defaultProvider && resolved.ref.model === defaultModel,
+        isDefault: false,
         alias: resolved.alias,
       },
     };

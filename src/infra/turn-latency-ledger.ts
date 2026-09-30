@@ -458,10 +458,16 @@ export function buildTurnLatencyLogRecord(record: TurnLatencyRecord): Record<str
   };
 }
 
-/** A one-line summary for an operator reading the console. */
+/**
+ * A one-line summary for an operator reading the console. Each call names the
+ * model it went to, so a turn that left the session's model shows it here.
+ */
 export function formatTurnLatencyRecord(record: TurnLatencyRecord): string {
   const calls = record.modelCalls
-    .map((call) => `${call.callReason}=${call.totalMs ?? "?"}ms(ttft=${call.ttftMs ?? "?"})`)
+    .map((call) => {
+      const model = call.provider && call.model ? `[${call.provider}/${call.model}]` : "";
+      return `${call.callReason}${model}=${call.totalMs ?? "?"}ms(ttft=${call.ttftMs ?? "?"})`;
+    })
     .join(" ");
   return (
     `turn latency ${record.channel} userVisibleMs=${record.userVisibleMs} ` +

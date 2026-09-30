@@ -489,6 +489,36 @@ describe("handleCompactCommand", () => {
     });
   });
 
+  it.each([
+    ["an owner-pinned session", { modelOverrideSource: "user" as const }, true],
+    ["an automatic fallback", { modelOverrideSource: "auto" as const }, false],
+  ])("tells /compact whether it compacts %s", async (_label, source, pinned) => {
+    vi.mocked(compactEmbeddedAgentSession).mockResolvedValueOnce({
+      ok: true,
+      compacted: false,
+      reason: "already under target",
+    });
+
+    await handleCompactCommand(
+      {
+        ...buildCompactParams("/compact", {
+          commands: { text: true },
+          channels: { whatsapp: { allowFrom: ["*"] } },
+        } as OpenClawConfig),
+        sessionEntry: {
+          sessionId: "pinned-session",
+          updatedAt: Date.now(),
+          providerOverride: "openrouter",
+          modelOverride: "openai/gpt-6-luna",
+          ...source,
+        },
+      } as HandleCommandsParams,
+      true,
+    );
+
+    expect(requireCompactEmbeddedAgentSessionCall().sessionModelPinned).toBe(pinned);
+  });
+
   it("prefers the target session entry when incrementing compaction count", async () => {
     vi.mocked(compactEmbeddedAgentSession).mockResolvedValueOnce({
       ok: true,

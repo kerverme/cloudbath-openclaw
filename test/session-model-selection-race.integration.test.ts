@@ -425,7 +425,7 @@ describe("explicit model selection reaches a user turn queued behind an active r
     });
   });
 
-  it("naming the default model resets the override exactly as the picker does", async () => {
+  it("naming the default model pins it exactly as the picker does", async () => {
     const lunaOverride = {
       providerOverride: LUNA.provider,
       modelOverride: LUNA.model,
@@ -445,8 +445,13 @@ describe("explicit model selection reaches a user turn queued behind an active r
       expect(await queued.drain()).toMatchObject(QWEN);
     });
 
-    // A reset, not a pinned copy of the default: the override is gone.
-    expect(stored.picker?.modelOverride).toBeUndefined();
+    // A pin on the default, not a reset: only `/model default` or a null patch
+    // returns the session to the configured model and its fallbacks.
+    expect(stored.picker).toMatchObject({
+      providerOverride: QWEN.provider,
+      modelOverride: QWEN.model,
+      modelOverrideSource: "user",
+    });
     expect(stored.webchat).toEqual(stored.picker);
   });
 

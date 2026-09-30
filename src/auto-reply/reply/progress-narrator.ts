@@ -12,6 +12,7 @@ import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { logVerbose } from "../../globals.js";
 import type { TextContent } from "../../llm/types.js";
 import { createSubsystemLogger } from "../../logging/subsystem.js";
+import { resolvePinnedSessionModelRef } from "../../sessions/session-model-selection.js";
 import type { GetReplyOptions } from "../get-reply-options.types.js";
 
 const narratorLog = createSubsystemLogger("auto-reply/progress-narrator");
@@ -158,12 +159,28 @@ async function generateNarrationWithUtilityModel(params: {
   }
 }
 
-async function prepareNarrationModel(params: { cfg: OpenClawConfig; agentId: string }) {
+async function prepareNarrationModel(params: {
+  cfg: OpenClawConfig;
+  agentId: string;
+  sessionKey?: string;
+}) {
   try {
+    // Narration is part of the turn it narrates, so a session the owner pinned
+    // narrates on that model rather than the utility model.
+    const pinned = params.sessionKey
+      ? resolvePinnedSessionModelRef({
+          cfg: params.cfg,
+          sessionKey: params.sessionKey,
+          agentId: params.agentId,
+        })
+      : undefined;
+    const modelChoice = pinned
+      ? { modelRef: pinned.modelRef, preferredProfile: pinned.authProfileId }
+      : { useUtilityModel: true };
     const prepared = await prepareSimpleCompletionModelForAgent({
       cfg: params.cfg,
       agentId: params.agentId,
-      useUtilityModel: true,
+      ...modelChoice,
       useAsyncModelResolution: true,
       allowMissingApiKeyModes: ["aws-sdk"],
     });
@@ -181,6 +198,7 @@ async function prepareNarrationModel(params: { cfg: OpenClawConfig; agentId: str
 export function createProgressNarrator(params: {
   cfg: OpenClawConfig;
   agentId: string;
+  sessionKey?: string;
   userMessage?: string;
   onUpdate: (payload: { text: string }) => Promise<void> | void;
   abortSignal?: AbortSignal;
@@ -207,7 +225,11 @@ export function createProgressNarrator(params: {
   const generate =
     params.generate ??
     (async (input: ProgressNarrationInput) => {
-      preparedPromise ??= prepareNarrationModel({ cfg: params.cfg, agentId: params.agentId });
+      preparedPromise ??= prepareNarrationModel({
+        cfg: params.cfg,
+        agentId: params.agentId,
+        sessionKey: params.sessionKey,
+      });
       const prepared = await preparedPromise;
       if (!prepared) {
         disabled = true;
@@ -375,6 +397,7 @@ export function createProgressNarrator(params: {
 export function attachProgressNarratorToReplyOptions(params: {
   cfg: OpenClawConfig;
   agentId: string;
+  sessionKey?: string;
   userMessage?: string;
   opts?: GetReplyOptions;
   /** Model-locked native sessions must never invoke the utility model. */
@@ -393,6 +416,7 @@ export function attachProgressNarratorToReplyOptions(params: {
   const narrator = createProgressNarrator({
     cfg: params.cfg,
     agentId: params.agentId,
+    sessionKey: params.sessionKey,
     userMessage: params.userMessage,
     onUpdate: onNarrationUpdate,
     abortSignal: opts.abortSignal,

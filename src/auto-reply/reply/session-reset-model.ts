@@ -87,7 +87,6 @@ async function buildResetAllowedModelKeys(params: {
 function buildSelectionFromExplicit(params: {
   raw: string;
   defaultProvider: string;
-  defaultModel: string;
   aliasIndex: ModelAliasIndex;
   allowedModelKeys: Set<string>;
 }): ModelDirectiveSelection | undefined {
@@ -103,12 +102,10 @@ function buildSelectionFromExplicit(params: {
   if (params.allowedModelKeys.size > 0 && !isModelKeyAllowedBySet(params.allowedModelKeys, key)) {
     return undefined;
   }
-  const isDefault =
-    resolved.ref.provider === params.defaultProvider && resolved.ref.model === params.defaultModel;
   return {
     provider: resolved.ref.provider,
     model: resolved.ref.model,
-    isDefault,
+    isDefault: false,
     ...(resolved.alias ? { alias: resolved.alias } : undefined),
   };
 }
@@ -245,7 +242,6 @@ export async function applyResetModelOverride(params: {
     selection = buildSelectionFromExplicit({
       raw: first,
       defaultProvider: params.defaultProvider,
-      defaultModel: params.defaultModel,
       aliasIndex: params.aliasIndex,
       allowedModelKeys,
     });

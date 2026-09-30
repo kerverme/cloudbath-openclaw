@@ -65,6 +65,11 @@ export type CompactEmbeddedAgentSessionParams = {
   runtimeModel?: Model;
   /** Effective model fallback chain for this session attempt. Undefined uses config defaults. */
   modelFallbacksOverride?: string[];
+  /**
+   * The session's model is the owner's explicit pin: compaction summarizes with
+   * it rather than `compaction.model`, and never falls back to another model.
+   */
+  sessionModelPinned?: boolean;
   /** Optional caller-resolved context engine for harness-owned compaction. */
   contextEngine?: ContextEngine;
   /** Optional caller-resolved token budget for harness-owned compaction. */

@@ -37,6 +37,7 @@ type EmbeddedCompactionRuntimeContext = {
   runtimeAuthPlan?: AgentRuntimeAuthPlan;
   agentHarnessId?: string;
   modelSelectionLocked?: boolean;
+  sessionModelPinned?: boolean;
   workspaceDir: string;
   cwd?: string;
   agentDir: string;
@@ -68,6 +69,7 @@ export function resolveEmbeddedCompactionTarget(params: {
   authProfileId?: string | null;
   harnessRuntime?: string | null;
   modelSelectionLocked?: boolean;
+  sessionModelPinned?: boolean;
   defaultProvider?: string;
   defaultModel?: string;
 }): {
@@ -81,10 +83,12 @@ export function resolveEmbeddedCompactionTarget(params: {
   const provider = params.provider?.trim() || params.defaultProvider;
   const model = params.modelId?.trim() || params.defaultModel;
   // A locked session's creating model owns every transcript read, including
-  // summaries. Compaction-specific model overrides would cross that boundary.
-  const override = params.modelSelectionLocked
-    ? undefined
-    : params.config?.agents?.defaults?.compaction?.model?.trim();
+  // summaries, and so does a model the owner pinned. Compaction-specific model
+  // overrides would cross that boundary; they apply only to unpinned sessions.
+  const override =
+    params.modelSelectionLocked || params.sessionModelPinned
+      ? undefined
+      : params.config?.agents?.defaults?.compaction?.model?.trim();
   const resolveTargetProviders = (
     targetProvider: string | undefined,
     authProfileId: string | undefined,
@@ -289,6 +293,7 @@ export function buildEmbeddedCompactionRuntimeContext(params: {
   modelId?: string | null;
   harnessRuntime?: string | null;
   modelSelectionLocked?: boolean;
+  sessionModelPinned?: boolean;
   modelFallbacksOverride?: string[];
   thinkLevel?: ThinkLevel;
   reasoningLevel?: ReasoningLevel;
@@ -305,6 +310,7 @@ export function buildEmbeddedCompactionRuntimeContext(params: {
     authProfileId: params.authProfileId,
     harnessRuntime: params.harnessRuntime,
     modelSelectionLocked: params.modelSelectionLocked,
+    sessionModelPinned: params.sessionModelPinned,
   });
   const agentHarnessId = params.harnessRuntime?.trim() || undefined;
   const runtimeAuthPlan =
@@ -338,6 +344,7 @@ export function buildEmbeddedCompactionRuntimeContext(params: {
     runtimeAuthPlan,
     agentHarnessId,
     modelSelectionLocked: params.modelSelectionLocked,
+    ...(params.sessionModelPinned ? { sessionModelPinned: true } : {}),
     workspaceDir: params.workspaceDir,
     cwd: params.cwd ?? undefined,
     agentDir: params.agentDir,

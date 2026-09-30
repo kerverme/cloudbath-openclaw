@@ -172,6 +172,11 @@ export type RunEmbeddedAgentParams = {
   model?: string;
   /** Effective model fallback chain for this session attempt. Undefined uses config defaults. */
   modelFallbacksOverride?: string[];
+  /**
+   * The run's model is the owner's explicit session pin. It then owns every
+   * text call of the turn: compaction ignores `compaction.model`.
+   */
+  sessionModelPinned?: boolean;
   /** Session-pinned embedded harness id. Prevents runtime hot-switching. */
   agentHarnessId?: string;
   /** True when the pinned non-default harness owns model selection for this session. */

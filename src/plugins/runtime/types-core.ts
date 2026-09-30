@@ -201,7 +201,12 @@ export type LlmCompleteUsage = {
 
 export type LlmCompleteParams = {
   messages: LlmCompleteMessage[];
-  /** Model ref (e.g. "anthropic/claude-sonnet-4-6"); defaults to the target agent's configured model. */
+  /**
+   * Model ref (e.g. "anthropic/claude-sonnet-4-6"); defaults to the target
+   * agent's configured model. A call made on behalf of a session whose owner
+   * pinned a model (inside its turn, or through a session-bound capability)
+   * runs on that pin instead, whatever this names.
+   */
   model?: string;
   maxTokens?: number;
   temperature?: number;

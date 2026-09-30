@@ -132,9 +132,7 @@ export function resolveModelSelectionFromDirective(params: {
       modelSelection = {
         provider: explicit.ref.provider,
         model: explicit.ref.model,
-        isDefault:
-          explicit.ref.provider === params.defaultProvider &&
-          explicit.ref.model === params.defaultModel,
+        isDefault: false,
         ...(explicit.alias ? { alias: explicit.alias } : {}),
       };
     }

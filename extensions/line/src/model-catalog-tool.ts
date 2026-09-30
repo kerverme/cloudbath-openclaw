@@ -241,11 +241,9 @@ export function createLineSessionModelApplier(params: {
     if (!updated) {
       return false;
     }
-    // The row must now select exactly this model: pinned, or -- being the
-    // agent's default -- reached by clearing the override.
-    const selected = updated.modelOverride
-      ? updated.providerOverride === selection.provider && updated.modelOverride === selection.model
-      : selection.provider === defaultModel.provider && selection.model === defaultModel.model;
+    // The row must now pin exactly this model, the agent's default included.
+    const selected =
+      updated.providerOverride === selection.provider && updated.modelOverride === selection.model;
     if (!selected) {
       return false;
     }

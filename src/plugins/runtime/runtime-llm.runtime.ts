@@ -11,6 +11,8 @@ import { type LlmCallReason, runWithLlmCallReason } from "../../infra/turn-laten
 import type { Api, Message } from "../../llm/types.js";
 import { getChildLogger } from "../../logging.js";
 import { normalizeAgentId } from "../../routing/session-key.js";
+import { currentSessionModelScope } from "../../sessions/session-model-scope.js";
+import { resolvePinnedSessionModelRef } from "../../sessions/session-model-selection.js";
 import { estimateUsageCost, resolveModelCostConfig } from "../../utils/usage-format.js";
 import { normalizePluginsConfig } from "../config-state.js";
 import { getPluginRuntimeGatewayRequestScope } from "./gateway-request-scope.js";
@@ -102,6 +104,8 @@ async function resolveAgentId(params: {
   request: LlmCompleteParams;
   cfg: OpenClawConfig;
   authority?: RuntimeLlmAuthority;
+  /** Agent of the turn the call is made in, used before the default agent. */
+  turnAgentId?: string;
   allowAgentIdOverride: boolean;
 }): Promise<string> {
   const authorityAgentIdRaw = normalizeOptionalString(params.authority?.agentId);
@@ -122,6 +126,10 @@ async function resolveAgentId(params: {
       throw new Error("Plugin LLM completion cannot override the target agent.");
     }
     return requestedAgentId;
+  }
+  const turnAgentId = normalizeOptionalString(params.turnAgentId);
+  if (turnAgentId) {
+    return normalizeAgentId(turnAgentId);
   }
   const { resolveDefaultAgentId } = await import("../../agents/agent-scope.js");
   return resolveDefaultAgentId(params.cfg);
@@ -405,11 +413,18 @@ export function createRuntimeLlm(
       const pluginPolicyId = resolvePluginPolicyId(options.authority, caller);
       const pluginPolicy = resolvePluginLlmOverridePolicy(cfg, pluginPolicyId);
       const authorityPolicy = resolveAuthorityModelPolicy(options.authority);
-      const preferredProfile = normalizeOptionalString(options.authority?.preferredProfile);
+      // A call made inside a turn belongs to that turn's session even when the
+      // plugin holds only the global runtime.
+      const turnScope = currentSessionModelScope();
+      const sessionKey =
+        normalizeOptionalString(options.authority?.sessionKey) ?? turnScope?.sessionKey;
+      const sessionAgentId =
+        normalizeOptionalString(options.authority?.agentId) ?? turnScope?.agentId;
       const agentId = await resolveAgentId({
         request: params,
         cfg,
         authority: options.authority,
+        turnAgentId: turnScope?.agentId,
         allowAgentIdOverride:
           options.authority?.allowAgentIdOverride === false
             ? false
@@ -437,10 +452,25 @@ export function createRuntimeLlm(
         });
       }
 
+      // Inside a conversation whose owner pinned a text model, that model is the
+      // only one: it outranks the request's own model (still policy-checked
+      // above) and the agent default. The pin owns the model, not the agent: an
+      // authorized agent override keeps its agent, directory and credentials.
+      const sessionAgent = sessionAgentId ? normalizeAgentId(sessionAgentId) : agentId;
+      const pinned = sessionKey
+        ? resolvePinnedSessionModelRef({ cfg, sessionKey, agentId: sessionAgent })
+        : undefined;
+      // Auth profiles live in each agent's own store; the session's profile
+      // applies only when the call runs as the session's agent.
+      const pinnedProfile = sessionAgent === agentId ? pinned?.authProfileId : undefined;
+      const preferredProfile =
+        normalizeOptionalString(options.authority?.preferredProfile) ?? pinnedProfile;
+      // A pinned model that cannot be prepared fails the call below; it never
+      // falls back to the configured default.
       const prepared = await prepareSimpleCompletionModelForAgent({
         cfg,
         agentId,
-        modelRef: params.model,
+        modelRef: pinned?.modelRef ?? params.model,
         preferredProfile,
         allowBundledStaticCatalogFallback: true,
         allowMissingApiKeyModes: ["aws-sdk"],
@@ -493,7 +523,10 @@ export function createRuntimeLlm(
       logger.info("plugin llm completion", {
         caller,
         purpose: params.purpose,
-        sessionKey: options.authority?.sessionKey,
+        sessionKey,
+        modelSource: pinned ? "session" : requestedModel ? "request" : "agent",
+        // A request the pin overrode, so a plugin author can see why.
+        ...(pinned && requestedModel ? { supersededModel: requestedModel } : {}),
         agentId,
         provider: prepared.selection.provider,
         model: prepared.selection.modelId,
@@ -509,7 +542,7 @@ export function createRuntimeLlm(
         audit: {
           caller,
           ...(params.purpose ? { purpose: params.purpose } : {}),
-          ...(options.authority?.sessionKey ? { sessionKey: options.authority.sessionKey } : {}),
+          ...(sessionKey ? { sessionKey } : {}),
         },
       };
     },

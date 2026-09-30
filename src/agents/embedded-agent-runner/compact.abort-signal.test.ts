@@ -17,7 +17,7 @@ vi.mock("../model-fallback.js", () => ({
 vi.mock("./compact.queued.js", () => ({ compactEmbeddedAgentSession: vi.fn() }));
 
 import { runWithModelFallback } from "../model-fallback.js";
-import { compactEmbeddedAgentSessionDirect } from "./compact.js";
+import { __testing, compactEmbeddedAgentSessionDirect } from "./compact.js";
 
 const runMock = vi.mocked(runWithModelFallback);
 
@@ -73,5 +73,25 @@ describe("compactEmbeddedAgentSessionDirect abortSignal threading", () => {
     expect(runMock).toHaveBeenCalledTimes(1);
     const passedParams = runMock.mock.calls[0]?.[0];
     expect(passedParams?.abortSignal).toBeUndefined();
+  });
+});
+
+describe("compaction fallbacks for a pinned session", () => {
+  const params = {
+    ...baseParams,
+    config: configWithFallbacks(["openrouter/qwen/qwen3.6-plus"]),
+    provider: "openrouter",
+    model: "openai/gpt-6-luna",
+  };
+
+  it("has none, whichever caller started the compaction", () => {
+    expect(
+      __testing.resolveCompactionFallbacksOverride({ ...params, sessionModelPinned: true }),
+    ).toEqual([]);
+  });
+
+  it("keeps the configured chain for a session with no pin", () => {
+    // Undefined defers to agents.defaults.model.fallbacks.
+    expect(__testing.resolveCompactionFallbacksOverride(params)).toBeUndefined();
   });
 });

@@ -708,6 +708,29 @@ describe("gateway sessions patch", () => {
     expect(entry.liveModelSwitchPending).toBe(true);
   });
 
+  test("pins the configured default when the owner names it; only null resets", async () => {
+    const store = mainStoreEntry({
+      sessionId: "sess-pin-default",
+      providerOverride: "anthropic",
+      modelOverride: ANTHROPIC_SONNET_ID,
+      modelOverrideSource: "user",
+    });
+    const cfg = createAllowlistedAnthropicModelCfg();
+
+    const pinned = await applyMainModelPatch({
+      store,
+      cfg,
+      model: OPENAI_GPT_MODEL,
+      catalogRefs: [OPENAI_GPT_MODEL, ANTHROPIC_SONNET_MODEL],
+    });
+    expectModelSelection(pinned, "openai", OPENAI_GPT_ID);
+    expect(pinned.modelOverrideSource).toBe("user");
+
+    const reset = await applyMainModelPatch({ store, cfg, model: null });
+    expectModelSelection(reset, undefined, undefined);
+    expect(reset.modelOverrideSource).toBeUndefined();
+  });
+
   test("clears pending live model switches for model reset patches", async () => {
     const store = mainStoreEntry({
       sessionId: "sess-live-reset",
@@ -1197,9 +1220,9 @@ describe("gateway sessions patch", () => {
     });
 
     const entry = await applySubagentModelPatch(cfg);
-    // Selected model matches the target agent default, so no override is stored.
-    expect(entry.providerOverride).toBeUndefined();
-    expect(entry.modelOverride).toBeUndefined();
+    // Choosing the agent's own default is still an explicit pin, not a reset.
+    expectModelSelection(entry, "synthetic", "hf:moonshotai/Kimi-K2.5");
+    expect(entry.modelOverrideSource).toBe("user");
   });
 
   test("allows target agent subagents.model for subagent session even when missing from global allowlist", async () => {

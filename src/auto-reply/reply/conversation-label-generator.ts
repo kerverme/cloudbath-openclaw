@@ -8,6 +8,7 @@ import {
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { logVerbose } from "../../globals.js";
 import type { TextContent } from "../../llm/types.js";
+import { resolvePinnedSessionModelRef } from "../../sessions/session-model-selection.js";
 
 const DEFAULT_MAX_LABEL_LENGTH = 128;
 // Reasoning models spend output tokens before emitting the short visible label.
@@ -23,6 +24,8 @@ export type ConversationLabelParams = {
   cfg: OpenClawConfig;
   agentId?: string;
   agentDir?: string;
+  /** Session being labelled; its pinned model replaces the utility model. */
+  sessionKey?: string;
   maxLength?: number;
 };
 
@@ -48,7 +51,8 @@ function extractSimpleCompletionError(result: {
 export async function generateConversationLabel(
   params: ConversationLabelParams,
 ): Promise<string | null> {
-  const { userMessage, prompt, cfg, agentId, agentDir } = params;
+  const { userMessage, prompt, cfg, agentDir } = params;
+  const agentId = params.agentId ?? resolveDefaultAgentId(cfg);
   const maxLength =
     typeof params.maxLength === "number" &&
     Number.isFinite(params.maxLength) &&
@@ -57,11 +61,19 @@ export async function generateConversationLabel(
       : DEFAULT_MAX_LABEL_LENGTH;
   let prepared: Awaited<ReturnType<typeof prepareSimpleCompletionModelForAgent>>;
   try {
+    // A session the owner pinned is labelled by its own model, not the
+    // utility model: the label belongs to that conversation's turn.
+    const pinned = params.sessionKey
+      ? resolvePinnedSessionModelRef({ cfg, sessionKey: params.sessionKey, agentId })
+      : undefined;
+    const modelChoice = pinned
+      ? { modelRef: pinned.modelRef, preferredProfile: pinned.authProfileId }
+      : { useUtilityModel: true };
     prepared = await prepareSimpleCompletionModelForAgent({
       cfg,
-      agentId: agentId ?? resolveDefaultAgentId(cfg),
+      agentId,
       agentDir,
-      useUtilityModel: true,
+      ...modelChoice,
       useAsyncModelResolution: true,
       allowMissingApiKeyModes: ["aws-sdk"],
     });
