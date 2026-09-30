@@ -789,7 +789,9 @@ describe("runtime.llm.complete inside a session with a pinned model", () => {
   // A real SQLite session store: the pin resolver reads the row the same way
   // production does.
   let stateDir: string;
+  let logger: RuntimeLogger;
   beforeEach(() => {
+    logger = createLogger();
     stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-runtime-llm-pin-"));
     vi.stubEnv("OPENCLAW_STATE_DIR", stateDir);
     hoisted.prepareSimpleCompletionModelForAgent.mockReset();
@@ -896,21 +898,104 @@ describe("runtime.llm.complete inside a session with a pinned model", () => {
     expect(hoisted.completeWithPreparedSimpleCompletionModel).not.toHaveBeenCalled();
   });
 
-  it("leaves an explicit, policy-approved model request as it was", async () => {
-    await pin({ ...LUNA, modelOverrideSource: "user" });
-    const llm = createRuntimeLlm({
+  function trustedRuntime() {
+    return createRuntimeLlm({
       getConfig: () => ({
         ...cfg,
-        plugins: { entries: { "trusted-plugin": { llm: { allowModelOverride: true } } } },
+        plugins: {
+          entries: {
+            "trusted-plugin": { llm: { allowModelOverride: true, allowAgentIdOverride: true } },
+          },
+        },
       }),
       authority: { allowComplete: true },
+      logger,
     });
+  }
+
+  function trustedComplete(request: { model?: string; agentId?: string }) {
+    return withPluginRuntimePluginIdScope("trusted-plugin", () =>
+      trustedRuntime().complete({ messages: [{ role: "user", content: "q" }], ...request }),
+    );
+  }
+
+  it("uses the pin even when a trusted plugin names its own model inside the turn", async () => {
+    await pin({ ...LUNA, modelOverrideSource: "user", authProfileOverride: "openrouter:work" });
+
+    const result = await runWithSessionModelScope({ sessionKey: SESSION, agentId: "main" }, () =>
+      trustedComplete({ model: "openrouter/deepseek/deepseek-v4-flash-0731" }),
+    );
+
+    expectSingleCallFirstArg(hoisted.prepareSimpleCompletionModelForAgent, {
+      agentId: "main",
+      modelRef: "openrouter/openai/gpt-6-luna",
+      preferredProfile: "openrouter:work",
+    });
+    expect(result.agentId).toBe("main");
+    expectSingleLogPayload(logger.info as unknown as MockCalls, "plugin llm completion", {
+      modelSource: "session",
+      supersededModel: "openrouter/deepseek/deepseek-v4-flash-0731",
+    });
+  });
+
+  it("uses the pin when a trusted plugin targets another agent inside the turn", async () => {
+    await pin({ ...LUNA, modelOverrideSource: "user" });
 
     await runWithSessionModelScope({ sessionKey: SESSION, agentId: "main" }, () =>
-      withPluginRuntimePluginIdScope("trusted-plugin", () =>
-        llm.complete({ model: "openai/gpt-5.4", messages: [{ role: "user", content: "q" }] }),
-      ),
+      trustedComplete({ agentId: "research", model: "openai/gpt-5.4" }),
     );
+
+    expectSingleCallFirstArg(hoisted.prepareSimpleCompletionModelForAgent, {
+      agentId: "main",
+      modelRef: "openrouter/openai/gpt-6-luna",
+    });
+  });
+
+  it("uses the pin over an explicit model for a session-bound authority", async () => {
+    await pin({ ...LUNA, modelOverrideSource: "user" });
+    const llm = createRuntimeLlm({
+      getConfig: () => cfg,
+      authority: {
+        allowComplete: true,
+        sessionKey: SESSION,
+        agentId: "main",
+        allowModelOverride: true,
+      },
+    });
+
+    await llm.complete({ model: "openai/gpt-5.4", messages: [{ role: "user", content: "q" }] });
+
+    expect(preparedModelRef()).toBe("openrouter/openai/gpt-6-luna");
+  });
+
+  it("still denies a model request the plugin is not trusted to make", async () => {
+    await pin({ ...LUNA, modelOverrideSource: "user" });
+
+    await expect(
+      runWithSessionModelScope({ sessionKey: SESSION, agentId: "main" }, () =>
+        withPluginRuntimePluginIdScope("plain-plugin", () =>
+          globalRuntime().complete({
+            model: "openai/gpt-5.4",
+            messages: [{ role: "user", content: "q" }],
+          }),
+        ),
+      ),
+    ).rejects.toThrow("Plugin LLM completion cannot override the target model.");
+    expect(hoisted.prepareSimpleCompletionModelForAgent).not.toHaveBeenCalled();
+  });
+
+  it("keeps an explicit model request in a session the owner never pinned", async () => {
+    await runWithSessionModelScope({ sessionKey: SESSION, agentId: "main" }, () =>
+      trustedComplete({ model: "openai/gpt-5.4" }),
+    );
+
+    expect(preparedModelRef()).toBe("openai/gpt-5.4");
+  });
+
+  it("keeps an explicit model request for a background call outside any turn", async () => {
+    await pin({ ...LUNA, modelOverrideSource: "user" });
+
+    await trustedComplete({ model: "openai/gpt-5.4" });
 
     expect(preparedModelRef()).toBe("openai/gpt-5.4");
   });

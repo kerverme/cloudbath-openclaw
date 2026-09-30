@@ -209,6 +209,8 @@ const { addTestHook } = await import("../src/plugins/hooks.test-helpers.js");
 const { createEmptyPluginRegistry } = await import("../src/plugins/registry-empty.js");
 const { resetPluginRuntimeStateForTest } = await import("../src/plugins/runtime.js");
 const { createRuntimeLlm } = await import("../src/plugins/runtime/runtime-llm.runtime.js");
+const { withPluginRuntimePluginIdScope } =
+  await import("../src/plugins/runtime/gateway-request-scope.js");
 const { buildEmbeddedCompactionRuntimeContext, resolveEmbeddedCompactionTarget } =
   await import("../src/agents/embedded-agent-runner/compaction-runtime-context.js");
 const { __testing: compactTesting } =
@@ -227,6 +229,7 @@ Object.assign(
 );
 
 const DEEPSEEK = "openrouter/deepseek/deepseek-v4-flash-0731";
+const EXPLICIT_MODEL_PLUGIN = "explicit-model-plugin";
 const QWEN = "openrouter/qwen/qwen3.6-plus";
 const LUNA = "openrouter/openai/gpt-6-luna";
 const ACCOUNT_CATALOG = [
@@ -250,6 +253,11 @@ function productionConfig(home: string, extra: { compactionModel?: string } = {}
   if (extra.compactionModel) {
     cfg.agents!.defaults!.compaction = { model: extra.compactionModel };
   }
+  // A plugin the operator trusts to name its own completion model.
+  cfg.plugins = {
+    ...cfg.plugins,
+    entries: { [EXPLICIT_MODEL_PLUGIN]: { llm: { allowModelOverride: true } } },
+  };
   // Specialist media models are separate capabilities, never the chat pin.
   cfg.agents!.defaults!.imageGenerationModel = { primary: "openrouter/google/gemini-3-pro-image" };
   cfg.agents!.defaults!.videoGenerationModel = { primary: "fal/kling-video-v3" };
@@ -523,7 +531,38 @@ async function openConversation(home: string, options: { compactionModel?: strin
     resetGlobalHookRunner();
     resetPluginRuntimeStateForTest();
   };
-  return { ask, cfg, cloudbath, runs, compactions, close };
+  /**
+   * A trusted plugin's own completion naming `model`, made from
+   * `before_dispatch` on every turn (inside the turn) or directly (outside any
+   * turn, as a background job would).
+   */
+  const explicitModelCompletion = (model: string) => () =>
+    withPluginRuntimePluginIdScope(EXPLICIT_MODEL_PLUGIN, () =>
+      llm.complete({ model, messages: [{ role: "user", content: "summarize" }] }),
+    );
+  const completeInEveryTurn = (model: string) => {
+    const complete = explicitModelCompletion(model);
+    addTestHook({
+      registry,
+      pluginId: EXPLICIT_MODEL_PLUGIN,
+      hookName: "before_dispatch",
+      handler: async () => {
+        await complete();
+        return undefined;
+      },
+      priority: 1_000,
+    });
+  };
+  return {
+    ask,
+    cfg,
+    cloudbath,
+    runs,
+    compactions,
+    close,
+    completeInEveryTurn,
+    completeInBackground: (model: string) => explicitModelCompletion(model)(),
+  };
 }
 
 type Conversation = Awaited<ReturnType<typeof openConversation>>;
@@ -717,6 +756,38 @@ describe("an owner-pinned text model owns every text request of the conversation
       expect(chat.modelCalls).toEqual([`main_agent ${DEEPSEEK}`, `tool_followup ${DEEPSEEK}`]);
       expect(runs.at(-1)?.sessionModelPinned).toBe(false);
       expect(await candidatesTried({ ...lastFallbackOptions(), cfg })).toEqual([DEEPSEEK, QWEN]);
+    });
+  });
+
+  it("J: a plugin naming its own model inside a pinned turn still gets the pin", async () => {
+    await inConversation(async ({ ask, completeInEveryTurn }) => {
+      await ask(PIN_LUNA);
+      completeInEveryTurn(DEEPSEEK);
+
+      const chat = await ask("สวัสดี");
+
+      expect(chat.modelCalls).toEqual([
+        `plugin_llm ${LUNA}`,
+        `main_agent ${LUNA}`,
+        `tool_followup ${LUNA}`,
+      ]);
+    });
+  });
+
+  it("J: without a pin, or outside the turn, a plugin's own model is used as named", async () => {
+    await inConversation(async ({ ask, completeInEveryTurn, completeInBackground }) => {
+      completeInEveryTurn(QWEN);
+      const unpinned = await ask("สวัสดี");
+      expect(unpinned.modelCalls).toEqual([
+        `plugin_llm ${QWEN}`,
+        `main_agent ${DEEPSEEK}`,
+        `tool_followup ${DEEPSEEK}`,
+      ]);
+
+      await ask(PIN_LUNA);
+      provider.requests.length = 0;
+      await completeInBackground(QWEN);
+      expect(provider.requests).toEqual([QWEN]);
     });
   });
 

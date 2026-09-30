@@ -452,21 +452,22 @@ export function createRuntimeLlm(
         });
       }
 
-      // The owner's pinned model outranks the agent's configured primary for any
-      // completion that names no model. Only a pin on this agent's own session
-      // counts; a cross-agent call keeps that agent's model.
-      const ownsSession = !sessionAgentId || normalizeAgentId(sessionAgentId) === agentId;
-      const pinnedSessionKey = requestedModel || !ownsSession ? undefined : sessionKey;
-      const pinned = pinnedSessionKey
-        ? resolvePinnedSessionModelRef({ cfg, sessionKey: pinnedSessionKey, agentId })
+      // Inside a conversation whose owner pinned a text model, that model is the
+      // only one: it outranks the request's own model and agent (still
+      // policy-checked above) and the agent default. Calls outside a pinned
+      // session keep what they asked for.
+      const sessionAgent = sessionAgentId ? normalizeAgentId(sessionAgentId) : agentId;
+      const pinned = sessionKey
+        ? resolvePinnedSessionModelRef({ cfg, sessionKey, agentId: sessionAgent })
         : undefined;
+      const completionAgentId = pinned ? sessionAgent : agentId;
       const preferredProfile =
         normalizeOptionalString(options.authority?.preferredProfile) ?? pinned?.authProfileId;
       // A pinned model that cannot be prepared fails the call below; it never
       // falls back to the configured default.
       const prepared = await prepareSimpleCompletionModelForAgent({
         cfg,
-        agentId,
+        agentId: completionAgentId,
         modelRef: pinned?.modelRef ?? params.model,
         preferredProfile,
         allowBundledStaticCatalogFallback: true,
@@ -521,8 +522,10 @@ export function createRuntimeLlm(
         caller,
         purpose: params.purpose,
         sessionKey,
-        modelSource: requestedModel ? "request" : pinned ? "session" : "agent",
-        agentId,
+        modelSource: pinned ? "session" : requestedModel ? "request" : "agent",
+        // A request the pin overrode, so a plugin author can see why.
+        ...(pinned && requestedModel ? { supersededModel: requestedModel } : {}),
+        agentId: completionAgentId,
         provider: prepared.selection.provider,
         model: prepared.selection.modelId,
         usage,
@@ -532,7 +535,7 @@ export function createRuntimeLlm(
         text,
         provider: prepared.selection.provider,
         model: prepared.selection.modelId,
-        agentId,
+        agentId: completionAgentId,
         usage,
         audit: {
           caller,
